@@ -41,6 +41,8 @@ from a **web admin UI**.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.
+- **Charts**: live running/queued chart on the dashboard (last 30 minutes); tokens, requests and
+  cost per day on the Usage page (server-rendered SVG, no scripts from elsewhere).
 - **Usage tracking**: request log (metadata only, never content) and daily usage per client and
   model, CSV export.
 - **Cost at official prices**: what your tokens would have cost on the model makers' own APIs

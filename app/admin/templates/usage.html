@@ -53,6 +53,8 @@ included — <a href="/admin/models#pricing">set a price</a>.</p>
 {% endif %}
 <p class="small muted">Estimates at the official per-token API prices (models.dev), not what you pay ArliAI.</p>
 
+<section class="charts">{% for chart in charts %}{{ chart | safe }}{% endfor %}</section>
+
 <h2>Per day (UTC)</h2>
 <div class="table-wrap">
 <table class="cards">

@@ -4,6 +4,7 @@ concurrency limits."""
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import dataclasses
 import functools
@@ -55,6 +56,7 @@ from .upstream import (
 log = logging.getLogger("queuerouter")
 
 HEALTH_INTERVAL_S = 30
+HISTORY_POINTS, HISTORY_EVERY_S = 360, 5  # dashboard chart: 30 minutes
 CATALOG_MAX_AGE_S = 3600
 
 
@@ -341,14 +343,22 @@ def create_app(
             limiter.seed(client, requests[client], tokens.get(client, []))
 
     price_attempt = [0.0]  # last catalog download attempt (at most hourly when failing)
+    history: collections.deque[tuple[float, int, int]] = collections.deque(maxlen=HISTORY_POINTS)
 
     async def background() -> None:
         """Wake waiters when circuit cooldowns end; write usage; probe broken upstreams; refresh
         model lists; prune old request rows."""
         last_health = 0.0
         last_prune = 0.0
+        last_sample = 0.0
+        peak = [0, 0]  # active, queued since the last sample
         while True:
             await asyncio.sleep(1)
+            peak[0], peak[1] = max(peak[0], queue.active), max(peak[1], queue.queued)
+            if time.monotonic() - last_sample >= HISTORY_EVERY_S:  # chart: the peak of each interval
+                last_sample = time.monotonic()
+                history.append((round(time.time()), peak[0], peak[1]))
+                peak[0] = peak[1] = 0
             if queue.queued:
                 queue.poke()
             await flush_usage()
@@ -544,6 +554,7 @@ def create_app(
             "recent": list(stats.recent)[-25:],
             "runs": runs.snapshot(),
             "alerts_unread": store.unread_notifications(),
+            "history": list(history),
         }
 
     async def probe(base_url: str, api_key: str) -> tuple[bool, str]:
