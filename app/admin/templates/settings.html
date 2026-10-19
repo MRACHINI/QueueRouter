@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+<p class="muted">Changes apply immediately, no restart needed.</p>
+<form method="post" action="/admin/settings" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  {% for section, fields in sections.items() %}
+  <fieldset class="card">
+    <legend>{{ section }}</legend>
+    <div class="grid">
+      {% for f in fields %}
+      {% if f.type == "bool" %}
+      <label class="check"><input type="checkbox" name="{{ f.name }}" {% if f.value %}checked{% endif %}>
+        <span>{{ f.label }}<br><small class="muted">{{ f.help }}</small></span></label>
+      {% else %}
+      <label>{{ f.label }}
+        <input type="number" name="{{ f.name }}" value="{{ f.value if f.value is not none else '' }}"
+               step="{{ '1' if f.type == 'int' else 'any' }}" min="{{ '-1' if f.name == 'max_retries' else '0' }}">
+        {% if f.help %}<small class="muted">{{ f.help }}</small>{% endif %}
+      </label>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </fieldset>
+  {% endfor %}
+  <div><button type="submit">Save settings</button></div>
+</form>
+{% endblock %}

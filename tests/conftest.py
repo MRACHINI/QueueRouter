@@ -53,7 +53,7 @@ def make_stack(tmp_path_factory):
     """
     servers: list[ServerThread] = []
 
-    def factory(limit: int = 2, **overrides) -> Stack:
+    def factory(limit: int = 2, bootstrap: dict | None = None, **overrides) -> Stack:
         mock_app = create_mock(limit)
         mock_server = ServerThread(mock_app)
         mock_url = mock_server.__enter__()
@@ -68,8 +68,8 @@ def make_stack(tmp_path_factory):
             retry_max_delay_s=0.2,
         )
         settings = dataclasses.replace(settings, **overrides)
-        bootstrap = Bootstrap(data_dir=str(tmp_path_factory.mktemp("data")), log_level="WARNING")
-        app = create_app(bootstrap, seed=settings)
+        boot = Bootstrap(data_dir=str(tmp_path_factory.mktemp("data")), log_level="WARNING", **(bootstrap or {}))
+        app = create_app(boot, seed=settings)
         proxy_server = ServerThread(app)
         proxy_url = proxy_server.__enter__()
         servers.append(proxy_server)

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Setup{% endblock %}
+{% block main_class %}narrow{% endblock %}
+{% block content %}
+<h1>Welcome to QueueRouter</h1>
+<p class="muted">Create the first <strong>owner</strong> account. The one-time setup token is printed
+in the container log (<code>docker compose logs queuerouter | grep setup_token</code>).</p>
+<form method="post" action="/admin/setup" class="card stack">
+  <label>Setup token <input name="token" required autocomplete="off" autofocus></label>
+  <label>Username <input name="username" required autocomplete="username" value="{{ username or '' }}"></label>
+  <label>Password <input name="password" type="password" required minlength="12" autocomplete="new-password"></label>
+  <label>Confirm password <input name="confirm" type="password" required minlength="12" autocomplete="new-password"></label>
+  <button type="submit">Create owner account</button>
+</form>
+{% endblock %}

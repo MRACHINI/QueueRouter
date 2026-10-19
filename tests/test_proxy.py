@@ -355,3 +355,13 @@ async def test_not_configured_without_upstream(make_stack):
         r = await c.post(f"{stack.url}/v1/chat/completions", headers=stack.headers, json=chat())
         assert r.status_code == 503 and r.json()["error"]["type"] == "not_configured"
         assert (await c.get(f"{stack.url}/health")).status_code == 200
+
+
+async def test_finish_reason_logged(make_stack):
+    """finish_reason=length shows a reply was cut off by the token limit (e.g. truncated tool calls)."""
+    stack = make_stack()
+    async with httpx.AsyncClient(timeout=30) as c:
+        await read_stream(c, stack.url, stack.headers, chat("cut", stream=True, mock_finish="length"))
+        await c.post(f"{stack.url}/v1/chat/completions", headers=stack.headers, json=chat("whole"))
+    recent = list(stack.app.state.stats.recent)
+    assert [r["finish_reason"] for r in recent] == ["length", "stop"]

@@ -37,6 +37,7 @@ class Stats:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.clients: dict[str, ClientStats] = {}
+        self.recent: deque[dict] = deque(maxlen=50)  # last request log entries, for the dashboard
 
     def record(
         self,
