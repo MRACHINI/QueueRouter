@@ -79,6 +79,7 @@ class RequestLog:
 def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     settings.validate()
     logging.basicConfig(level=settings.log_level, format="%(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # our own request log covers upstream calls
 
     queue = SlotQueue(settings.max_concurrency, settings.min_spacing_ms)
     stats = Stats()
