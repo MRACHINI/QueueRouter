@@ -231,6 +231,39 @@ function liveDashboard(root) {
     }
   };
 
+  // Running / queued lines from the server's samples ([ts, active, queued] every 5 s, 30 min).
+  function drawHistory(svg, points, capacity) {
+    if (!svg) return;
+    const W = 720, H = 160, L = 30, T = 8, B = 18, span = 1800;
+    const now = Date.now() / 1000;
+    const top = Math.max(2, capacity || 0, ...points.map((p) => Math.max(p[1], p[2])));
+    const x = (ts) => L + ((W - L) * (ts - (now - span))) / span;
+    const y = (v) => T + (H - T - B) * (1 - v / top);
+    const ns = "http://www.w3.org/2000/svg";
+    const el = (name, attrs, text) => {
+      const node = document.createElementNS(ns, name);
+      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+      if (text !== undefined) node.textContent = text;
+      return node;
+    };
+    const nodes = [];
+    for (const v of [0, Math.round(top / 2), top]) {
+      nodes.push(el("line", { class: "grid", x1: L, x2: W, y1: y(v), y2: y(v) }));
+      nodes.push(el("text", { class: "axis", x: L - 4, y: y(v) + 4, "text-anchor": "end" }, String(v)));
+    }
+    for (const [label, ago] of [["-30m", span], ["-15m", span / 2], ["now", 0]]) {
+      const anchor = ago === span ? "start" : ago === 0 ? "end" : "middle";
+      nodes.push(el("text", { class: "axis", x: x(now - ago), y: H - 4, "text-anchor": anchor }, label));
+    }
+    const visible = points.filter((p) => p[0] >= now - span);
+    for (const [index, css] of [[1, "s1"], [2, "s3"]]) {
+      if (!visible.length) break;
+      const path = visible.map((p) => `${x(p[0]).toFixed(1)},${y(p[index]).toFixed(1)}`).join(" ");
+      nodes.push(el("polyline", { class: `line ${css}`, points: path }));
+    }
+    svg.replaceChildren(...nodes);
+  }
+
   async function refresh() {
     if (document.hidden) return;
     let s;
@@ -265,6 +298,7 @@ function liveDashboard(root) {
     set("tokens_total", s.tokens.prompt + s.tokens.completion);
     set("uptime", s.uptime_s);
     set("upstream", s.upstream || "none");
+    drawHistory(document.getElementById("live-chart"), s.history || [], s.max_concurrency);
     const badge = document.getElementById("nav-alerts-count");
     if (badge) {
       badge.textContent = s.alerts_unread || 0;

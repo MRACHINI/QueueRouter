@@ -48,7 +48,7 @@ sent to your webhooks (Discord, Slack, ntfy or signed JSON).</p>
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <label class="check"><input type="checkbox" name="enabled" {% if r.enabled %}checked{% endif %}> on</label>
         {% if r.spec.threshold is not none %}
-        <label class="inline-field">{{ r.spec.unit }} <input type="number" name="threshold" min="0" step="any" value="{{ '%g' % r.threshold }}"></label>
+        <label class="inline-field">{{ r.spec.unit }} <input type="number" name="threshold" min="0" step="any" value="{{ r.threshold | int if r.threshold == r.threshold | int else r.threshold }}"></label>
         {% endif %}
         {% if r.spec.window_s is not none %}
         <label class="inline-field">{{ r.spec.window_label }} <input type="number" name="window_s" min="0" value="{{ r.window_s }}"></label>

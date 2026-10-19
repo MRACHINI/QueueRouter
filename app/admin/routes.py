@@ -35,6 +35,7 @@ from ..pricing import PriceCatalog, resolve, summarize_usage
 from ..slots import STRATEGIES
 from ..state import MODES
 from ..store import ROLES, Store
+from .charts import usage_charts
 from .security import (
     AdminSession,
     Sessions,
@@ -786,6 +787,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             totals=totals,
             plan_per_month=plan_per_month,
             catalog_loaded=bool(ctx.prices.prices),
+            charts=usage_charts(rows, days),
         )
 
     @app.get("/admin/usage.csv")

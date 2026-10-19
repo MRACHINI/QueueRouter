@@ -221,3 +221,20 @@ a.button.secondary { background: var(--bg); color: var(--text); border: 1px soli
   background: var(--danger); color: #fff; font-size: 0.75em; font-weight: 700; text-align: center; line-height: 1.5; }
 .nav-count[hidden] { display: none; }
 tr.unread td { background: color-mix(in srgb, var(--danger) 6%, transparent); }
+/* charts */
+.charts { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.chart-box { margin: 0; padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.chart-box figcaption { font-weight: 600; margin-bottom: 6px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.chart { display: block; width: 100%; height: auto; }
+.chart .grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart .axis { fill: var(--muted); font-size: 13px; }
+.chart .hit { fill: transparent; }
+.chart g:hover .hit { fill: color-mix(in srgb, var(--accent) 8%, transparent); }
+.chart .s1, .legend.s1::before { fill: var(--accent); background: var(--accent); }
+.chart .s2, .legend.s2::before { fill: color-mix(in srgb, var(--accent) 45%, var(--surface)); background: color-mix(in srgb, var(--accent) 45%, var(--surface)); }
+.chart .s3, .legend.s3::before { fill: var(--danger); background: var(--danger); }
+.chart .line { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.chart .line.s1 { stroke: var(--accent); }
+.chart .line.s3 { stroke: var(--danger); }
+.legend { font-weight: 400; font-size: 0.85em; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+.legend::before { content: ""; width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
