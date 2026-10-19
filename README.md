@@ -173,7 +173,7 @@ mechanism; the Windows URL just swaps the login command for a PowerShell one.)
 **Config file** — for older opencode, or if you prefer files: download it from the admin
 (**Clients → opencode.json** on the client's row), or with curl as below; save it as
 `opencode.json` in your project or point `OPENCODE_CONFIG` at it, then
-set `OPENCODE_CONFIG` to it and `QUEUEROUTER_KEY` to your key; re-run to refresh.
+set `QUEUEROUTER_KEY` to your key. Re-download to refresh.
 
 ```bash
 curl -H "Authorization: Bearer <client key>" https://queuerouter.example.com/v1/opencode-config -o ~/.config/opencode/queuerouter.json
