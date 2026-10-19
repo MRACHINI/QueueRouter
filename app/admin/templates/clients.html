@@ -65,7 +65,7 @@ shown once when created. Changes apply immediately.</p>
     <td colspan="5" data-label="">
         {% set p = c.policy %}
         <details class="policy">
-          <summary class="small">Limits{% if p.allowed_models or p.rate_limited or p.max_queued is not none or p.max_active is not none or p.total_timeout_s or p.queue_timeout_s or p.max_retries is not none or p.params or p.tags or p.run_max_tokens or p.run_max_requests or p.run_max_minutes or p.loop_threshold %} <span class="badge">set</span>{% endif %}</summary>
+          <summary class="small">Limits{% if p.allowed_models or p.rate_limited or p.max_queued is not none or p.max_active is not none or p.total_timeout_s or p.queue_timeout_s or p.max_retries is not none or p.params or p.tags or p.run_max_tokens or p.run_max_requests or p.run_max_minutes or p.loop_threshold or p.month_requests or p.month_tokens or p.month_cost_usd %} <span class="badge">set</span>{% endif %}</summary>
           <form method="post" action="/admin/clients/{{ c.id }}/policy" class="grid tight">
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <label class="span-all">Allowed models <small class="muted">comma-separated; empty = all</small>
@@ -88,6 +88,10 @@ shown once when created. Changes apply immediately.</p>
             <label>Run: max tokens <input type="number" name="run_max_tokens" min="1" value="{{ p.run_max_tokens if p.run_max_tokens is not none else '' }}"></label>
             <label>Run: max requests <input type="number" name="run_max_requests" min="1" value="{{ p.run_max_requests if p.run_max_requests is not none else '' }}"></label>
             <label>Run: max minutes <input type="number" step="any" name="run_max_minutes" min="0.1" value="{{ p.run_max_minutes if p.run_max_minutes is not none else '' }}"></label>
+            <label>Month: max requests <input type="number" name="month_requests" min="1" value="{{ p.month_requests if p.month_requests is not none else '' }}"></label>
+            <label>Month: max tokens <input type="number" name="month_tokens" min="1" value="{{ p.month_tokens if p.month_tokens is not none else '' }}"></label>
+            <label>Month: max cost (USD) <input type="number" step="any" name="month_cost_usd" min="0.01" value="{{ p.month_cost_usd if p.month_cost_usd is not none else '' }}"></label>
+            {% set m = month.get(c.name) %}{% if m %}<p class="small muted span-all">This month (UTC): {{ "{:,}".format(m.requests) }} requests · {{ "{:,}".format(m.tokens) }} tokens · ${{ "%.2f" | format(m.cost) }} at official prices. Over a monthly quota, requests get 429 until the month ends.</p>{% endif %}
             <label>Loop: same request ×N <input type="number" name="loop_threshold" min="2" value="{{ p.loop_threshold if p.loop_threshold is not none else '' }}" placeholder="off"></label>
             <label>On a loop
               <select name="loop_action">

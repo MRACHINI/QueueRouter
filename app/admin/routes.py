@@ -201,6 +201,7 @@ class AdminContext:
     opencode_config: Callable[[Request, str], Awaitable[dict | None]]
     alerts: Alerts
     restart: Callable[[], None]
+    month_usage: Callable[[str], object]
 
 
 class NeedLogin(Exception):
@@ -666,6 +667,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             priorities=PRIORITIES,
             live=live,
             plugin=plugin_install_commands(base),
+            month={c.name: ctx.month_usage(c.name) for c in store.list_clients()},
             now=time.time(),
             content_days=store.get_tunables().get("content_log_days", Settings().content_log_days),
             content_kb=store.get_tunables().get("content_log_max_kb", Settings().content_log_max_kb),
@@ -742,6 +744,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 run_max_requests=_opt(form, "run_max_requests", int, 1),
                 run_max_minutes=_opt(form, "run_max_minutes", float, 0.1),
                 loop_threshold=_opt(form, "loop_threshold", int, 2),
+                month_requests=_opt(form, "month_requests", int, 1),
+                month_tokens=_opt(form, "month_tokens", int, 1),
+                month_cost_usd=_opt(form, "month_cost_usd", float, 0.01),
                 loop_action="reject" if form.get("loop_action") == "reject" else "warn",
                 log_content=current.log_content,  # set with its own form (below)
                 log_content_until=current.log_content_until,

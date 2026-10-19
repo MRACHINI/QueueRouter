@@ -46,6 +46,9 @@ class ClientPolicy:
     run_max_minutes: float | None = None
     loop_threshold: int | None = None  # the same request this many times within 5 min = a loop
     loop_action: str = "warn"  # warn (log it) | reject (429)
+    month_requests: int | None = None  # per calendar month (UTC); beyond -> 429 until the next month
+    month_tokens: int | None = None
+    month_cost_usd: float | None = None  # at official prices (Usage page)
     log_content: bool = False  # keep prompts and replies (encrypted; admins with content permission)
     log_content_until: float | None = None  # epoch seconds; None = until turned off
 

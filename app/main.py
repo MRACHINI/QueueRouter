@@ -38,7 +38,8 @@ from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
 from .opencode import PLUGIN_PATH, model_limits, plugin_source, provider_config, wellknown_manifest
 from .params import apply_rules, parse_rules, requested_output, too_long
-from .pricing import PriceCatalog
+from .pricing import PriceCatalog, resolve, token_cost
+from .quotas import MonthlyUsage, month_of, over_quota, quota_share, seconds_to_next_month
 from .ratelimit import RateLimiter
 from .sessions import session_key
 from .slots import LANE_NAMES, LANES, Candidate, SlotQueue
@@ -321,9 +322,29 @@ def create_app(
 
     pending_usage: list[dict] = []
 
+    price_overrides: dict = {}
+
+    def cost_of(model: str, prompt: int, completion: int, cached: int) -> float:
+        costs = token_cost(resolve(model, price_overrides, prices), prompt, completion, cached)
+        return sum(costs) if costs else 0.0
+
+    monthly = MonthlyUsage(cost_of)
+
+    async def refresh_quotas() -> None:
+        """Re-read this month's usage (and prices); alert clients close to a monthly quota."""
+        price_overrides.clear()
+        price_overrides.update(await asyncio.to_thread(store.list_model_prices))
+        month = month_of(time.time())
+        monthly.refresh(await asyncio.to_thread(store.usage_month, month))
+        for key in snapshot.clients.values():
+            share = quota_share(key.policy, monthly.used(key.name))
+            if share is not None:
+                alerts.quota(key.name, share, month)
+
     def sink(entry: dict) -> None:
         pending_usage.append(entry)
         alerts.observe(entry)
+        monthly.observe(entry)
 
     stats.sink = sink
     pending_content: list[tuple[str, float, str, bytes, bytes]] = []
@@ -373,6 +394,7 @@ def create_app(
         last_health = 0.0
         last_prune = 0.0
         last_sample = 0.0
+        last_quota = 0.0
         peak = [0, 0]  # active, queued since the last sample
         while True:
             await asyncio.sleep(1)
@@ -394,6 +416,12 @@ def create_app(
                 await alerts.check_slow()
             except Exception as exc:  # alerts must never stop the loop
                 log.error(json.dumps({"event": "alert_check_failed", "error": repr(exc)[:200]}))
+            if time.monotonic() - last_quota > 60:
+                last_quota = time.monotonic()
+                try:
+                    await refresh_quotas()
+                except Exception as exc:
+                    log.error(json.dumps({"event": "quota_refresh_failed", "error": repr(exc)[:200]}))
             if cfg().price_catalog_enabled and prices.stale and time.time() - price_attempt[0] > 3600:
                 price_attempt[0] = time.time()
                 asyncio.ensure_future(prices.refresh(app.state.client))  # don't hold up the loop
@@ -438,6 +466,8 @@ def create_app(
             if target.usable:
                 asyncio.ensure_future(refresh_catalog(target))
         restore_rate_windows()
+        with contextlib.suppress(Exception):  # quotas are read again every minute anyway
+            await refresh_quotas()
         alerts.started(__version__)
         if requeued := job_runner.start():
             log.info(json.dumps({"event": "jobs_resumed", "jobs": requeued}))
@@ -498,6 +528,13 @@ def create_app(
         if policy.max_queued is not None and queue.client_queued(client.name) >= policy.max_queued:
             return error_response(
                 "too many queued requests for this key", 429, "client_queue_full", **{"Retry-After": "5"}
+            )
+        if reason := over_quota(policy, monthly.used(client.name)):
+            return error_response(
+                f"{reason}; it resets at the start of next month (UTC)",
+                429,
+                "monthly_quota_exceeded",
+                **{"Retry-After": str(seconds_to_next_month(time.time()))},
             )
         if policy.on_limit == "reject" and (wait := limiter.wait_s(client.name, policy)) > 0:
             alerts.client_limited(client.name, rejected=True)
@@ -642,6 +679,7 @@ def create_app(
             client_opencode_config,
             alerts,
             lambda: app.state.restart(),
+            lambda name: monthly.used(name),
         ),
     )
 
@@ -946,6 +984,16 @@ def create_app(
             return denied
         return {"version": __version__, **live_state()}
 
+    def month_view(client: ClientKey) -> dict:
+        used, p = monthly.used(client.name), client.policy
+        return {
+            "month": monthly.month,
+            "requests": used.requests,
+            "tokens": used.tokens,
+            "cost_usd": round(used.cost, 4),
+            "quota": {"requests": p.month_requests, "tokens": p.month_tokens, "cost_usd": p.month_cost_usd},
+        }
+
     @app.get("/v1/queue")
     async def get_queue(request: Request):
         """Queue hints for orchestrators deciding how many requests to send at once."""
@@ -962,6 +1010,7 @@ def create_app(
             "queued_by_lane": state["queued_by_lane"],
             "client": {"name": client.name, "priority": client.priority, **mine},
             "estimated_wait_ms": estimate_wait_ms(position),
+            "month": month_view(client),
         }
 
     @app.get("/v1/models")

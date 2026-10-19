@@ -895,6 +895,15 @@ class Store:
         values["tag"] = sorted(tags)
         return values
 
+    def usage_month(self, month: str) -> list[sqlite3.Row]:
+        """This month's usage per client and model (``month`` = YYYY-MM)."""
+        return self.query(
+            "SELECT client, model, SUM(requests) AS requests, SUM(prompt_tokens) AS prompt_tokens, "
+            "SUM(completion_tokens) AS completion_tokens, SUM(cached_tokens) AS cached_tokens "
+            "FROM usage_daily WHERE day >= ? AND day < ? GROUP BY client, model",
+            (f"{month}-01", f"{month}-32"),
+        )
+
     def usage(self, days: int = 30) -> list[sqlite3.Row]:
         """Usage per day, client and model (cost is computed per model, then grouped)."""
         since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86_400))
