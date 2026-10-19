@@ -1,0 +1,398 @@
+"""Async jobs and the OpenAI-compatible Batch API.
+
+A job is a normal API request that QueueRouter runs later, without the caller waiting: stored in
+SQLite (request and result encrypted), so it survives restarts. The worker feeds due jobs into the
+same pipeline as live requests (policies, aliases, fallbacks, usage), at the job's priority
+(``low`` by default) and never more than ``max_jobs_in_flight`` at once, so interactive users keep
+their slots. Batches are groups of jobs made from an uploaded JSONL file.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import ipaddress
+import json
+import logging
+import socket
+import sqlite3
+import time
+import uuid
+from collections.abc import Awaitable, Callable
+from datetime import datetime
+from urllib.parse import urlsplit
+
+import httpx
+
+from .store import JOB_DONE, Store
+
+log = logging.getLogger("queuerouter")
+
+MAX_ATTEMPTS = 3  # restarts while running
+BATCH_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/embeddings")
+WINDOWS = {"24h": 86_400}
+MAX_BATCH_LINES = 50_000
+CALLBACK_RETRY_S = (5, 30, 120)
+
+
+class JobError(ValueError):
+    """Bad job / batch input (answered with a 400)."""
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:24]}"
+
+
+def parse_time(value) -> float | None:
+    """Epoch seconds or ISO 8601 (``Z`` allowed) -> epoch seconds."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError as exc:
+        raise JobError(f"invalid time {value!r} (use ISO 8601 or epoch seconds)") from exc
+
+
+def check_endpoint(endpoint: str) -> str:
+    endpoint = "/" + endpoint.strip().lstrip("/")
+    if not endpoint.startswith("/v1/") or endpoint.split("/")[2] in ("jobs", "batches", "files"):
+        raise JobError(f"endpoint {endpoint!r} can't run as a job")
+    return endpoint
+
+
+def check_callback(url: str | None) -> str | None:
+    """Callbacks must be HTTPS to a public host (never into the server's own network)."""
+    if not url:
+        return None
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname:
+        raise JobError("callback_url must be an https:// URL")
+    if parts.hostname == "localhost" or parts.hostname.endswith((".localhost", ".internal", ".local")):
+        raise JobError("callback_url must be a public host")
+    try:
+        literal = ipaddress.ip_address(parts.hostname)
+    except ValueError:
+        literal = None  # a name: checked again when sending (after DNS)
+    if literal is not None and not literal.is_global:
+        raise JobError("callback_url must be a public host")
+    return url
+
+
+async def _public(host: str) -> bool:
+    infos = await asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    return bool(infos) and all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
+
+
+def new_job(client: str, body: dict, priority: str = "low") -> dict:
+    """A job from a ``POST /v1/jobs`` body."""
+    if not isinstance(body, dict) or not isinstance(body.get("request"), dict):
+        raise JobError("'request' (the API request body) is required")
+    request = dict(body["request"])
+    request.pop("stream", None)
+    request.pop("stream_options", None)
+    tags = body.get("tags") or []
+    if isinstance(tags, str):
+        tags = [t for t in tags.split(",") if t]
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        raise JobError("'tags' must be a list of strings")
+    run_at, deadline = parse_time(body.get("run_at")), parse_time(body.get("deadline"))
+    if run_at and deadline and deadline <= run_at:
+        raise JobError("'deadline' must be after 'run_at'")
+    wanted = body.get("priority", priority)
+    if wanted not in ("low", "normal", "high"):
+        raise JobError("'priority' must be low, normal or high")
+    return {
+        "id": new_id("job"),
+        "client": client,
+        "priority": wanted,
+        "endpoint": check_endpoint(str(body.get("endpoint") or "/v1/chat/completions")),
+        "request": request,
+        "run_at": run_at,
+        "deadline": deadline,
+        "idle_only": bool(body.get("idle_only")),
+        "callback_url": check_callback(body.get("callback_url")),
+        "callback_secret": body.get("callback_secret") or None,
+        "tags": [t.strip().lower()[:64] for t in tags][:10],
+    }
+
+
+def job_view(store: Store, row: sqlite3.Row, with_result: bool = True) -> dict:
+    status = row["status"]
+    if status == "queued" and row["run_at"] and row["run_at"] > time.time():
+        status = "scheduled"
+    view = {
+        "id": row["id"],
+        "object": "job",
+        "status": status,
+        "endpoint": row["endpoint"],
+        "priority": row["priority"],
+        "model": row["model"],
+        "batch_id": row["batch_id"],
+        "custom_id": row["custom_id"],
+        "tags": [t for t in (row["tags"] or "").split(",") if t],
+        "created_at": row["created"],
+        "run_at": row["run_at"],
+        "deadline": row["deadline"],
+        "idle_only": bool(row["idle_only"]),
+        "started_at": row["started"],
+        "finished_at": row["finished"],
+        "attempts": row["attempts"],
+        "status_code": row["status_code"],
+        "usage": {"prompt_tokens": row["prompt_tokens"], "completion_tokens": row["completion_tokens"]}
+        if row["prompt_tokens"] is not None
+        else None,
+        "error": row["error"],
+        "callback_status": row["callback_status"],
+    }
+    if with_result and row["status"] in JOB_DONE:
+        view["result"] = store.job_result(row)
+    return view
+
+
+# -- files and batches -----------------------------------------------------------------------
+
+
+def file_view(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "object": "file",
+        "bytes": row["bytes"],
+        "created_at": int(row["created"]),
+        "filename": row["filename"],
+        "purpose": row["purpose"],
+        "status": "processed",
+    }
+
+
+def batch_jobs(client: str, batch_id: str, endpoint: str, content: str, deadline: float) -> list[dict]:
+    """Jobs from the input JSONL (one request per line, as OpenAI batch files)."""
+    jobs, seen = [], set()
+    lines = [line for line in content.splitlines() if line.strip()]
+    if not lines:
+        raise JobError("the input file is empty")
+    if len(lines) > MAX_BATCH_LINES:
+        raise JobError(f"at most {MAX_BATCH_LINES} requests per batch")
+    for number, line in enumerate(lines, 1):
+        try:
+            item = json.loads(line)
+        except ValueError as exc:
+            raise JobError(f"line {number} isn't valid JSON") from exc
+        custom_id = item.get("custom_id") if isinstance(item, dict) else None
+        if not custom_id or custom_id in seen:
+            raise JobError(f"line {number}: 'custom_id' must be present and unique")
+        seen.add(custom_id)
+        if item.get("url") != endpoint or str(item.get("method", "POST")).upper() != "POST":
+            raise JobError(f"line {number}: every request must be POST {endpoint}")
+        if not isinstance(item.get("body"), dict):
+            raise JobError(f"line {number}: 'body' must be an object")
+        body = dict(item["body"])
+        body.pop("stream", None)
+        jobs.append(
+            {
+                "id": new_id("job"),
+                "client": client,
+                "batch_id": batch_id,
+                "custom_id": str(custom_id),
+                "priority": "low",
+                "endpoint": endpoint,
+                "request": body,
+                "deadline": deadline,
+                "tags": ["batch"],
+            }
+        )
+    return jobs
+
+
+def batch_view(store: Store, row: sqlite3.Row) -> dict:
+    counts = store.job_counts(row["id"])
+    done = counts.get("succeeded", 0)
+    failed = counts.get("failed", 0) + counts.get("expired", 0)
+    return {
+        "id": row["id"],
+        "object": "batch",
+        "endpoint": row["endpoint"],
+        "errors": None,
+        "input_file_id": row["input_file_id"],
+        "completion_window": row["completion_window"],
+        "status": row["status"],
+        "output_file_id": row["output_file_id"],
+        "error_file_id": row["error_file_id"],
+        "created_at": int(row["created"]),
+        "in_progress_at": int(row["created"]),
+        "expires_at": int(row["expires_at"]) if row["expires_at"] else None,
+        "finalizing_at": None,
+        "completed_at": int(row["finished_at"]) if row["finished_at"] and row["status"] == "completed" else None,
+        "failed_at": None,
+        "expired_at": None,
+        "cancelling_at": int(row["cancelled_at"]) if row["cancelled_at"] else None,
+        "cancelled_at": int(row["finished_at"]) if row["finished_at"] and row["status"] == "cancelled" else None,
+        "request_counts": {"total": row["total"], "completed": done, "failed": failed},
+        "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+    }
+
+
+def finish_batch_if_done(store: Store, batch_id: str) -> bool:
+    """Once every job of a batch is done, write the output / error files (OpenAI's format)."""
+    batch = store.get_batch(batch_id)
+    if batch is None or batch["status"] not in ("in_progress", "cancelling"):
+        return False
+    counts = store.job_counts(batch_id)
+    if any(status not in JOB_DONE for status in counts):
+        return False
+    outputs, errors = [], []
+    for row in reversed(store.list_jobs(batch_id=batch_id, limit=MAX_BATCH_LINES)):
+        line_id = f"batch_req_{row['id'][4:]}"
+        if row["status"] == "succeeded":
+            outputs.append(
+                {
+                    "id": line_id,
+                    "custom_id": row["custom_id"],
+                    "response": {
+                        "status_code": row["status_code"],
+                        "request_id": row["id"],
+                        "body": store.job_result(row),
+                    },
+                    "error": None,
+                }
+            )
+        else:
+            code = {"expired": "batch_expired", "cancelled": "batch_cancelled"}.get(row["status"], "request_failed")
+            errors.append(
+                {
+                    "id": line_id,
+                    "custom_id": row["custom_id"],
+                    "response": {
+                        "status_code": row["status_code"],
+                        "request_id": row["id"],
+                        "body": store.job_result(row),
+                    }
+                    if row["status_code"]
+                    else None,
+                    "error": {"code": code, "message": row["error"] or row["status"]},
+                }
+            )
+    fields: dict = {
+        "status": "cancelled" if batch["status"] == "cancelling" else "completed",
+        "finished_at": time.time(),
+    }
+    for name, lines in (("output_file_id", outputs), ("error_file_id", errors)):
+        if lines:
+            file_id = new_id("file")
+            content = "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines)
+            store.create_file(
+                file_id, batch["client"], "batch_output", f"{batch_id}_{name[:-8]}.jsonl", content.encode()
+            )
+            fields[name] = file_id
+    store.update_batch(batch_id, **fields)
+    return True
+
+
+# -- the worker ------------------------------------------------------------------------------
+
+
+class JobRunner:
+    """Moves due jobs into the pipeline. ``execute(job_row, request) -> (status_code, body bytes)``."""
+
+    def __init__(
+        self,
+        store: Store,
+        execute: Callable[[sqlite3.Row, dict], Awaitable[tuple[int, bytes]]],
+        http: Callable[[], httpx.AsyncClient],
+        usage_of: Callable[[bytes], tuple],
+    ) -> None:
+        self.store = store
+        self.execute = execute
+        self._http = http
+        self._usage_of = usage_of
+        self.running: dict[str, asyncio.Task] = {}
+        self._callbacks: set[asyncio.Task] = set()
+
+    def start(self) -> int:
+        """At startup: jobs a previous run was in the middle of go back in the queue."""
+        return self.store.requeue_running_jobs(MAX_ATTEMPTS)
+
+    async def tick(self, max_in_flight: int, live_waiting: int) -> None:
+        now = time.time()
+        for batch_id in await asyncio.to_thread(self.store.expire_jobs, now):
+            await asyncio.to_thread(finish_batch_if_done, self.store, batch_id)
+        free = max_in_flight - len(self.running)
+        if free <= 0:
+            return
+        for row in await asyncio.to_thread(self.store.due_jobs, now, free * 4):
+            if free <= 0:
+                break
+            if row["idle_only"] and live_waiting > 0:
+                continue  # spare capacity only
+            if row["id"] in self.running or not await asyncio.to_thread(self.store.claim_job, row["id"]):
+                continue
+            free -= 1
+            task = asyncio.get_running_loop().create_task(self._run(row))
+            self.running[row["id"]] = task
+            task.add_done_callback(lambda _, job_id=row["id"]: self.running.pop(job_id, None))
+
+    async def _run(self, row: sqlite3.Row) -> None:
+        job_id = row["id"]
+        try:
+            request = self.store.job_request(row)
+            status, body = await self.execute(row, request)
+            try:
+                result = json.loads(body) if body else None
+            except ValueError:
+                result = {"raw": body.decode("utf-8", "replace")[:100_000]}
+            fields: dict = {"status_code": status, "result": result, "model": request.get("model")}
+            if status < 400:
+                prompt, completion, _ = self._usage_of(body)
+                fields.update(prompt_tokens=prompt, completion_tokens=completion)
+                await asyncio.to_thread(self.store.finish_job, job_id, "succeeded", **fields)
+            else:
+                message = (result or {}).get("error", {}).get("message") if isinstance(result, dict) else None
+                fields["error"] = str(message or f"HTTP {status}")[:1000]
+                await asyncio.to_thread(self.store.finish_job, job_id, "failed", **fields)
+        except asyncio.CancelledError:  # shutdown: it runs again after the restart
+            await asyncio.to_thread(self.store.set_job_fields, job_id, status="queued", started=None)
+            raise
+        except Exception as exc:
+            log.error(json.dumps({"event": "job_failed", "job": job_id, "error": repr(exc)[:300]}))
+            await asyncio.to_thread(self.store.finish_job, job_id, "failed", error=f"internal error: {exc!r}"[:1000])
+        if row["batch_id"]:
+            await asyncio.to_thread(finish_batch_if_done, self.store, row["batch_id"])
+        if row["callback_url"]:  # in its own task: retries must not hold a job slot
+            task = asyncio.get_running_loop().create_task(self._callback(job_id))
+            self._callbacks.add(task)
+            task.add_done_callback(self._callbacks.discard)
+
+    async def _callback(self, job_id: str) -> None:
+        row = await asyncio.to_thread(self.store.get_job, job_id)
+        if row is None:
+            return
+        body = json.dumps(job_view(self.store, row)).encode()
+        headers = {"content-type": "application/json", "user-agent": "QueueRouter"}
+        if row["callback_secret"]:
+            secret = self.store.decrypt(row["callback_secret"])
+            headers["x-queuerouter-signature"] = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        status = "failed"
+        for attempt, delay in enumerate((0, *CALLBACK_RETRY_S)):
+            await asyncio.sleep(delay)
+            try:
+                if not await _public(urlsplit(row["callback_url"]).hostname or ""):
+                    status = "refused: not a public address"
+                    break
+                resp = await self._http().post(row["callback_url"], content=body, headers=headers, timeout=15)
+                if resp.status_code < 300:
+                    status = "delivered"
+                    break
+                status = f"HTTP {resp.status_code}"
+            except (httpx.HTTPError, OSError) as exc:
+                status = type(exc).__name__
+            if attempt == len(CALLBACK_RETRY_S):
+                break
+        await asyncio.to_thread(self.store.set_job_fields, job_id, callback_status=status)
+
+    async def stop(self) -> None:
+        tasks = [*self.running.values(), *self._callbacks]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Jobs{% endblock %}
+{% block content %}
+<h1>Jobs</h1>
+<p class="muted">Requests that run later, without the caller waiting: <code>POST /v1/jobs</code>, any request with
+<code>X-QueueRouter-Async: true</code>, or OpenAI batches. They run at low priority, a few at a time
+(<a href="/admin/settings">Settings → Jobs</a>), and survive restarts. Prompts and results are stored encrypted
+and never shown here.</p>
+
+{% if batches %}
+<h2>Batches</h2>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Batch</th><th>Client</th><th>Status</th><th>Progress</th><th></th></tr></thead>
+  <tbody>
+  {% for b in batches %}
+  <tr>
+    <td data-label="Batch" class="mono wrap-any"><a href="/admin/jobs?batch={{ b.id }}">{{ b.id }}</a>
+      <div class="small muted"><time data-ts="{{ b.created_at }}">{{ b.created_at }}</time></div></td>
+    <td data-label="Client">{{ b.client }}</td>
+    <td data-label="Status"><span class="badge {{ 'ok' if b.status == 'completed' else '' }}">{{ b.status }}</span></td>
+    <td data-label="Progress">{{ b.request_counts.completed }} done · {{ b.request_counts.failed }} failed · {{ b.request_counts.total }} total</td>
+    <td data-label="">
+      {% if b.status == "in_progress" and user.can("operator") %}
+      <form method="post" action="/admin/batches/{{ b.id }}/cancel" data-confirm="Cancel the rest of batch {{ b.id }}?">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="danger">Cancel</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<h2>Jobs</h2>
+<form method="get" action="/admin/jobs" class="row wrap">
+  <select name="status" aria-label="Status">
+    <option value="">any status</option>
+    {% for s in statuses %}<option value="{{ s }}" {% if s == status %}selected{% endif %}>{{ s }}</option>{% endfor %}
+  </select>
+  <input name="client" value="{{ client }}" placeholder="client" aria-label="Client">
+  <input name="batch" value="{{ batch }}" placeholder="batch id" aria-label="Batch">
+  <button type="submit" class="secondary">Filter</button>
+</form>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Job</th><th>Client</th><th>Status</th><th>Model</th><th>Tokens</th><th></th></tr></thead>
+  <tbody>
+  {% for j in jobs %}
+  <tr>
+    <td data-label="Job" class="mono wrap-any">{{ j.id }}{% if j.custom_id %} <span class="small muted">({{ j.custom_id }})</span>{% endif %}
+      <div class="small muted">created <time data-ts="{{ j.created_at }}">{{ j.created_at }}</time>
+        {% if j.run_at and j.run_at > now %} · runs <time data-ts="{{ j.run_at }}">{{ j.run_at }}</time>{% endif %}
+        {% if j.idle_only %} · idle only{% endif %}{% if j.tags %} · {{ j.tags | join(", ") }}{% endif %}</div></td>
+    <td data-label="Client">{{ j.client }} <span class="badge {{ j.priority }}">{{ j.priority }}</span></td>
+    <td data-label="Status"><span class="badge {{ 'ok' if j.status == 'succeeded' else 'high' if j.status in ('failed', 'expired') else '' }}">{{ j.status }}</span>
+      {% if j.error %}<div class="small muted">{{ j.error }}</div>{% endif %}
+      {% if j.callback_status %}<div class="small muted">callback: {{ j.callback_status }}</div>{% endif %}</td>
+    <td data-label="Model" class="wrap-any">{{ j.model or "" }}</td>
+    <td data-label="Tokens">{% if j.usage %}{{ j.usage.prompt_tokens }} / {{ j.usage.completion_tokens }}{% endif %}</td>
+    <td data-label="">
+      {% if user.can("operator") %}
+      {% if j.status in ("queued", "scheduled") %}
+      <form method="post" action="/admin/jobs/{{ j.id }}/cancel">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="secondary">Cancel</button>
+      </form>
+      {% elif j.status in ("failed", "expired", "cancelled") and not j.batch_id %}
+      <form method="post" action="/admin/jobs/{{ j.id }}/retry">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="secondary">Retry</button>
+      </form>
+      {% endif %}
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">No jobs.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

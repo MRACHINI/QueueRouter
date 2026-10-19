@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import __version__, totp
+from .. import jobs as jobs_mod
 from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
 from ..auth import AuthGuard, client_ip
@@ -99,6 +100,16 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Usage",
         "Keep request log (days)",
         "Per-request metadata rows; 0 = keep none. Daily totals are kept forever.",
+    ),
+    "max_jobs_in_flight": (
+        "Jobs",
+        "Jobs at once",
+        "Async jobs and batch requests running at the same time; live requests keep the other slots.",
+    ),
+    "job_retention_days": (
+        "Jobs",
+        "Keep finished jobs (days)",
+        "Finished jobs, batches and their result files are deleted after this.",
     ),
     "backup_keep_days": (
         "Backup",
@@ -1290,6 +1301,59 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 return await staged(request, session, path, upload.filename)
             finally:
                 os.remove(path)
+
+    # -- jobs ------------------------------------------------------------------------------
+
+    @app.get("/admin/jobs")
+    async def jobs_page(request: Request):
+        session = require(request, "viewer")
+        q = request.query_params
+        status, client, batch = q.get("status") or None, q.get("client") or None, q.get("batch") or None
+        rows = await asyncio.to_thread(store.list_jobs, client, status, None, batch, 300)
+        batches = await asyncio.to_thread(store.query, "SELECT * FROM batches ORDER BY created DESC LIMIT 30")
+        return page(
+            request,
+            "jobs.html",
+            session,
+            jobs=[jobs_mod.job_view(store, r, with_result=False) | {"client": r["client"]} for r in rows],
+            batches=[jobs_mod.batch_view(store, b) | {"client": b["client"]} for b in batches],
+            statuses=("queued", "running", "succeeded", "failed", "cancelled", "expired"),
+            status=status or "",
+            client=client or "",
+            batch=batch or "",
+            now=time.time(),
+        )
+
+    @app.post("/admin/jobs/{job_id}/cancel")
+    async def jobs_cancel_admin(job_id: str, request: Request):
+        session, _ = await require_post(request, "operator")
+        row = store.get_job(job_id)
+        if row is not None and store.cancel_jobs([job_id]):
+            store.audit(session.user.username, "job.cancel", job_id)
+            if row["batch_id"]:
+                jobs_mod.finish_batch_if_done(store, row["batch_id"])
+        return back("/admin/jobs", "saved")
+
+    @app.post("/admin/jobs/{job_id}/retry")
+    async def jobs_retry_admin(job_id: str, request: Request):
+        session, _ = await require_post(request, "operator")
+        row = store.get_job(job_id)
+        if row is None or row["batch_id"] or not store.retry_job(job_id):
+            return back("/admin/jobs", error="invalid")
+        store.audit(session.user.username, "job.retry", job_id)
+        return back("/admin/jobs", "saved")
+
+    @app.post("/admin/batches/{batch_id}/cancel")
+    async def batches_cancel_admin(batch_id: str, request: Request):
+        session, _ = await require_post(request, "operator")
+        batch = store.get_batch(batch_id)
+        if batch is None or batch["status"] != "in_progress":
+            return back("/admin/jobs", error="invalid")
+        store.update_batch(batch_id, status="cancelling", cancelled_at=time.time())
+        store.cancel_jobs(None, batch_id)
+        jobs_mod.finish_batch_if_done(store, batch_id)
+        store.audit(session.user.username, "batch.cancel", batch_id)
+        return back("/admin/jobs", "saved")
 
     # -- audit ---------------------------------------------------------------------------
 

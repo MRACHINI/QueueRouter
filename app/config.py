@@ -174,6 +174,8 @@ TUNABLES: dict[str, type] = {
     "models_cache_s": float,
     "request_log_days": int,
     "backup_keep_days": int,
+    "max_jobs_in_flight": int,
+    "job_retention_days": int,
     "price_catalog_enabled": bool,
     "context_check": bool,
     "sticky_routing": bool,
@@ -221,6 +223,8 @@ class Settings:
     models_cache_s: float = 300
     request_log_days: int = 30  # per-request rows kept this long (0 = don't keep rows; daily totals always)
     backup_keep_days: int = 7  # daily automatic database copies in /data/backups (0 = off)
+    max_jobs_in_flight: int = 1  # async jobs / batch requests running at once (live requests keep the rest)
+    job_retention_days: int = 7  # finished jobs, batches and their files are deleted after this
     price_catalog_enabled: bool = True  # fetch official prices from models.dev daily (for cost estimates)
     context_check: bool = True  # refuse prompts that clearly exceed the model's context before queuing
     sticky_routing: bool = True  # send a conversation back to the upstream that served it (warm cache)
