@@ -112,6 +112,16 @@ SPECS: dict[str, RuleSpec] = {
             "days",
         ),
         RuleSpec(
+            "quota",
+            "Monthly quota",
+            "A client used this share of a monthly quota (and again when it's used up).",
+            "warning",
+            True,
+            32 * 86_400,
+            80,
+            "% used",
+        ),
+        RuleSpec(
             "backup_failed",
             "Automatic backup failed",
             "The daily database copy couldn't be written (disk full, permissions...).",
@@ -311,6 +321,25 @@ class Alerts:
             f"Client {client} hit its rate limit",
             f"Its requests are {how} until the limit window frees up.",
         )
+
+    def quota(self, client: str, share: float, month: str) -> None:
+        """Once per month at the threshold, and once more when the quota is used up."""
+        rule = self.rules["quota"]
+        if share >= 1:
+            self.fire(
+                "quota",
+                f"{client}:{month}:full",
+                f"Client {client} used up a monthly quota",
+                "Its requests are refused (429) until next month, or raise the quota.",
+                "error",
+            )
+        elif share * 100 >= (rule.threshold or 80):
+            self.fire(
+                "quota",
+                f"{client}:{month}:near",
+                f"Client {client} used {share:.0%} of a monthly quota",
+                f"Month {month}.",
+            )
 
     def observe(self, entry: dict) -> None:
         """Every finished request (for the error rate)."""
