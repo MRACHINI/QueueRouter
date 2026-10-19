@@ -61,6 +61,7 @@ MESSAGES = {
     "pool_in_use": "That pool is still used by upstreams; move or delete them first.",
     "rules_invalid": "Parameter rules must be a JSON object with defaults / overrides / clamps / strip "
     "(see the example).",
+    "client_unavailable": "That client is disabled or expired; enable it first.",
     "refresh_failed": "Couldn't download prices from models.dev right now; the previous list is kept.",
 }
 
@@ -132,6 +133,7 @@ class AdminContext:
     prices: PriceCatalog
     refresh_prices: Callable[[], Awaitable[bool]]
     playground: Callable[[Request, str, bytes], Awaitable[Response]]
+    opencode_config: Callable[[Request, str], Awaitable[dict | None]]
 
 
 class NeedLogin(Exception):
@@ -534,6 +536,21 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             return back("/admin/clients", error="invalid")
         ctx.reload()
         return back("/admin/clients", "saved")
+
+    @app.get("/admin/clients/{client_id}/opencode.json")
+    async def clients_opencode(client_id: int, request: Request):
+        """Download the opencode config for this client (key left as {env:QUEUEROUTER_KEY})."""
+        session = require(request, "admin")
+        target = next((c for c in store.list_clients() if c.id == client_id), None)
+        config = await ctx.opencode_config(request, target.name) if target else None
+        if config is None:
+            return back("/admin/clients", error="client_unavailable")
+        store.audit(session.user.username, "client.opencode_config", target.name)
+        return Response(
+            json.dumps(config, indent=2, ensure_ascii=False),
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="opencode.json"'},
+        )
 
     @app.post("/admin/clients/{client_id}/regenerate")
     async def clients_regenerate(client_id: int, request: Request):

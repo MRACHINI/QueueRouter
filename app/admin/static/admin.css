@@ -215,3 +215,5 @@ textarea.rules { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace
 .bubble.user { align-self: flex-end; background: var(--accent); color: var(--accent-text); }
 .bubble.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); }
 .bubble.error { border-color: var(--danger); color: var(--danger); }
+a.button { display: inline-block; text-decoration: none; font-weight: 600; padding: 8px 14px; border-radius: 8px; }
+a.button.secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }

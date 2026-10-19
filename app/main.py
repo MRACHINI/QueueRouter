@@ -538,6 +538,13 @@ def create_app(
     async def refresh_prices() -> bool:
         return await prices.refresh(app.state.client)
 
+    async def client_opencode_config(request: Request, client_name: str) -> dict | None:
+        """The same config /v1/opencode-config gives that client (for the admin download)."""
+        client = next((c for c in snapshot.clients.values() if c.name == client_name), None)
+        if client is None:
+            return None
+        return provider_config(public_base(request), await opencode_models(client))
+
     async def playground(request: Request, client_name: str, body: bytes) -> Response:
         """Admin Playground: a chat request *as* a client, through the normal pipeline."""
         client = next((c for c in snapshot.clients.values() if c.name == client_name), None)
@@ -559,6 +566,7 @@ def create_app(
             prices,
             refresh_prices,
             playground,
+            client_opencode_config,
         ),
     )
 
