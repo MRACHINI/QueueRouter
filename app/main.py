@@ -100,7 +100,10 @@ class RequestLog:
             f["completion_tokens"],
             client=f["client"] or "default",
         )
-        stats.recent.append({**f, "ts": time.time()})
+        entry = {**f, "ts": time.time()}
+        stats.recent.append(entry)
+        if stats.sink:
+            stats.sink(entry)
         log.info(json.dumps(f))
 
 
@@ -246,13 +249,47 @@ def create_app(
     async def refresh_catalog(target: Target) -> bool:
         return await catalogs.refresh(app.state.client, target.id, target.upstream.base_url, target.api_key)
 
+    pending_usage: list[dict] = []
+    stats.sink = pending_usage.append
+
+    async def flush_usage() -> None:
+        """Write finished requests to the database off the event loop."""
+        if not pending_usage:
+            return
+        rows = pending_usage[:]
+        pending_usage.clear()
+        try:
+            await asyncio.to_thread(store.record_requests, rows, cfg().request_log_days > 0)
+        except Exception as exc:  # never let logging break serving
+            log.error(json.dumps({"event": "usage_write_failed", "error": repr(exc)[:200], "rows": len(rows)}))
+
+    def restore_rate_windows() -> None:
+        """After a restart, rebuild the last 24 h of rate-limit windows from the request log."""
+        requests: dict[str, list[float]] = {}
+        tokens: dict[str, list[tuple[float, int]]] = {}
+        for row in store.recent_activity(time.time() - 86_400):
+            started = row["ts"]  # close enough: rows are written when requests finish
+            requests.setdefault(row["client"], []).append(started)
+            used = (row["prompt_tokens"] or 0) + (row["completion_tokens"] or 0)
+            if used:
+                tokens.setdefault(row["client"], []).append((started, used))
+        for client in requests:
+            limiter.seed(client, requests[client], tokens.get(client, []))
+
     async def background() -> None:
-        """Wake waiters when circuit cooldowns end; probe broken upstreams; refresh model lists."""
+        """Wake waiters when circuit cooldowns end; write usage; probe broken upstreams; refresh
+        model lists; prune old request rows."""
         last_health = 0.0
+        last_prune = 0.0
         while True:
             await asyncio.sleep(1)
             if queue.queued:
                 queue.poke()
+            await flush_usage()
+            if time.monotonic() - last_prune > 3600:
+                last_prune = time.monotonic()
+                if cfg().request_log_days > 0:
+                    await asyncio.to_thread(store.prune_requests, cfg().request_log_days)
             if time.monotonic() - last_health < HEALTH_INTERVAL_S:
                 continue
             last_health = time.monotonic()
@@ -280,9 +317,11 @@ def create_app(
         for target in snapshot.upstreams.values():
             if target.usable:
                 asyncio.ensure_future(refresh_catalog(target))
+        restore_rate_windows()
         task = asyncio.ensure_future(background())
         yield
         task.cancel()
+        await flush_usage()
         await app.state.client.aclose()
         store.close()
 

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Usage{% endblock %}
+{% block content %}
+<div class="row between wrap">
+  <h1>Usage</h1>
+  <form method="get" action="/admin/usage" class="row wrap">
+    <select name="days" aria-label="Period">
+      {% for d in (1, 7, 30, 90, 365) %}<option value="{{ d }}" {% if d == days %}selected{% endif %}>last {{ d }} day{{ "s" if d > 1 }}</option>{% endfor %}
+    </select>
+    <select name="by" aria-label="Group">
+      <option value="">by client</option>
+      <option value="model" {% if by_model %}selected{% endif %}>by client and model</option>
+    </select>
+    <button type="submit" class="secondary">Show</button>
+    <a href="/admin/usage.csv?days={{ days }}{% if by_model %}&amp;by=model{% endif %}">CSV</a>
+  </form>
+</div>
+
+<section class="tiles">
+  <div class="tile"><div class="tile-label">Requests</div><div class="tile-value">{{ "{:,}".format(totals.requests) }}</div></div>
+  <div class="tile"><div class="tile-label">Errors</div><div class="tile-value">{{ "{:,}".format(totals.errors) }}</div></div>
+  <div class="tile"><div class="tile-label">Tokens in</div><div class="tile-value">{{ "{:,}".format(totals.prompt_tokens) }}</div></div>
+  <div class="tile"><div class="tile-label">Tokens out</div><div class="tile-value">{{ "{:,}".format(totals.completion_tokens) }}</div></div>
+</section>
+
+<h2>Per day (UTC)</h2>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Day</th><th>Client</th>{% if by_model %}<th>Model</th>{% endif %}<th>Requests</th><th>Errors</th><th>Tokens in</th><th>Tokens out</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td data-label="Day">{{ r.day }}</td>
+    <td data-label="Client">{{ r.client }}</td>
+    {% if by_model %}<td data-label="Model" class="wrap-any">{{ r.model }}</td>{% endif %}
+    <td data-label="Requests">{{ "{:,}".format(r.requests) }}</td>
+    <td data-label="Errors">{{ "{:,}".format(r.errors) }}</td>
+    <td data-label="Tokens in">{{ "{:,}".format(r.prompt_tokens) }}</td>
+    <td data-label="Tokens out">{{ "{:,}".format(r.completion_tokens) }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="7" class="muted">No usage recorded in this period.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
