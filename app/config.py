@@ -184,6 +184,10 @@ TUNABLES: dict[str, type] = {
     "content_log_days": int,
     "content_log_max_kb": int,
     "structured_repair": bool,
+    "metrics_token": str,
+    "otel_endpoint": str,
+    "otel_headers": str,
+    "otel_service_name": str,
     "price_catalog_enabled": bool,
     "context_check": bool,
     "sticky_routing": bool,
@@ -193,6 +197,7 @@ TUNABLES: dict[str, type] = {
     "circuit_threshold": int,
     "circuit_cooldown_s": float,
 }
+SECRET_TUNABLES = frozenset({"metrics_token", "otel_headers"})  # stored encrypted, never shown back
 
 
 @dataclass(frozen=True)
@@ -236,6 +241,10 @@ class Settings:
     content_log_days: int = 7  # logged prompts/replies (clients with content logging on) kept this long
     content_log_max_kb: int = 256  # per request and per reply; longer ones are cut
     structured_repair: bool = True  # fix broken JSON replies (JSON mode, tool-call arguments)
+    metrics_token: str = ""  # /metrics needs "Authorization: Bearer <token>"; empty = /metrics is off
+    otel_endpoint: str = ""  # OTLP/HTTP collector base URL (traces go to <it>/v1/traces); empty = off
+    otel_headers: str = ""  # extra headers for the collector, "key=value,key2=value2"
+    otel_service_name: str = "queuerouter"
     price_catalog_enabled: bool = True  # fetch official prices from models.dev daily (for cost estimates)
     context_check: bool = True  # refuse prompts that clearly exceed the model's context before queuing
     sticky_routing: bool = True  # send a conversation back to the upstream that served it (warm cache)

@@ -20,6 +20,16 @@
       {% elif f.type == "bool" %}
       <label class="check"><input type="checkbox" name="{{ f.name }}" {% if f.value %}checked{% endif %}>
         <span>{{ f.label }}<br><small class="muted">{{ f.help }}</small></span></label>
+      {% elif f.type == "str" %}
+      <label>{{ f.label }}
+        {% if f.secret %}
+        <input type="password" name="{{ f.name }}" autocomplete="off" placeholder="{{ 'set — leave blank to keep' if f.value else 'not set' }}">
+        {% if f.value %}<span class="check small"><input type="checkbox" name="clear_{{ f.name }}"> clear</span>{% endif %}
+        {% else %}
+        <input type="text" name="{{ f.name }}" value="{{ f.value or '' }}">
+        {% endif %}
+        {% if f.help %}<small class="muted">{{ f.help }}</small>{% endif %}
+      </label>
       {% else %}
       <label>{{ f.label }}
         <input type="number" name="{{ f.name }}" value="{{ f.value if f.value is not none else '' }}"

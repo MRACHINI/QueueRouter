@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from .config import PRIORITIES, TUNABLES, ClientPolicy, Settings, parse_access_keys
+from .config import PRIORITIES, SECRET_TUNABLES, TUNABLES, ClientPolicy, Settings, parse_access_keys
 
 log = logging.getLogger("queuerouter")
 
@@ -605,6 +605,8 @@ class Store:
         parsed = parse_access_keys(seed.access_keys)
         with self.tx() as db:
             for name, value in seed.tunables().items():
+                if name in SECRET_TUNABLES and value:
+                    value = self.encrypt(value)
                 db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (name, json.dumps(value)))
                 summary["settings"] += 1
             if seed.upstream_api_key:
@@ -652,7 +654,10 @@ class Store:
         values = {}
         for row in self.query("SELECT key, value FROM settings"):
             if row["key"] in TUNABLES:
-                values[row["key"]] = TUNABLES[row["key"]](json.loads(row["value"]))
+                value = json.loads(row["value"])
+                if row["key"] in SECRET_TUNABLES and value:
+                    value = self.decrypt(value)
+                values[row["key"]] = TUNABLES[row["key"]](value)
         return values
 
     def set_tunables(self, values: dict[str, object], actor: str) -> None:
@@ -661,8 +666,16 @@ class Store:
             raise ValueError(f"unknown settings: {', '.join(sorted(unknown))}")
         with self.tx() as db:
             for name, value in values.items():
-                db.execute(_UPSERT.format(table="settings"), (name, json.dumps(TUNABLES[name](value))))
-        self.audit(actor, "settings.update", "", values)
+                value = TUNABLES[name](value)
+                if name in SECRET_TUNABLES and value:
+                    value = self.encrypt(value)  # stored encrypted like upstream keys
+                db.execute(_UPSERT.format(table="settings"), (name, json.dumps(value)))
+        self.audit(
+            actor,
+            "settings.update",
+            "",
+            {k: ("(secret changed)" if k in SECRET_TUNABLES else v) for k, v in values.items()},
+        )
 
     # -- pools and upstreams -------------------------------------------------------------
 
@@ -1257,6 +1270,9 @@ class Store:
                     [(now, r["id"]) for r in rows],
                 )
         return sorted({r["batch_id"] for r in rows if r["batch_id"]})
+
+    def jobs_by_status(self) -> dict[str, int]:
+        return {r["status"]: r["n"] for r in self.query("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")}
 
     def job_counts(self, batch_id: str) -> dict[str, int]:
         rows = self.query("SELECT status, COUNT(*) AS n FROM jobs WHERE batch_id = ? GROUP BY status", (batch_id,))

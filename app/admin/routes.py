@@ -30,7 +30,7 @@ from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
 from ..auth import AuthGuard, client_ip
 from ..backup import MAX_UPLOAD_BYTES, RestoreError, backup_path, list_backups, make_archive, stage_restore
-from ..config import ON_LIMIT, PRIORITIES, TUNABLES, Bootstrap, ClientPolicy, Settings
+from ..config import ON_LIMIT, PRIORITIES, SECRET_TUNABLES, TUNABLES, Bootstrap, ClientPolicy, Settings
 from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
@@ -130,6 +130,22 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "When a JSON-mode reply or tool-call arguments aren't valid JSON, fix common breakage "
         "(code fences, extra text, trailing commas, unclosed brackets).",
     ),
+    "metrics_token": (
+        "Monitoring",
+        "Prometheus token",
+        "Enables /metrics; Prometheus sends it as a bearer token (authorization.credentials).",
+    ),
+    "otel_endpoint": (
+        "Monitoring",
+        "OpenTelemetry collector URL",
+        "OTLP/HTTP base URL, e.g. http://otel-collector:4318 — traces go to /v1/traces. Empty = off.",
+    ),
+    "otel_headers": (
+        "Monitoring",
+        "Collector headers",
+        "Optional, e.g. authorization=Bearer abc,x-tenant=me (stored encrypted).",
+    ),
+    "otel_service_name": ("Monitoring", "Service name", "service.name on every trace."),
     "backup_keep_days": (
         "Backup",
         "Daily backups to keep",
@@ -426,7 +442,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                     "label": label,
                     "help": help_text,
                     "type": TUNABLES[name].__name__,
-                    "value": values.get(name),
+                    "secret": name in SECRET_TUNABLES,
+                    "value": bool(values.get(name)) if name in SECRET_TUNABLES else values.get(name),
                     "choices": SETTING_CHOICES.get(name, ()),
                 }
             )
@@ -441,11 +458,17 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 kind = TUNABLES[name]
                 if kind is bool:
                     values[name] = form.get(name) == "on"
-                elif kind is str:
+                elif kind is str and name in SETTING_CHOICES:
                     if name in form:
-                        if form[name] not in SETTING_CHOICES.get(name, ()):
+                        if form[name] not in SETTING_CHOICES[name]:
                             raise ValueError(name)
                         values[name] = form[name]
+                elif kind is str:
+                    text = str(form.get(name, "")).strip()[:1000]
+                    if form.get(f"clear_{name}") == "on":
+                        values[name] = ""
+                    elif text or name not in SECRET_TUNABLES:  # a blank secret field keeps the secret
+                        values[name] = text
                 elif name in form and form[name] != "":
                     values[name] = kind(form[name])
                     if values[name] < -1 or (name != "max_retries" and values[name] < 0):

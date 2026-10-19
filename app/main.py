@@ -8,6 +8,7 @@ import collections
 import contextlib
 import dataclasses
 import functools
+import hmac
 import json
 import logging
 import math
@@ -24,7 +25,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from . import __version__, anthropic_api, content_log, responses_api, structured
+from . import __version__, anthropic_api, content_log, metrics, responses_api, structured
 from . import jobs as jobs_mod
 from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
@@ -915,6 +916,24 @@ def create_app(
     async def opencode_plugin(request: Request):
         """The opencode plugin (session tags, priorities, model list); holds no secrets."""
         return Response(plugin_source(public_base(request)), media_type="text/javascript; charset=utf-8")
+
+    @app.get("/metrics")
+    async def prometheus(request: Request):
+        """Prometheus metrics; needs the metrics token from Settings (404 while none is set)."""
+        token = cfg().metrics_token
+        presented = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        if not token:
+            return error_response("not found", 404, "not_found")
+        ip = client_ip(request, bootstrap.trusted_proxies)
+        if guard.is_blocked(ip):
+            return error_response("too many failed attempts", 429, "blocked")
+        if not hmac.compare_digest(presented.encode(), token.encode()):
+            guard.fail(ip)
+            return error_response("invalid metrics token", 401, "invalid_api_key")
+        jobs_now = await asyncio.to_thread(store.jobs_by_status)
+        return Response(
+            metrics.render(stats, live_state(), jobs_now, __version__), media_type="text/plain; version=0.0.4"
+        )
 
     @app.get("/health")
     async def health() -> dict:
