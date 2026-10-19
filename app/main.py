@@ -8,6 +8,7 @@ import contextlib
 import json
 import logging
 import math
+import os
 import sys
 import time
 import uuid
@@ -26,6 +27,7 @@ from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .opencode import model_limits, provider_config, wellknown_manifest
+from .pricing import PriceCatalog
 from .ratelimit import RateLimiter
 from .sessions import session_key
 from .slots import LANE_NAMES, LANES, Candidate, SlotQueue
@@ -86,6 +88,7 @@ class RequestLog:
             "retries": 0,
             "prompt_tokens": None,
             "completion_tokens": None,
+            "cached_tokens": None,
             "finish_reason": None,
             "target_model": None,
         }
@@ -176,6 +179,8 @@ def create_app(
     snapshot = load_snapshot(store)
     stats = Stats()
     catalogs = Catalogs()
+    prices = PriceCatalog(os.path.join(bootstrap.data_dir, "models-dev-prices.json"))
+    prices.load_file()
     circuits = Circuits()
     guard = AuthGuard(snapshot.settings.auth_fail_limit, snapshot.settings.auth_block_s)
 
@@ -279,6 +284,8 @@ def create_app(
         for client in requests:
             limiter.seed(client, requests[client], tokens.get(client, []))
 
+    price_attempt = [0.0]  # last catalog download attempt (at most hourly when failing)
+
     async def background() -> None:
         """Wake waiters when circuit cooldowns end; write usage; probe broken upstreams; refresh
         model lists; prune old request rows."""
@@ -289,6 +296,9 @@ def create_app(
             if queue.queued:
                 queue.poke()
             await flush_usage()
+            if cfg().price_catalog_enabled and prices.stale and time.time() - price_attempt[0] > 3600:
+                price_attempt[0] = time.time()
+                asyncio.ensure_future(prices.refresh(app.state.client))  # don't hold up the loop
             if time.monotonic() - last_prune > 3600:
                 last_prune = time.monotonic()
                 if cfg().request_log_days > 0:
@@ -336,6 +346,7 @@ def create_app(
     app.state.bootstrap = bootstrap
     app.state.stats = stats
     app.state.circuits = circuits
+    app.state.prices = prices
 
     # -- helpers ---------------------------------------------------------------------------
 
@@ -463,7 +474,15 @@ def create_app(
     def models_by_upstream() -> dict[str, list[str]]:
         return {t.upstream.name: sorted(catalogs.ids(t.id) or []) for t in snapshot.upstreams.values()}
 
-    mount_admin(app, AdminContext(store, bootstrap, reload, live_state, probe, upstream_info, models_by_upstream))
+    async def refresh_prices() -> bool:
+        return await prices.refresh(app.state.client)
+
+    mount_admin(
+        app,
+        AdminContext(
+            store, bootstrap, reload, live_state, probe, upstream_info, models_by_upstream, prices, refresh_prices
+        ),
+    )
 
     # -- the attempt loop ----------------------------------------------------------------
 
@@ -853,10 +872,11 @@ def create_app(
                         status = response.status_code
                         outcome = "done" if status < 400 else "error"
                         if status < 400:
-                            prompt, completion = usage_from_body(content)
+                            prompt, completion, cached = usage_from_body(content)
                             rlog.fields.update(
                                 prompt_tokens=prompt,
                                 completion_tokens=completion,
+                                cached_tokens=cached,
                                 finish_reason=finish_reason_from_body(content),
                             )
                         headers = response_headers(response.headers)
@@ -957,6 +977,7 @@ def create_app(
                 upstream_ms=upstream_ms,
                 prompt_tokens=sniffer.prompt_tokens,
                 completion_tokens=sniffer.completion_tokens,
+                cached_tokens=sniffer.cached_tokens,
                 finish_reason=sniffer.finish_reason,
             )
             limiter.record_tokens(adm.client, (sniffer.prompt_tokens or 0) + (sniffer.completion_tokens or 0))

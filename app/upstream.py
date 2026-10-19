@@ -84,12 +84,19 @@ def retry_delay(attempt: int, headers: Mapping[str, str] | None, base: float, ca
 _FINISH_REASON = re.compile(rb'"finish_reason"\s*:\s*"([A-Za-z_]+)"')
 
 
-def usage_from_body(body: bytes) -> tuple[int | None, int | None]:
+def usage_from_body(body: bytes) -> tuple[int | None, int | None, int | None]:
+    """(prompt, completion, cached prompt) tokens from an OpenAI-style ``usage`` object."""
     try:
         usage = json.loads(body).get("usage") or {}
     except (ValueError, AttributeError):
-        return None, None
-    return usage.get("prompt_tokens"), usage.get("completion_tokens")
+        return None, None, None
+    if not isinstance(usage, dict):
+        return None, None, None
+    details = usage.get("prompt_tokens_details") or {}
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    if cached is None:
+        cached = usage.get("prompt_cache_hit_tokens")  # DeepSeek's naming
+    return usage.get("prompt_tokens"), usage.get("completion_tokens"), cached if isinstance(cached, int) else None
 
 
 def finish_reason_from_body(body: bytes) -> str | None:
@@ -105,6 +112,7 @@ class UsageSniffer:
         self._buffer = b""
         self.prompt_tokens: int | None = None
         self.completion_tokens: int | None = None
+        self.cached_tokens: int | None = None
         self.finish_reason: str | None = None
 
     def feed(self, chunk: bytes) -> None:
@@ -119,6 +127,6 @@ class UsageSniffer:
                 self.finish_reason = reason
             if b'"usage"' in line:
                 payload = line[5:].strip()
-                prompt, completion = usage_from_body(payload)
+                prompt, completion, cached = usage_from_body(payload)
                 if prompt is not None or completion is not None:
-                    self.prompt_tokens, self.completion_tokens = prompt, completion
+                    self.prompt_tokens, self.completion_tokens, self.cached_tokens = prompt, completion, cached

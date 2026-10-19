@@ -204,3 +204,6 @@ fieldset.plain { border: 0; padding: 0; margin: 0; }
 ul.columns { columns: 16em; margin: 8px 0 0; padding-left: 18px; }
 tr.policy-row td { padding-top: 0; }
 tr:has(+ tr.policy-row) td { border-bottom: 0; }
+
+input.price { width: 6.5em; }
+.tile-value.good { color: var(--ok-text); }

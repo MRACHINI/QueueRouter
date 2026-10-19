@@ -27,13 +27,14 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
         <select name="plan" aria-label="ArliAI plan" data-plan-select>
           <option value="">custom limits</option>
           {% for plan in arliai_plans %}
-          <option value="{{ plan.name }}" data-concurrency="{{ plan.max_concurrency }}" data-context="{{ plan.context_cap }}"
+          <option value="{{ plan.name }}" data-concurrency="{{ plan.max_concurrency }}" data-context="{{ plan.context_cap }}" data-price="{{ plan.monthly_price }}"
             {% if p.plan == "ArliAI " ~ plan.name %}selected{% endif %}>ArliAI {{ plan.name }}</option>
           {% endfor %}
         </select>
         <label class="inline-field">parallel <input type="number" name="max_concurrency" min="1" max="1000" value="{{ p.max_concurrency }}" required></label>
         <label class="inline-field">context cap <input type="number" name="context_cap" min="1" value="{{ p.context_cap or '' }}" placeholder="—"></label>
         <label class="inline-field">spacing ms <input type="number" name="min_spacing_ms" min="0" value="{{ p.min_spacing_ms }}"></label>
+        <label class="inline-field">$ / month <input type="number" step="any" name="monthly_price" min="0" value="{{ p.monthly_price if p.monthly_price is not none else '' }}" placeholder="—"></label>
         <button type="submit" class="secondary">Save</button>
       </form>
     </td>
@@ -130,12 +131,13 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
     <select name="plan" data-plan-select>
       <option value="">custom limits</option>
       {% for plan in arliai_plans %}
-      <option value="{{ plan.name }}" data-concurrency="{{ plan.max_concurrency }}" data-context="{{ plan.context_cap }}">ArliAI {{ plan.name }} — {{ plan.max_concurrency }} parallel</option>
+      <option value="{{ plan.name }}" data-concurrency="{{ plan.max_concurrency }}" data-context="{{ plan.context_cap }}" data-price="{{ plan.monthly_price }}">ArliAI {{ plan.name }} — {{ plan.max_concurrency }} parallel</option>
       {% endfor %}
     </select>
   </label>
   <label data-new-pool>Parallel requests <input type="number" name="max_concurrency" min="1" max="1000" placeholder="from preset"></label>
   <label data-new-pool>Context cap <input type="number" name="context_cap" min="1" placeholder="optional"></label>
+  <label data-new-pool>Plan price ($ / month) <input type="number" step="any" name="monthly_price" min="0" placeholder="optional, for savings"></label>
   <label>Weight <input type="number" name="weight" min="1" max="100" value="1"></label>
   <div class="align-end"><button type="submit">Add upstream</button></div>
 </form>

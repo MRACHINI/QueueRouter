@@ -166,6 +166,7 @@ TUNABLES: dict[str, type] = {
     "auth_block_s": float,
     "models_cache_s": float,
     "request_log_days": int,
+    "price_catalog_enabled": bool,
     "lb_strategy": str,
     "circuit_threshold": int,
     "circuit_cooldown_s": float,
@@ -207,6 +208,7 @@ class Settings:
 
     models_cache_s: float = 300
     request_log_days: int = 30  # per-request rows kept this long (0 = don't keep rows; daily totals always)
+    price_catalog_enabled: bool = True  # fetch official prices from models.dev daily (for cost estimates)
 
     # Several upstreams
     lb_strategy: str = "least-busy"  # least-busy | weighted | ordered (failover)
