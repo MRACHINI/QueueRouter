@@ -74,6 +74,7 @@ def make_stack(tmp_path_factory):
         proxy_server = ServerThread(app)
         proxy_url = proxy_server.__enter__()
         servers.append(proxy_server)
+        mock_app.state.mock["url"] = mock_url
         return Stack(proxy_url, mock_app.state.mock, {"Authorization": f"Bearer {ACCESS_KEY}"}, app)
 
     yield factory

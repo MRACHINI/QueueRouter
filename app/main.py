@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 from . import __version__
 from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
+from .alerts import Alerts
 from .auth import AuthGuard, client_ip, find_client, ip_in, presented_key
 from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
@@ -211,6 +212,7 @@ def create_app(
     prices = PriceCatalog(os.path.join(bootstrap.data_dir, "models-dev-prices.json"))
     prices.load_file()
     circuits = Circuits()
+    alerts = Alerts(store, lambda: app.state.client)
     guard = AuthGuard(snapshot.settings.auth_fail_limit, snapshot.settings.auth_block_s)
 
     def available(upstream_id: int) -> bool:
@@ -231,7 +233,10 @@ def create_app(
         policy = policy_of(ticket.client)
         if policy.max_active is not None and queue.client_active(ticket.client) >= policy.max_active:
             return False
-        return limiter.wait_s(ticket.client, policy) <= 0  # on_limit=delay: wait in the queue
+        if limiter.wait_s(ticket.client, policy) > 0:  # on_limit=delay: wait in the queue
+            alerts.client_limited(ticket.client, rejected=False)
+            return False
+        return True
 
     affinity: dict[str, tuple[int, float]] = {}  # session -> (upstream id, last used, monotonic)
 
@@ -293,6 +298,7 @@ def create_app(
         target = snapshot.upstreams.get(upstream_id)
         name = target.upstream.name if target else upstream_id
         log.warning(json.dumps({"event": "circuit", "upstream": name, "state": state, "reason": reason}))
+        alerts.circuit(str(name), state, reason)
         if state == "closed":
             queue.poke()
 
@@ -303,7 +309,12 @@ def create_app(
         return await catalogs.refresh(app.state.client, target.id, target.upstream.base_url, target.api_key)
 
     pending_usage: list[dict] = []
-    stats.sink = pending_usage.append
+
+    def sink(entry: dict) -> None:
+        pending_usage.append(entry)
+        alerts.observe(entry)
+
+    stats.sink = sink
 
     async def flush_usage() -> None:
         """Write finished requests to the database off the event loop."""
@@ -341,6 +352,11 @@ def create_app(
             if queue.queued:
                 queue.poke()
             await flush_usage()
+            try:
+                alerts.check(queue.queued, queue.oldest_wait_s())
+                await alerts.check_slow()
+            except Exception as exc:  # alerts must never stop the loop
+                log.error(json.dumps({"event": "alert_check_failed", "error": repr(exc)[:200]}))
             if cfg().price_catalog_enabled and prices.stale and time.time() - price_attempt[0] > 3600:
                 price_attempt[0] = time.time()
                 asyncio.ensure_future(prices.refresh(app.state.client))  # don't hold up the loop
@@ -348,6 +364,7 @@ def create_app(
                 last_prune = time.monotonic()
                 if cfg().request_log_days > 0:
                     await asyncio.to_thread(store.prune_requests, cfg().request_log_days)
+                await asyncio.to_thread(store.prune_notifications)
             if time.monotonic() - last_health < HEALTH_INTERVAL_S:
                 continue
             last_health = time.monotonic()
@@ -376,10 +393,13 @@ def create_app(
             if target.usable:
                 asyncio.ensure_future(refresh_catalog(target))
         restore_rate_windows()
+        alerts.started(__version__)
         task = asyncio.ensure_future(background())
         yield
         task.cancel()
         await flush_usage()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(alerts.drain(), 15)
         await app.state.client.aclose()
         store.close()
 
@@ -392,6 +412,7 @@ def create_app(
     app.state.stats = stats
     app.state.circuits = circuits
     app.state.prices = prices
+    app.state.alerts = alerts
 
     # -- helpers ---------------------------------------------------------------------------
 
@@ -430,6 +451,7 @@ def create_app(
                 "too many queued requests for this key", 429, "client_queue_full", **{"Retry-After": "5"}
             )
         if policy.on_limit == "reject" and (wait := limiter.wait_s(client.name, policy)) > 0:
+            alerts.client_limited(client.name, rejected=True)
             return error_response(
                 "rate limit reached for this key", 429, "rate_limited", **{"Retry-After": str(math.ceil(wait))}
             )
@@ -521,6 +543,7 @@ def create_app(
             **stats.snapshot(),
             "recent": list(stats.recent)[-25:],
             "runs": runs.snapshot(),
+            "alerts_unread": store.unread_notifications(),
         }
 
     async def probe(base_url: str, api_key: str) -> tuple[bool, str]:
@@ -567,6 +590,7 @@ def create_app(
             refresh_prices,
             playground,
             client_opencode_config,
+            alerts,
         ),
     )
 

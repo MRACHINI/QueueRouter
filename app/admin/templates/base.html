@@ -19,6 +19,7 @@
       <a href="/admin" {% if path == "/admin" %}aria-current="page"{% endif %}>Dashboard</a>
       <a href="/admin/requests" {% if path == "/admin/requests" %}aria-current="page"{% endif %}>Requests</a>
       <a href="/admin/usage" {% if path == "/admin/usage" %}aria-current="page"{% endif %}>Usage</a>
+      <a href="/admin/alerts" {% if path == "/admin/alerts" %}aria-current="page"{% endif %}>Alerts<span class="nav-count" id="nav-alerts-count" {% if not alerts_unread %}hidden{% endif %}>{{ alerts_unread }}</span></a>
       {% if user.can("operator") %}<a href="/admin/playground" {% if path == "/admin/playground" %}aria-current="page"{% endif %}>Playground</a>{% endif %}
       {% if user.can("admin") %}
       <a href="/admin/clients" {% if path.startswith("/admin/clients") %}aria-current="page"{% endif %}>Clients</a>
