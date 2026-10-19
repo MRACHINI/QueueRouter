@@ -1067,7 +1067,9 @@ Two-factor sign-in (TOTP + recovery codes) and an NVIDIA provider preset as v0.9
 daily automatic copies, staged restore applied on a self-restart) as v0.10.0. Anthropic Messages and
 OpenAI Responses adapters as v0.11.0 (tested with the official Python SDKs). Async jobs, the
 `X-QueueRouter-Async` header and the OpenAI Batch API as v0.12.0 (callbacks: HTTPS to public hosts only,
-HMAC-signed when the job gives a `callback_secret`).
+HMAC-signed when the job gives a `callback_secret`). Opt-in content logging and
+structured-output repair as v0.13.0 — **Phase 2 complete**. Notes: repair is local only (no automatic
+re-ask) and for non-streaming replies; JSON Schema is not validated beyond parsing.
 
 ### Phase 3 — Extras
 Prometheus metrics, monthly token quotas, recurring (cron) jobs, OpenTelemetry.

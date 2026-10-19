@@ -53,6 +53,12 @@ from a **web admin UI**.
   then QueueRouter restarts itself to load it (the previous data is kept).
 - **Charts**: live running/queued chart on the dashboard (last 30 minutes); tokens, requests and
   cost per day on the Usage page (server-rendered SVG, no scripts from elsewhere).
+- **Structured-output repair**: JSON-mode replies and tool-call arguments with common breakage
+  (code fences, extra text, trailing commas, cut-off brackets) are fixed before they reach the app
+  (`X-QueueRouter-Structured: repaired | invalid`).
+- **Opt-in content logging** per client (optionally for N hours): prompts and replies stored
+  encrypted, readable only by admins with the content permission (every view audited); the client
+  sees `X-QueueRouter-Logging: on`.
 - **Usage tracking**: request log (metadata only, never content) and daily usage per client and
   model, CSV export.
 - **Cost at official prices**: what your tokens would have cost on the model makers' own APIs

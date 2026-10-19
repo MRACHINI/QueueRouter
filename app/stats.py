@@ -39,6 +39,7 @@ class Stats:
         self.clients: dict[str, ClientStats] = {}
         self.recent: deque[dict] = deque(maxlen=50)  # last request log entries, for the dashboard
         self.sink = None  # optional callable(entry) receiving every finished request (usage log)
+        self.content_sink = None  # optional callable(request id, client, request bytes, reply bytes)
 
     def record(
         self,
