@@ -95,6 +95,23 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Consecutive failures before an upstream is taken out of rotation.",
     ),
     "circuit_cooldown_s": ("Upstreams", "Circuit cooldown (s)", "Then one trial request decides if it's back."),
+    "sticky_routing": (
+        "Upstreams",
+        "Sticky routing",
+        "Send a conversation back to the upstream that served it (warm prompt cache).",
+    ),
+    "affinity_wait_s": (
+        "Upstreams",
+        "Sticky wait (s)",
+        "How long to wait for that upstream when it's busy before using another.",
+    ),
+    "affinity_ttl_s": ("Upstreams", "Sticky memory (s)", "Forget a conversation's upstream after this long."),
+    "context_check": (
+        "Queue",
+        "Context-length check",
+        "Refuse prompts that clearly exceed the model's context before they wait.",
+    ),
+    "price_catalog_enabled": ("Usage", "Official price catalog", "Download reference prices from models.dev daily."),
     "allow_no_auth": ("Security", "Allow without key", "Only when no clients exist. Private networks only!"),
     "max_body_mb": ("Security", "Max request body (MB)", ""),
     "auth_fail_limit": ("Security", "Auth failures per minute", "Before an IP is temporarily blocked."),
@@ -306,7 +323,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         session, form = await require_post(request, "admin")
         values: dict[str, object] = {}
         try:
-            for name, kind in TUNABLES.items():
+            for name in SETTING_HELP:  # only what the page shows: an absent checkbox isn't "off"
+                kind = TUNABLES[name]
                 if kind is bool:
                     values[name] = form.get(name) == "on"
                 elif kind is str:
