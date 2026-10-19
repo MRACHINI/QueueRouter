@@ -1024,6 +1024,20 @@ basic Dashboard.
 
 Tool-call passthrough tests from day one. Dark mode + mobile layout from the first UI page.
 
+**Status: shipped as v0.3.0** (slices: store → admin auth/UI → clients → upstreams/pools/
+failover/circuits → policies/modes → aliases → usage). Differences from the plan above:
+- Request **tags** moved to Phase 1b (with sessions/run ids, where they're most useful).
+- Usage pages and the request log (planned for Phase 2) shipped now; charts are still Phase 2.
+- Aliases are single-target; **fallback chains** remain Phase 1b.
+- Retries on 5xx/connection errors **fail over** to another upstream (re-queued with the same
+  place in line); 429 still keeps the slot and backs off on the same upstream.
+- While every upstream for a request is down, the request **waits in the queue** (circuit
+  breakers + health probes bring upstreams back) instead of erroring, unless a queue/total
+  timeout applies.
+- Maintenance mode lets in-flight requests finish rather than aborting them after a grace period.
+- Client keys use SHA-256 lookup (not constant-time compare over all keys): the hash lookup
+  doesn't leak key prefixes and scales.
+
 ### Phase 1b — Smarter routing + agents
 Fallback chains (incl. refusal fallback), context-length pre-check, default/forced parameters,
 sticky routing, session-aware scheduling + fair share, run budgets, loop detection, queue-depth
