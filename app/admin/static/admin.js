@@ -93,7 +93,116 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const dashboard = document.getElementById("dashboard");
   if (dashboard) liveDashboard(dashboard);
+  const playground = document.getElementById("playground");
+  if (playground) playgroundPage(playground);
 });
+
+function playgroundPage(root) {
+  const $ = (id) => document.getElementById(id);
+  const log = $("pg-log");
+  const meta = $("pg-meta");
+  let history = [];
+
+  const bubble = (role, text) => {
+    const div = document.createElement("div");
+    div.className = "bubble " + role;
+    div.textContent = text;
+    log.append(div);
+    div.scrollIntoView({ block: "end" });
+    return div;
+  };
+
+  $("pg-clear").addEventListener("click", () => { history = []; log.replaceChildren(); meta.textContent = ""; });
+  $("pg-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("pg-form").requestSubmit(); }
+  });
+
+  $("pg-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = $("pg-input").value.trim();
+    if (!text) return;
+    $("pg-input").value = "";
+    $("pg-send").disabled = true;
+    history.push({ role: "user", content: text });
+    bubble("user", text);
+    const out = bubble("assistant", "…");
+    const stream = $("pg-stream").checked;
+    const system = $("pg-system").value.trim();
+    const payload = {
+      client: $("pg-client").value,
+      model: $("pg-model").value.trim(),
+      messages: (system ? [{ role: "system", content: system }] : []).concat(history),
+      stream,
+      max_tokens: Number($("pg-max").value) || undefined,
+    };
+    if (stream) payload.stream_options = { include_usage: true };
+    const started = performance.now();
+    let answer = "";
+    let usage = null;
+    let failed = null;
+    try {
+      const response = await fetch("/admin/playground/send", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": root.dataset.csrf },
+        body: JSON.stringify(payload),
+      });
+      const position = response.headers.get("x-queuerouter-position");
+      meta.textContent = position && position !== "0" ? `queued at position ${position}…` : "running…";
+      if (!stream || !response.body || !(response.headers.get("content-type") || "").includes("event-stream")) {
+        const data = await response.json();
+        if (data.error) failed = data.error.message || JSON.stringify(data.error);
+        else {
+          answer = data.choices?.[0]?.message?.content ?? "";
+          usage = data.usage;
+        }
+        const model = response.headers.get("x-queuerouter-model");
+        if (model) meta.dataset.model = model;
+      } else {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+          for (const line of lines) {
+            if (line.startsWith(": ")) { meta.textContent = line.slice(2); continue; }
+            if (!line.startsWith("data:")) continue;
+            const data = line.slice(5).trim();
+            if (data === "[DONE]") continue;
+            try {
+              const chunk = JSON.parse(data);
+              if (chunk.error) { failed = chunk.error.message || JSON.stringify(chunk.error); continue; }
+              const delta = chunk.choices?.[0]?.delta?.content;
+              if (delta) { answer += delta; out.textContent = answer; out.scrollIntoView({ block: "end" }); }
+              if (chunk.usage) usage = chunk.usage;
+            } catch (_) { /* partial or non-JSON line */ }
+          }
+        }
+      }
+    } catch (error) {
+      failed = String(error);
+    }
+    const seconds = ((performance.now() - started) / 1000).toFixed(1);
+    if (failed) {
+      out.textContent = "Error: " + failed;
+      out.classList.add("error");
+      history.pop();
+    } else {
+      out.textContent = answer || "(empty reply)";
+      history.push({ role: "assistant", content: answer });
+    }
+    const tokens = usage ? ` · ${usage.prompt_tokens ?? "?"} in / ${usage.completion_tokens ?? "?"} out tokens` : "";
+    const model = meta.dataset.model ? ` · model ${meta.dataset.model}` : "";
+    meta.textContent = `${seconds} s${tokens}${model}`;
+    delete meta.dataset.model;
+    $("pg-send").disabled = false;
+    $("pg-input").focus();
+  });
+}
 
 function liveDashboard(root) {
   const endpoint = root.dataset.endpoint;

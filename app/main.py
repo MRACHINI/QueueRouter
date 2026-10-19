@@ -538,10 +538,27 @@ def create_app(
     async def refresh_prices() -> bool:
         return await prices.refresh(app.state.client)
 
+    async def playground(request: Request, client_name: str, body: bytes) -> Response:
+        """Admin Playground: a chat request *as* a client, through the normal pipeline."""
+        client = next((c for c in snapshot.clients.values() if c.name == client_name), None)
+        if client is None:
+            return error_response(f"no enabled client named '{client_name}'", 404, "unknown_client")
+        headers = {"content-type": "application/json", "x-queuerouter-tags": "playground"}
+        return await serve(request, client, "chat/completions", body, headers=headers)
+
     mount_admin(
         app,
         AdminContext(
-            store, bootstrap, reload, live_state, probe, upstream_info, models_by_upstream, prices, refresh_prices
+            store,
+            bootstrap,
+            reload,
+            live_state,
+            probe,
+            upstream_info,
+            models_by_upstream,
+            prices,
+            refresh_prices,
+            playground,
         ),
     )
 
@@ -910,8 +927,16 @@ def create_app(
             if size > max_body:
                 return error_response(f"request body exceeds {cfg().max_body_mb} MB", 413, "request_too_large")
             chunks.append(chunk)
-        body = b"".join(chunks)
+        return await serve(request, client, path, b"".join(chunks))
 
+    async def serve(
+        request: Request, client: ClientKey, path: str, body: bytes, headers: dict[str, str] | None = None
+    ) -> Response:
+        """Everything after authentication: policies, aliases/fallbacks, queueing, forwarding.
+        Used by the API and by the admin Playground (which passes its own clean ``headers``)."""
+        if unavailable := not_configured() or mode_refusal():
+            return unavailable
+        request_headers = headers if headers is not None else dict(request.headers)
         try:
             payload = json.loads(body) if body else {}
         except ValueError:
@@ -974,14 +999,14 @@ def create_app(
 
         request_id = f"qr-{uuid.uuid4().hex[:12]}"
         lane = request_lane(request, client)
-        session = session_key(request.headers, client.name, payload)
-        tags = parse_tags(client.policy.tags, request.headers.get("x-queuerouter-tags"))
-        rkey = run_key(request.headers, client.name, session)
+        session = session_key(request_headers, client.name, payload)
+        tags = parse_tags(client.policy.tags, request_headers.get("x-queuerouter-tags"))
+        rkey = run_key(request_headers, client.name, session)
         run = runs.get(rkey) if rkey else None
         if run is not None:
             policy = client.policy
             max_tokens = policy.run_max_tokens
-            header_budget = request.headers.get("x-queuerouter-run-budget-tokens", "")
+            header_budget = request_headers.get("x-queuerouter-run-budget-tokens", "")
             if header_budget.isdigit():  # a client may lower its own budget, never raise it
                 max_tokens = min(int(header_budget), max_tokens) if max_tokens else int(header_budget)
             if reason := runs.over_budget(run, max_tokens, policy.run_max_requests, policy.run_max_minutes):
@@ -1027,7 +1052,7 @@ def create_app(
             "POST",
             path,
             request.url.query,
-            dict(request.headers),
+            request_headers,
             body,
             rlog,
             hints,

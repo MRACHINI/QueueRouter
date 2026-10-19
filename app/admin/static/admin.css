@@ -208,3 +208,10 @@ tr:has(+ tr.policy-row) td { border-bottom: 0; }
 input.price { width: 6.5em; }
 .tile-value.good { color: var(--ok-text); }
 textarea.rules { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.85rem; min-height: 2.4em; }
+
+/* playground */
+.chat { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; max-height: 60vh; overflow-y: auto; }
+.bubble { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 14px; border-radius: var(--radius); max-width: 85%; }
+.bubble.user { align-self: flex-end; background: var(--accent); color: var(--accent-text); }
+.bubble.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); }
+.bubble.error { border-color: var(--danger); color: var(--danger); }
