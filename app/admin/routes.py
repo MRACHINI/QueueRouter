@@ -25,6 +25,7 @@ from fastapi.templating import Jinja2Templates
 from .. import __version__
 from ..auth import AuthGuard, client_ip
 from ..config import ON_LIMIT, PRIORITIES, TUNABLES, Bootstrap, ClientPolicy
+from ..params import parse_rules
 from ..presets import ARLIAI_PLANS, PRESETS, plan_for
 from ..pricing import PriceCatalog, resolve, summarize_usage
 from ..slots import STRATEGIES
@@ -56,6 +57,8 @@ MESSAGES = {
     "exists": "That name is already taken.",
     "invalid": "Some values were invalid; nothing was changed.",
     "pool_in_use": "That pool is still used by upstreams; move or delete them first.",
+    "rules_invalid": "Parameter rules must be a JSON object with defaults / overrides / clamps / strip "
+    "(see the example).",
     "refresh_failed": "Couldn't download prices from models.dev right now; the previous list is kept.",
 }
 
@@ -495,8 +498,11 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 queue_timeout_s=_opt(form, "queue_timeout_s", float, 1),
                 total_timeout_s=_opt(form, "total_timeout_s", float, 1),
                 max_retries=_opt(form, "max_retries", int, -1),
+                params=_rules_text(form),
             )
             store.update_client(client_id, session.user.username, policy=policy)
+        except RulesError:
+            return back("/admin/clients", error="rules_invalid")
         except (ValueError, KeyError):
             return back("/admin/clients", error="invalid")
         ctx.reload()
@@ -810,7 +816,13 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             raise ValueError("target_model")
         known = {u.id for u in store.list_upstreams()}
         upstream_ids = tuple(int(v) for k, v in form.items() if k.startswith("upstream_") and int(v) in known)
-        return {"target_model": target, "upstream_ids": upstream_ids, "notes": str(form.get("notes", ""))[:300]}
+        params = _rules_text(form)
+        return {
+            "target_model": target,
+            "upstream_ids": upstream_ids,
+            "notes": str(form.get("notes", ""))[:300],
+            "params": params,
+        }
 
     @app.post("/admin/aliases")
     async def aliases_create(request: Request):
@@ -821,8 +833,15 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 raise ValueError("name")
             fields = alias_fields(form)
             store.create_alias(
-                name, fields["target_model"], fields["upstream_ids"], session.user.username, notes=fields["notes"]
+                name,
+                fields["target_model"],
+                fields["upstream_ids"],
+                session.user.username,
+                notes=fields["notes"],
+                params=fields["params"],
             )
+        except RulesError:
+            return back("/admin/models", error="rules_invalid")
         except ValueError:
             return back("/admin/models", error="invalid")
         except sqlite3.IntegrityError:
@@ -837,6 +856,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             store.update_alias(
                 alias_id, session.user.username, enabled=form.get("enabled") == "on", **alias_fields(form)
             )
+        except RulesError:
+            return back("/admin/models", error="rules_invalid")
         except (ValueError, KeyError):
             return back("/admin/models", error="invalid")
         ctx.reload()
@@ -876,6 +897,20 @@ def _clamp_int(raw: str | None, default: int, low: int, high: int) -> int:
         return min(high, max(low, int(raw or default)))
     except ValueError:
         return default
+
+
+class RulesError(ValueError):
+    pass
+
+
+def _rules_text(form: dict) -> str:
+    """Parameter rules from a form, validated and re-serialized compactly ('' = none)."""
+    text = str(form.get("params", "")).strip()
+    try:
+        rules = parse_rules(text)
+    except ValueError as exc:
+        raise RulesError(str(exc)) from exc
+    return json.dumps(rules) if rules else ""
 
 
 def _opt(form: dict, name: str, kind: type, minimum: float):

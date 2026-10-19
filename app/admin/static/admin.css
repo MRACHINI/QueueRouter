@@ -207,3 +207,4 @@ tr:has(+ tr.policy-row) td { border-bottom: 0; }
 
 input.price { width: 6.5em; }
 .tile-value.good { color: var(--ok-text); }
+textarea.rules { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.85rem; min-height: 2.4em; }

@@ -39,6 +39,7 @@ class ClientPolicy:
     queue_timeout_s: float | None = None  # overrides the global max queue wait
     total_timeout_s: float | None = None  # whole request incl. generation
     max_retries: int | None = None  # overrides the global retry budget
+    params: str = ""  # parameter rules JSON (app/params.py)
 
     @classmethod
     def from_json(cls, text: str | None) -> ClientPolicy:
@@ -167,6 +168,7 @@ TUNABLES: dict[str, type] = {
     "models_cache_s": float,
     "request_log_days": int,
     "price_catalog_enabled": bool,
+    "context_check": bool,
     "lb_strategy": str,
     "circuit_threshold": int,
     "circuit_cooldown_s": float,
@@ -209,6 +211,7 @@ class Settings:
     models_cache_s: float = 300
     request_log_days: int = 30  # per-request rows kept this long (0 = don't keep rows; daily totals always)
     price_catalog_enabled: bool = True  # fetch official prices from models.dev daily (for cost estimates)
+    context_check: bool = True  # refuse prompts that clearly exceed the model's context before queuing
 
     # Several upstreams
     lb_strategy: str = "least-busy"  # least-busy | weighted | ordered (failover)

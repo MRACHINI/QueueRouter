@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import math
@@ -27,6 +28,7 @@ from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .opencode import model_limits, provider_config, wellknown_manifest
+from .params import apply_rules, parse_rules, requested_output, too_long
 from .pricing import PriceCatalog
 from .ratelimit import RateLimiter
 from .sessions import session_key
@@ -389,6 +391,21 @@ def create_app(
                 "rate limit reached for this key", 429, "rate_limited", **{"Retry-After": str(math.ceil(wait))}
             )
         return None
+
+    def model_context(model: str | None, candidates: tuple[Candidate, ...]) -> int | None:
+        """Context the request can count on: the smallest across the upstreams it may go to
+        (model's own limit, capped by each pool's plan). None when unknown."""
+        contexts = []
+        for candidate in candidates:
+            target = snapshot.upstreams.get(candidate.upstream_id)
+            if target is None:
+                continue
+            entry = next((m for m in catalogs.models(target.id) if m["id"] == model), None)
+            limits = model_limits(entry, [target.pool.context_cap])
+            if limits is None:
+                return None  # one candidate with unknown context: don't guess
+            contexts.append(limits["context"])
+        return min(contexts) if contexts else None
 
     def candidates_for(model: str | None, only: tuple[int, ...] = ()) -> tuple[Candidate, ...]:
         """Usable upstreams for ``model``: those that list it, or all of them if none does
@@ -784,8 +801,32 @@ def create_app(
         candidates = candidates_for(target_model, alias.upstream_ids if alias else ())
         if not candidates:
             return error_response(f"no usable upstream for '{model}' right now", 503, "no_upstream")
+
+        rewritten = False
         if alias:  # the upstream gets the real model name
             payload["model"] = alias.target_model
+            rewritten = True
+        param_changes = []
+        if isinstance(payload, dict):
+            alias_rules = rules_of(alias.params if alias else "")
+            client_rules = rules_of(client.policy.params)
+            if alias_rules or client_rules:
+                param_changes = apply_rules(payload, alias_rules, client_rules)
+                rewritten = rewritten or bool(param_changes)
+            if cfg().context_check and (over := too_long(payload, model_context(target_model, candidates))):
+                estimate, context = over
+                return JSONResponse(
+                    {
+                        "error": {
+                            "message": f"This request needs about {estimate:,} prompt tokens plus "
+                            f"{requested_output(payload):,} output tokens, but '{model}' accepts {context:,}.",
+                            "type": "invalid_request_error",
+                            "code": "context_length_exceeded",
+                        }
+                    },
+                    status_code=400,
+                )
+        if rewritten:
             body = json.dumps(payload).encode()
 
         request_id = f"qr-{uuid.uuid4().hex[:12]}"
@@ -986,6 +1027,15 @@ def create_app(
 
 
 CONTEXT_FIELDS = ("context_length", "max_model_len", "max_context_length", "max_output_tokens", "max_tokens")
+
+
+@functools.lru_cache(maxsize=256)
+def rules_of(text: str) -> dict:
+    """Parsed parameter rules (validated when saved; anything unreadable counts as none)."""
+    try:
+        return parse_rules(text)
+    except ValueError:
+        return {}
 
 
 def alias_entry(alias, target: dict | None) -> dict:

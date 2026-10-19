@@ -28,6 +28,7 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
         <label class="check"><input type="checkbox" name="upstream_{{ u.id }}" value="{{ u.id }}" {% if u.id in a.upstream_ids %}checked{% endif %}> {{ u.name }}</label>
         {% endfor %}
         <input name="notes" value="{{ a.notes }}" placeholder="notes" aria-label="Notes">
+        <textarea name="params" rows="1" class="rules grow" aria-label="Parameter rules" placeholder='parameter rules (JSON), e.g. {"defaults": {"temperature": 0.6}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}'>{{ a.params }}</textarea>
         <label class="check"><input type="checkbox" name="enabled" {% if a.enabled %}checked{% endif %}> enabled</label>
         <button type="submit" class="secondary">Save</button>
       </form>
@@ -60,6 +61,8 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
     </div>
   </fieldset>
   <label>Notes <input name="notes" maxlength="300" placeholder="optional"></label>
+  <label class="span-all">Parameter rules <small class="muted">optional JSON: defaults / overrides / clamps / strip</small>
+    <textarea name="params" rows="2" class="rules" placeholder='{"defaults": {"temperature": 0.6}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}'></textarea></label>
   <div class="align-end"><button type="submit">Add alias</button></div>
 </form>
 
