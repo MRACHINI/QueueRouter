@@ -50,7 +50,7 @@ shown once when created. Changes apply immediately.</p>
     <td colspan="5" data-label="">
         {% set p = c.policy %}
         <details class="policy">
-          <summary class="small">Limits{% if p.allowed_models or p.rate_limited or p.max_queued is not none or p.max_active is not none or p.total_timeout_s or p.queue_timeout_s or p.max_retries is not none or p.params %} <span class="badge">set</span>{% endif %}</summary>
+          <summary class="small">Limits{% if p.allowed_models or p.rate_limited or p.max_queued is not none or p.max_active is not none or p.total_timeout_s or p.queue_timeout_s or p.max_retries is not none or p.params or p.tags or p.run_max_tokens or p.run_max_requests or p.run_max_minutes or p.loop_threshold %} <span class="badge">set</span>{% endif %}</summary>
           <form method="post" action="/admin/clients/{{ c.id }}/policy" class="grid tight">
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <label class="span-all">Allowed models <small class="muted">comma-separated; empty = all</small>
@@ -69,11 +69,21 @@ shown once when created. Changes apply immediately.</p>
             <label>Queue timeout (s) <input type="number" step="any" name="queue_timeout_s" min="1" value="{{ p.queue_timeout_s if p.queue_timeout_s is not none else '' }}"></label>
             <label>Total timeout (s) <input type="number" step="any" name="total_timeout_s" min="1" value="{{ p.total_timeout_s if p.total_timeout_s is not none else '' }}"></label>
             <label>Max retries <input type="number" name="max_retries" min="-1" value="{{ p.max_retries if p.max_retries is not none else '' }}"></label>
+            <label>Default tags <input name="tags" value="{{ p.tags }}" placeholder="e.g. coding, opencode"></label>
+            <label>Run: max tokens <input type="number" name="run_max_tokens" min="1" value="{{ p.run_max_tokens if p.run_max_tokens is not none else '' }}"></label>
+            <label>Run: max requests <input type="number" name="run_max_requests" min="1" value="{{ p.run_max_requests if p.run_max_requests is not none else '' }}"></label>
+            <label>Run: max minutes <input type="number" step="any" name="run_max_minutes" min="0.1" value="{{ p.run_max_minutes if p.run_max_minutes is not none else '' }}"></label>
+            <label>Loop: same request ×N <input type="number" name="loop_threshold" min="2" value="{{ p.loop_threshold if p.loop_threshold is not none else '' }}" placeholder="off"></label>
+            <label>On a loop
+              <select name="loop_action">
+                <option value="warn" {% if p.loop_action != 'reject' %}selected{% endif %}>log a warning</option>
+                <option value="reject" {% if p.loop_action == 'reject' %}selected{% endif %}>reject (429)</option>
+              </select></label>
             <label class="span-all">Parameter rules <small class="muted">JSON: defaults / overrides / clamps / strip — applied after the alias's rules</small>
               <textarea name="params" rows="2" class="rules" placeholder='{"defaults": {"temperature": 0.6}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}'>{{ p.params }}</textarea></label>
             <div class="align-end"><button type="submit" class="secondary">Save limits</button></div>
           </form>
-          <p class="small muted">Blank = no limit / global default. Rate limits count started requests and finished tokens over rolling windows.</p>
+          <p class="small muted">Blank = no limit / global default. Rate limits count started requests and finished tokens over rolling windows. A <em>run</em> is one agent task: <code>X-Run-Id</code> if the app sends it, otherwise the conversation.</p>
         </details>
     </td>
   </tr>

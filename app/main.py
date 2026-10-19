@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 
 from . import __version__
 from .admin import AdminContext, mount_admin
+from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
 from .auth import AuthGuard, client_ip, find_client, ip_in, presented_key
 from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
@@ -95,6 +96,8 @@ class RequestLog:
             "cached_tokens": None,
             "finish_reason": None,
             "fallback": None,
+            "tags": None,
+            "run": None,
             "target_model": None,
         }
 
@@ -138,6 +141,7 @@ class Admission:
     deadline: float | None = None  # monotonic time by which the whole request must finish
     steps: tuple[Step, ...] = ()  # alias fallback chain (first = primary); empty = just this request
     triggers: frozenset[str] = frozenset()
+    run: Run | None = None  # agent run this request belongs to (budgets, loop detection)
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
@@ -214,6 +218,7 @@ def create_app(
         return target is not None and target.usable and circuits.allows(upstream_id)
 
     limiter = RateLimiter()
+    runs = Runs()
 
     def policy_of(client: str) -> ClientPolicy:
         for key in snapshot.clients.values():
@@ -515,6 +520,7 @@ def create_app(
             **state,
             **stats.snapshot(),
             "recent": list(stats.recent)[-25:],
+            "runs": runs.snapshot(),
         }
 
     async def probe(base_url: str, api_key: str) -> tuple[bool, str]:
@@ -969,6 +975,29 @@ def create_app(
         request_id = f"qr-{uuid.uuid4().hex[:12]}"
         lane = request_lane(request, client)
         session = session_key(request.headers, client.name, payload)
+        tags = parse_tags(client.policy.tags, request.headers.get("x-queuerouter-tags"))
+        rkey = run_key(request.headers, client.name, session)
+        run = runs.get(rkey) if rkey else None
+        if run is not None:
+            policy = client.policy
+            max_tokens = policy.run_max_tokens
+            header_budget = request.headers.get("x-queuerouter-run-budget-tokens", "")
+            if header_budget.isdigit():  # a client may lower its own budget, never raise it
+                max_tokens = min(int(header_budget), max_tokens) if max_tokens else int(header_budget)
+            if reason := runs.over_budget(run, max_tokens, policy.run_max_requests, policy.run_max_minutes):
+                log.warning(json.dumps({"event": "run_budget_exceeded", "client": client.name, "reason": reason}))
+                return error_response(f"Run budget exceeded: {reason}.", 429, "run_budget_exceeded")
+            repeats = runs.note_request(run, request_fingerprint(payload))
+            if policy.loop_threshold and repeats >= policy.loop_threshold:
+                log.warning(
+                    json.dumps({"event": "loop_detected", "client": client.name, "repeats": repeats, "run": rkey})
+                )
+                if policy.loop_action == "reject":
+                    return error_response(
+                        f"The same request was sent {repeats} times in 5 minutes; this looks like a loop.",
+                        429,
+                        "loop_detected",
+                    )
         position = queue.predict_position(client.name, lane, session)
         rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies))
         rlog.fields.update(
@@ -978,6 +1007,8 @@ def create_app(
             position=position,
             model=model,
             target_model=target_model if alias_used else None,
+            tags=",".join(tags) or None,
+            run=rkey[:80] if rkey else None,
             stream=isinstance(payload, dict) and payload.get("stream") is True,
         )
         hints = {
@@ -1004,6 +1035,7 @@ def create_app(
             time.monotonic() + client.policy.total_timeout_s if client.policy.total_timeout_s else None,
             tuple(steps),
             triggers,
+            run,
         )
         if rlog.fields["stream"]:
             return StreamingResponse(
@@ -1081,6 +1113,8 @@ def create_app(
             limiter.record_tokens(
                 adm.client, (rlog.fields["prompt_tokens"] or 0) + (rlog.fields["completion_tokens"] or 0)
             )
+            if adm.run is not None:
+                runs.note_tokens(adm.run, (rlog.fields["prompt_tokens"] or 0) + (rlog.fields["completion_tokens"] or 0))
 
     # -- streaming -----------------------------------------------------------------------
 
@@ -1164,6 +1198,8 @@ def create_app(
                 finish_reason=sniffer.finish_reason,
             )
             limiter.record_tokens(adm.client, (sniffer.prompt_tokens or 0) + (sniffer.completion_tokens or 0))
+            if adm.run is not None:
+                runs.note_tokens(adm.run, (sniffer.prompt_tokens or 0) + (sniffer.completion_tokens or 0))
 
     return app
 

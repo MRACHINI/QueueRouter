@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import __version__
+from ..agents import parse_tags
 from ..auth import AuthGuard, client_ip
 from ..config import ON_LIMIT, PRIORITIES, TUNABLES, Bootstrap, ClientPolicy
 from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
@@ -518,6 +519,12 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 total_timeout_s=_opt(form, "total_timeout_s", float, 1),
                 max_retries=_opt(form, "max_retries", int, -1),
                 params=_rules_text(form),
+                tags=",".join(parse_tags(str(form.get("tags", "")))),
+                run_max_tokens=_opt(form, "run_max_tokens", int, 1),
+                run_max_requests=_opt(form, "run_max_requests", int, 1),
+                run_max_minutes=_opt(form, "run_max_minutes", float, 0.1),
+                loop_threshold=_opt(form, "loop_threshold", int, 2),
+                loop_action="reject" if form.get("loop_action") == "reject" else "warn",
             )
             store.update_client(client_id, session.user.username, policy=policy)
         except RulesError:
@@ -716,7 +723,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     @app.get("/admin/requests")
     async def requests_log(request: Request):
         session = require(request, "viewer")
-        filters = {k: request.query_params.get(k, "") for k in ("client", "outcome", "model", "upstream")}
+        filters = {k: request.query_params.get(k, "") for k in ("client", "outcome", "model", "upstream", "tag")}
         rows = await asyncio.to_thread(store.list_requests, 300, **filters)
         options = await asyncio.to_thread(store.request_filter_values)
         return page(request, "requests.html", session, rows=rows, filters=filters, options=options)
