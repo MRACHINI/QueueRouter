@@ -153,7 +153,7 @@ async def test_retries_transient_failures(make_stack):
         )
         assert r.status_code == 200
         _, text = await read_stream(c, stack.url, stack.headers, chat(stream=True, mock_key="k2", mock_fail=2))
-        assert "upstream busy (HTTP 503), retry 1" in text and "data: [DONE]" in text
+        assert "HTTP 503, retry 1" in text and "data: [DONE]" in text
         assert (await stats(c, stack))["retries"] == 4
 
 

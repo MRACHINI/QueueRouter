@@ -25,10 +25,11 @@ def data_dir(tmp_path):
 def test_first_start_imports_env(data_dir):
     store = open_store(Bootstrap(data_dir=data_dir), SEED)
     snap = load_snapshot(store)
-    assert snap.settings.upstream_api_key == "arli-secret"
-    assert snap.settings.max_concurrency == 2
+    (target,) = snap.upstreams.values()
+    assert target.api_key == "arli-secret"
+    assert target.pool.max_concurrency == 2
     assert snap.settings.aging_s == 30
-    assert snap.upstream.pool.name == "arliai-main"
+    assert target.pool.name == "arliai-main"
     assert {c.name: c.priority for c in snap.clients.values()} == {"opencode": "high", "client2": "normal"}
     assert snap.clients[hash_key("key-one")].name == "opencode"
 
@@ -63,14 +64,15 @@ def test_env_only_imported_once(data_dir):
     open_store(Bootstrap(data_dir=data_dir), SEED).close()
     changed = Settings(upstream_api_key="different", max_concurrency=9, access_keys=("x:y",))
     snap = load_snapshot(open_store(Bootstrap(data_dir=data_dir), changed))
-    assert snap.settings.upstream_api_key == "arli-secret"
-    assert snap.settings.max_concurrency == 2
+    (target,) = snap.upstreams.values()
+    assert target.api_key == "arli-secret"
+    assert target.pool.max_concurrency == 2
     assert "x" not in {c.name for c in snap.clients.values()}
 
 
 def test_first_start_without_upstream(data_dir):
     snap = load_snapshot(open_store(Bootstrap(data_dir=data_dir), Settings()))
-    assert snap.upstream is None and snap.clients == {}
+    assert snap.upstreams == {} and not snap.configured and snap.clients == {}
 
 
 def test_migrations_are_idempotent_and_versioned(data_dir):
@@ -125,5 +127,6 @@ def test_tunables_and_pool_updates(data_dir):
     store.update_upstream(upstream.id, "admin", api_key="rotated")
     snap = load_snapshot(store)
     assert (snap.settings.aging_s, snap.settings.session_aware) == (5, False)
-    assert snap.settings.max_concurrency == 6
-    assert snap.settings.upstream_api_key == "rotated"
+    (target,) = snap.upstreams.values()
+    assert target.pool.max_concurrency == 6
+    assert target.api_key == "rotated"

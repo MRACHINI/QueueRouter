@@ -8,7 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
@@ -21,6 +21,8 @@ from fastapi.templating import Jinja2Templates
 from .. import __version__
 from ..auth import AuthGuard, client_ip
 from ..config import PRIORITIES, TUNABLES, Bootstrap
+from ..presets import ARLIAI_PLANS, PRESETS, plan_for
+from ..slots import STRATEGIES
 from ..store import ROLES, Store
 from .security import (
     AdminSession,
@@ -47,7 +49,10 @@ MESSAGES = {
     "self": "You can't do that to your own account here.",
     "exists": "That name is already taken.",
     "invalid": "Some values were invalid; nothing was changed.",
+    "pool_in_use": "That pool is still used by upstreams; move or delete them first.",
 }
+
+SETTING_CHOICES: dict[str, tuple[str, ...]] = {"lb_strategy": STRATEGIES}
 
 SETTING_HELP: dict[str, tuple[str, str, str]] = {
     # name: (section, label, help)
@@ -63,6 +68,17 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
     "upstream_connect_timeout_s": ("Upstream", "Connect timeout (s)", ""),
     "upstream_read_timeout_s": ("Upstream", "Read timeout (s)", "Max silence between upstream bytes."),
     "models_cache_s": ("Upstream", "Models cache (s)", "How long /v1/models is cached."),
+    "lb_strategy": (
+        "Upstreams",
+        "Load balancing",
+        "least-busy: most free slots · weighted: random by weight · ordered: first healthy upstream (failover).",
+    ),
+    "circuit_threshold": (
+        "Upstreams",
+        "Circuit breaker threshold",
+        "Consecutive failures before an upstream is taken out of rotation.",
+    ),
+    "circuit_cooldown_s": ("Upstreams", "Circuit cooldown (s)", "Then one trial request decides if it's back."),
     "allow_no_auth": ("Security", "Allow without key", "Only when no clients exist. Private networks only!"),
     "max_body_mb": ("Security", "Max request body (MB)", ""),
     "auth_fail_limit": ("Security", "Auth failures per minute", "Before an IP is temporarily blocked."),
@@ -76,6 +92,8 @@ class AdminContext:
     bootstrap: Bootstrap
     reload: Callable[[], None]
     live_state: Callable[[], dict]
+    probe: Callable[[str, str], Awaitable[tuple[bool, str]]]
+    upstream_info: Callable[[], list[dict]]
 
 
 class NeedLogin(Exception):
@@ -258,6 +276,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                     "help": help_text,
                     "type": TUNABLES[name].__name__,
                     "value": values.get(name),
+                    "choices": SETTING_CHOICES.get(name, ()),
                 }
             )
         return page(request, "settings.html", session, sections=sections)
@@ -270,6 +289,11 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             for name, kind in TUNABLES.items():
                 if kind is bool:
                     values[name] = form.get(name) == "on"
+                elif kind is str:
+                    if name in form:
+                        if form[name] not in SETTING_CHOICES.get(name, ()):
+                            raise ValueError(name)
+                        values[name] = form[name]
                 elif name in form and form[name] != "":
                     values[name] = kind(form[name])
                     if values[name] < -1 or (name != "max_retries" and values[name] < 0):
@@ -428,6 +452,169 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         ctx.reload()
         return back("/admin/clients", "deleted")
 
+    # -- upstreams and limit pools -------------------------------------------------------
+
+    def upstreams_page(request: Request, session: AdminSession, test: dict | None = None):
+        info = {u["id"]: u for u in ctx.upstream_info()}
+        pools_live = ctx.live_state().get("pools", {})
+        return page(
+            request,
+            "upstreams.html",
+            session,
+            pools=store.list_pools(),
+            upstreams=store.list_upstreams(),
+            info=info,
+            pools_live=pools_live,
+            presets=PRESETS.values(),
+            arliai_plans=ARLIAI_PLANS,
+            test=test,
+            strategy=store.get_tunables().get("lb_strategy", "least-busy"),
+        )
+
+    def int_field(form: dict, name: str, low: int, high: int, default: int | None = None) -> int | None:
+        raw = str(form.get(name, "")).strip()
+        if raw == "":
+            if default is None:
+                return None
+            return default
+        value = int(raw)
+        if not low <= value <= high:
+            raise ValueError(name)
+        return value
+
+    def pool_fields(form: dict) -> dict:
+        """max_concurrency / context_cap / plan from the form; an ArliAI plan fills the first two."""
+        plan = plan_for("arliai", str(form.get("plan", "")) or None)
+        concurrency = int_field(form, "max_concurrency", 1, 1000, plan.max_concurrency if plan else 1)
+        context_cap = int_field(form, "context_cap", 1, 10_000_000)
+        if plan and not str(form.get("max_concurrency", "")).strip():
+            concurrency = plan.max_concurrency
+        if plan and context_cap is None:
+            context_cap = plan.context_cap
+        return {
+            "plan": f"ArliAI {plan.name}" if plan else (str(form.get("plan_label", "")).strip() or None),
+            "max_concurrency": concurrency,
+            "context_cap": context_cap,
+            "min_spacing_ms": int_field(form, "min_spacing_ms", 0, 600_000, 0),
+        }
+
+    @app.get("/admin/upstreams")
+    async def upstreams(request: Request):
+        session = require(request, "admin")
+        return upstreams_page(request, session)
+
+    @app.post("/admin/pools")
+    async def pools_create(request: Request):
+        session, form = await require_post(request, "admin")
+        name = str(form.get("name", "")).strip()
+        try:
+            fields = pool_fields(form)
+            if not CLIENT_NAME.fullmatch(name):
+                raise ValueError("name")
+            store.create_pool(name, fields.pop("max_concurrency"), session.user.username, **fields)
+        except ValueError:
+            return back("/admin/upstreams", error="invalid")
+        except sqlite3.IntegrityError:
+            return back("/admin/upstreams", error="exists")
+        ctx.reload()
+        return back("/admin/upstreams", "created")
+
+    @app.post("/admin/pools/{pool_id}")
+    async def pools_update(pool_id: int, request: Request):
+        session, form = await require_post(request, "admin")
+        try:
+            store.update_pool(pool_id, session.user.username, **pool_fields(form))
+        except (ValueError, KeyError):
+            return back("/admin/upstreams", error="invalid")
+        ctx.reload()
+        return back("/admin/upstreams", "saved")
+
+    @app.post("/admin/pools/{pool_id}/delete")
+    async def pools_delete(pool_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        try:
+            store.delete_pool(pool_id, session.user.username)
+        except ValueError:
+            return back("/admin/upstreams", error="pool_in_use")
+        ctx.reload()
+        return back("/admin/upstreams", "deleted")
+
+    @app.post("/admin/upstreams")
+    async def upstreams_create(request: Request):
+        session, form = await require_post(request, "admin")
+        name = str(form.get("name", "")).strip()
+        preset = PRESETS.get(str(form.get("preset", "custom")), PRESETS["custom"])
+        base_url = str(form.get("base_url", "")).strip().rstrip("/") or preset.base_url
+        api_key = str(form.get("api_key", "")).strip()
+        try:
+            if not CLIENT_NAME.fullmatch(name) or not URL.fullmatch(base_url):
+                raise ValueError("name/url")
+            if preset.key_required and not api_key:
+                raise ValueError("api_key")
+            weight = int_field(form, "weight", 1, 100, 1)
+            pool_choice = str(form.get("pool", "new"))
+            if pool_choice == "new":
+                fields = pool_fields(form)
+                if preset.key != "arliai" and not str(form.get("max_concurrency", "")).strip():
+                    fields["max_concurrency"] = preset.max_concurrency
+                pool_id = store.create_pool(name, fields.pop("max_concurrency"), session.user.username, **fields)
+            else:
+                pool_id = int(pool_choice)
+                if pool_id not in {p.id for p in store.list_pools()}:
+                    raise ValueError("pool")
+            store.create_upstream(
+                name, base_url, api_key, pool_id, session.user.username, preset=preset.key, weight=weight
+            )
+        except ValueError:
+            return back("/admin/upstreams", error="invalid")
+        except sqlite3.IntegrityError:
+            return back("/admin/upstreams", error="exists")
+        ctx.reload()
+        return back("/admin/upstreams", "created")
+
+    @app.post("/admin/upstreams/{upstream_id}")
+    async def upstreams_update(upstream_id: int, request: Request):
+        session, form = await require_post(request, "admin")
+        try:
+            fields: dict[str, object] = {
+                "enabled": form.get("enabled") == "on",
+                "paused": form.get("paused") == "on",
+                "weight": int_field(form, "weight", 1, 100, 1),
+            }
+            base_url = str(form.get("base_url", "")).strip().rstrip("/")
+            if base_url:
+                if not URL.fullmatch(base_url):
+                    raise ValueError("url")
+                fields["base_url"] = base_url
+            if api_key := str(form.get("api_key", "")).strip():  # blank = keep the stored key
+                fields["api_key"] = api_key
+            if pool := str(form.get("pool", "")).strip():
+                if int(pool) not in {p.id for p in store.list_pools()}:
+                    raise ValueError("pool")
+                fields["pool_id"] = int(pool)
+            store.update_upstream(upstream_id, session.user.username, **fields)
+        except (ValueError, KeyError):
+            return back("/admin/upstreams", error="invalid")
+        ctx.reload()
+        return back("/admin/upstreams", "saved")
+
+    @app.post("/admin/upstreams/{upstream_id}/delete")
+    async def upstreams_delete(upstream_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        store.delete_upstream(upstream_id, session.user.username)
+        ctx.reload()
+        return back("/admin/upstreams", "deleted")
+
+    @app.post("/admin/upstreams/{upstream_id}/test")
+    async def upstreams_test(upstream_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        target = next((u for u in store.list_upstreams() if u.id == upstream_id), None)
+        if target is None:
+            return back("/admin/upstreams", error="invalid")
+        ok, message = await ctx.probe(target.base_url, store.upstream_key(upstream_id))
+        store.audit(session.user.username, "upstream.test", target.name, {"ok": ok})
+        return upstreams_page(request, session, test={"name": target.name, "ok": ok, "message": message})
+
     # -- audit ---------------------------------------------------------------------------
 
     @app.get("/admin/audit")
@@ -437,6 +624,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 
 
 CLIENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+URL = re.compile(r"https?://[^\s/?#]+(/[^\s?#]*)?")
 
 
 def _parse_date(value: str) -> float | None:

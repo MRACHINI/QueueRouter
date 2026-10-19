@@ -80,6 +80,23 @@ def make_stack(tmp_path_factory):
         server.__exit__(None, None, None)
 
 
+@pytest.fixture
+def make_mock():
+    """Factory: make_mock(limit) -> (base URL incl. /v1, state) for extra mock upstreams."""
+    servers: list[ServerThread] = []
+
+    def factory(limit: int = 1) -> tuple[str, dict]:
+        app = create_mock(limit)
+        server = ServerThread(app)
+        url = server.__enter__()
+        servers.append(server)
+        return f"{url}/v1", app.state.mock
+
+    yield factory
+    for server in servers:
+        server.__exit__(None, None, None)
+
+
 async def eventually(predicate, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():

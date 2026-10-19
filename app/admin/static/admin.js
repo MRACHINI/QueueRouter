@@ -56,6 +56,39 @@ document.addEventListener("DOMContentLoaded", () => {
     el.title = date.toISOString();
   });
 
+  // Upstream forms: a preset fills the base URL; an ArliAI plan fills parallel + context cap.
+  document.querySelectorAll("[data-preset-select]").forEach((select) => {
+    const form = select.closest("form");
+    const url = form.querySelector("[data-base-url-input]");
+    const note = form.querySelector("[data-preset-note]");
+    const sync = (overwrite) => {
+      const option = select.selectedOptions[0];
+      if (url && (overwrite || !url.value)) url.value = option.dataset.baseUrl || "";
+      if (note) note.textContent = option.dataset.note || "";
+      const parallel = form.querySelector('[name="max_concurrency"]');
+      if (parallel && !parallel.value) parallel.placeholder = option.dataset.concurrency || "";
+    };
+    select.addEventListener("change", () => sync(true));
+    sync(false);
+  });
+  document.querySelectorAll("[data-plan-select]").forEach((select) => {
+    select.addEventListener("change", () => {
+      const option = select.selectedOptions[0];
+      const form = select.closest("form");
+      if (!option.dataset.concurrency) return;
+      form.querySelector('[name="max_concurrency"]').value = option.dataset.concurrency;
+      form.querySelector('[name="context_cap"]').value = option.dataset.context;
+    });
+  });
+  document.querySelectorAll("[data-pool-select]").forEach((select) => {
+    const form = select.closest("form");
+    const sync = () => form.querySelectorAll("[data-new-pool]").forEach((el) => {
+      el.hidden = select.value !== "new";
+    });
+    select.addEventListener("change", sync);
+    sync();
+  });
+
   const dashboard = document.getElementById("dashboard");
   if (dashboard) liveDashboard(dashboard);
 });
@@ -121,6 +154,21 @@ function liveDashboard(root) {
     set("tokens_total", s.tokens.prompt + s.tokens.completion);
     set("uptime", s.uptime_s);
     set("upstream", s.upstream || "none");
+
+    const upstreamRows = (s.upstreams || []).map((u) => {
+      const tr = document.createElement("tr");
+      const status = !u.usable ? "disabled/paused" : u.state === "closed" ? "healthy" : u.state;
+      const pool = (s.pools || {})[u.pool];
+      tr.append(
+        cell(u.name, "Upstream"),
+        cell(pool ? `${u.pool} (${pool.active}/${pool.capacity})` : u.pool, "Pool"),
+        cell(status + (u.last_error && u.state !== "closed" ? ` — ${u.last_error}` : ""), "Status"),
+        cell(u.active, "Active"),
+        cell(u.catalog_models === null ? "unknown" : u.catalog_models, "Models"),
+      );
+      return tr;
+    });
+    fill(document.getElementById("upstreams-body"), upstreamRows);
 
     const names = new Set([...Object.keys(s.clients || {}), ...Object.keys(s.per_client || {})]);
     const clientRows = [...names].sort().map((name) => {

@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}Upstreams{% endblock %}
+{% block content %}
+<h1>Upstreams</h1>
+<p class="muted">An <strong>upstream</strong> is a provider endpoint + API key. Its parallel-request limit lives in a
+<strong>limit pool</strong>: one pool per provider <em>account</em>, because keys on the same account share its limit.
+Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settings">Settings</a>).</p>
+
+{% if test %}
+<p class="notice {{ 'ok' if test.ok else 'err' }}" role="status"><strong>{{ test.name }}:</strong> {{ test.message }}</p>
+{% endif %}
+
+<h2>Limit pools</h2>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Pool</th><th>In use</th><th>Settings</th><th></th></tr></thead>
+  <tbody>
+  {% for p in pools %}
+  {% set live = pools_live.get(p.name, {"active": 0, "capacity": p.max_concurrency}) %}
+  <tr>
+    <td data-label="Pool"><strong>{{ p.name }}</strong>{% if p.plan %} <span class="badge">{{ p.plan }}</span>{% endif %}
+      {% if p.context_cap %}<div class="small muted">context cap {{ "{:,}".format(p.context_cap) }}</div>{% endif %}</td>
+    <td data-label="In use">{{ live.active }} / {{ p.max_concurrency }}</td>
+    <td data-label="">
+      <form method="post" action="/admin/pools/{{ p.id }}" class="row wrap">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <select name="plan" aria-label="ArliAI plan" data-plan-select>
+          <option value="">custom limits</option>
+          {% for plan in arliai_plans %}
+          <option value="{{ plan.name }}" data-concurrency="{{ plan.max_concurrency }}" data-context="{{ plan.context_cap }}"
+            {% if p.plan == "ArliAI " ~ plan.name %}selected{% endif %}>ArliAI {{ plan.name }}</option>
+          {% endfor %}
+        </select>
+        <label class="inline-field">parallel <input type="number" name="max_concurrency" min="1" max="1000" value="{{ p.max_concurrency }}" required></label>
+        <label class="inline-field">context cap <input type="number" name="context_cap" min="1" value="{{ p.context_cap or '' }}" placeholder="—"></label>
+        <label class="inline-field">spacing ms <input type="number" name="min_spacing_ms" min="0" value="{{ p.min_spacing_ms }}"></label>
+        <button type="submit" class="secondary">Save</button>
+      </form>
+    </td>
+    <td data-label="">
+      <form method="post" action="/admin/pools/{{ p.id }}/delete" data-confirm="Delete pool {{ p.name }}?">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">No pools yet — adding an upstream creates one.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Upstreams</h2>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Upstream</th><th>Status</th><th>Settings</th><th></th></tr></thead>
+  <tbody>
+  {% for u in upstreams %}
+  {% set i = info.get(u.id, {}) %}
+  <tr>
+    <td data-label="Upstream"><strong>{{ u.name }}</strong> <span class="badge">{{ u.preset or "custom" }}</span>
+      <div class="small muted mono wrap-any">{{ u.base_url }}</div></td>
+    <td data-label="Status">
+      {% if not u.enabled %}<span class="badge">disabled</span>
+      {% elif u.paused %}<span class="badge">paused</span>
+      {% elif i.state == "closed" %}<span class="badge ok">healthy</span>
+      {% else %}<span class="badge high">{{ i.state }}</span>{% endif %}
+      <div class="small muted">{{ i.active or 0 }} active ·
+        {% if i.catalog_models is not none %}{{ i.catalog_models }} models{% else %}models unknown{% endif %}</div>
+      {% if i.last_error %}<div class="small muted">last error: {{ i.last_error }}</div>{% endif %}
+      {% if i.catalog_error %}<div class="small muted">model list: {{ i.catalog_error }}</div>{% endif %}
+    </td>
+    <td data-label="">
+      <form method="post" action="/admin/upstreams/{{ u.id }}" class="row wrap">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input name="base_url" value="{{ u.base_url }}" aria-label="Base URL" class="grow">
+        <input name="api_key" type="password" placeholder="new API key (blank = keep)" autocomplete="off" aria-label="API key">
+        <select name="pool" aria-label="Pool">
+          {% for p in pools %}<option value="{{ p.id }}" {% if p.id == u.pool_id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+        </select>
+        <label class="inline-field">weight <input type="number" name="weight" min="1" max="100" value="{{ u.weight }}"></label>
+        <label class="check"><input type="checkbox" name="enabled" {% if u.enabled %}checked{% endif %}> enabled</label>
+        <label class="check"><input type="checkbox" name="paused" {% if u.paused %}checked{% endif %}> paused</label>
+        <button type="submit" class="secondary">Save</button>
+      </form>
+    </td>
+    <td data-label="">
+      <div class="row wrap">
+        <form method="post" action="/admin/upstreams/{{ u.id }}/test">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="secondary">Test</button>
+        </form>
+        <form method="post" action="/admin/upstreams/{{ u.id }}/delete" data-confirm="Delete upstream {{ u.name }}?">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </div>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">No upstreams yet — requests get 503 until you add one.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Add upstream</h2>
+<form method="post" action="/admin/upstreams" class="card grid" id="add-upstream">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Provider
+    <select name="preset" data-preset-select>
+      {% for p in presets %}
+      <option value="{{ p.key }}" data-base-url="{{ p.base_url }}" data-concurrency="{{ p.max_concurrency }}"
+              data-key-required="{{ 'true' if p.key_required else 'false' }}" data-note="{{ p.note }}">{{ p.label }}</option>
+      {% endfor %}
+    </select>
+    <small class="muted" data-preset-note></small>
+  </label>
+  <label>Name <input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" placeholder="arliai-2" autocomplete="off"></label>
+  <label>Base URL <input name="base_url" required placeholder="https://api.arliai.com/v1" data-base-url-input></label>
+  <label>API key <input name="api_key" type="password" autocomplete="off" placeholder="stored encrypted"></label>
+  <label>Limit pool
+    <select name="pool" data-pool-select>
+      <option value="new">New pool (new account)</option>
+      {% for p in pools %}<option value="{{ p.id }}">{{ p.name }} (same account)</option>{% endfor %}
+    </select>
+  </label>
+  <label data-new-pool>Plan
+    <select name="plan" data-plan-select>
+      <option value="">custom limits</option>
+      {% for plan in arliai_plans %}
+      <option value="{{ plan.name }}" data-concurrency="{{ plan.max_concurrency }}" data-context="{{ plan.context_cap }}">ArliAI {{ plan.name }} — {{ plan.max_concurrency }} parallel</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label data-new-pool>Parallel requests <input type="number" name="max_concurrency" min="1" max="1000" placeholder="from preset"></label>
+  <label data-new-pool>Context cap <input type="number" name="context_cap" min="1" placeholder="optional"></label>
+  <label>Weight <input type="number" name="weight" min="1" max="100" value="1"></label>
+  <div class="align-end"><button type="submit">Add upstream</button></div>
+</form>
+{% endblock %}

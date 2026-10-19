@@ -418,6 +418,20 @@ class Store:
         self._update("upstreams", upstream_id, allowed, fields)
         self.audit(actor, "upstream.update", str(upstream_id), {k: v for k, v in fields.items() if k != "api_key_enc"})
 
+    def delete_upstream(self, upstream_id: int, actor: str) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM upstreams WHERE id = ?", (upstream_id,))
+        self.audit(actor, "upstream.delete", str(upstream_id))
+
+    def delete_pool(self, pool_id: int, actor: str) -> None:
+        """Delete a pool; refuses while upstreams still use it."""
+        with self.tx() as db:
+            used = db.execute("SELECT COUNT(*) FROM upstreams WHERE pool_id = ?", (pool_id,)).fetchone()[0]
+            if used:
+                raise ValueError("pool is still used by upstreams")
+            db.execute("DELETE FROM limit_pools WHERE id = ?", (pool_id,))
+        self.audit(actor, "pool.delete", str(pool_id))
+
     # -- clients -------------------------------------------------------------------------
 
     def list_clients(self) -> list[Client]:
