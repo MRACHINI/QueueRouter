@@ -170,6 +170,21 @@ $env:QUEUEROUTER_KEY="<client key>"; opencode auth login https://queuerouter.exa
 Then pick a `queuerouter/…` model with `/models`. (This uses opencode's `/.well-known/opencode`
 mechanism; the Windows URL just swaps the login command for a PowerShell one.)
 
+**Plugin (optional, recommended)** — QueueRouter also serves an opencode plugin. It tags each
+request with opencode's session and task, so QueueRouter finishes a conversation (subagents
+included) before starting new ones and applies run budgets and loop detection per task; it sends
+title generation at low priority so it never holds up the main model; and it loads your models on
+every start from `QUEUEROUTER_KEY` (then the login above is optional). Install once into opencode's
+global plugin folder and restart opencode (the Clients page shows these with your domain):
+
+```bash
+mkdir -p ~/.config/opencode/plugin && curl -fsSL https://queuerouter.example.com/opencode/queuerouter.js -o ~/.config/opencode/plugin/queuerouter.js
+```
+
+```powershell
+$d="$HOME/.config/opencode/plugin"; New-Item -ItemType Directory -Force $d | Out-Null; Invoke-WebRequest https://queuerouter.example.com/opencode/queuerouter.js -OutFile "$d/queuerouter.js"
+```
+
 **Config file** — for older opencode, or if you prefer files: download it from the admin
 (**Clients → opencode.json** on the client's row), or with curl as below; save it as
 `opencode.json` in your project or point `OPENCODE_CONFIG` at it, then
@@ -205,6 +220,7 @@ Everything else is configured in the admin UI.
 | `GET /v1/models` | all upstreams' models + aliases, filtered to the client's allowed models |
 | `GET /v1/queue` | queue depth, your client's queued/active, estimated wait |
 | `GET /v1/opencode-config` | generated opencode provider config for your key |
+| `GET /opencode/queuerouter.js` | opencode plugin (session/task tags, priorities, model list) |
 | `GET /.well-known/opencode` | opencode login manifest (`/windows/.well-known/opencode` for Windows) |
 | `GET /stats` | full stats as JSON (client key required) |
 | `GET /health` | liveness |

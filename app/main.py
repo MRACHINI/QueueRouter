@@ -30,7 +30,7 @@ from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
-from .opencode import model_limits, provider_config, wellknown_manifest
+from .opencode import PLUGIN_PATH, model_limits, plugin_source, provider_config, wellknown_manifest
 from .params import apply_rules, parse_rules, requested_output, too_long
 from .pricing import PriceCatalog
 from .ratelimit import RateLimiter
@@ -836,6 +836,11 @@ def create_app(
     @app.get("/windows/.well-known/opencode")
     async def wellknown_windows(request: Request):
         return wellknown_manifest(public_base(request), "windows")
+
+    @app.get(PLUGIN_PATH)
+    async def opencode_plugin(request: Request):
+        """The opencode plugin (session tags, priorities, model list); holds no secrets."""
+        return Response(plugin_source(public_base(request)), media_type="text/javascript; charset=utf-8")
 
     @app.get("/health")
     async def health() -> dict:

@@ -92,3 +92,16 @@ async def test_admin_download_of_client_config(make_stack):
         assert "mock-model" in provider["models"]
         missing = await c.get("/admin/clients/9999/opencode.json")
         assert missing.status_code == 303 and "client_unavailable" in missing.headers["location"]
+
+
+async def test_plugin_is_served_pointing_at_this_router(make_stack):
+    stack = make_stack(bootstrap={**OWNER, "public_url": "https://qr.example.com"})
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        r = await c.get("/opencode/queuerouter.js")  # public: holds no secrets
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/javascript")
+        assert 'const BASE = "https://qr.example.com";' in r.text
+        assert "export const QueueRouter" in r.text and '"chat.headers"' in r.text
+        await login(c, stack.url)
+        page = (await c.get("/admin/clients")).text
+        assert "~/.config/opencode/plugin/queuerouter.js" in page
+        assert "https://qr.example.com/opencode/queuerouter.js" in page

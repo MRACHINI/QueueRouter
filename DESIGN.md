@@ -1059,6 +1059,9 @@ Anthropic Messages + OpenAI Responses adapters, structured-output repair, async 
 content logging, alerts + webhooks + UI notifications, cost estimates, TOTP 2FA, audit log,
 backup/restore.
 
+**Progress:** opencode plugin (session/task headers, low-priority titles, model list without
+login) shipped as v0.6.0.
+
 ### Phase 3 — Extras
 Prometheus metrics, monthly token quotas, recurring (cron) jobs, OpenTelemetry.
 
