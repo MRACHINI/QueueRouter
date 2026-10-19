@@ -18,31 +18,6 @@ shown once when created. Changes apply immediately.</p>
       {% if not c.enabled %}<span class="badge">disabled</span>{% endif %}
       {% if c.expired %}<span class="badge high">expired</span>{% endif %}
       {% if c.notes %}<div class="small muted">{{ c.notes }}</div>{% endif %}
-      {% set p = c.policy %}
-      <details class="policy">
-        <summary class="small">Limits{% if p.allowed_models or p.rate_limited or p.max_queued is not none or p.max_active is not none or p.total_timeout_s or p.queue_timeout_s or p.max_retries is not none %} <span class="badge">set</span>{% endif %}</summary>
-        <form method="post" action="/admin/clients/{{ c.id }}/policy" class="grid tight">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <label class="span-all">Allowed models <small class="muted">comma-separated; empty = all</small>
-            <input name="allowed_models" value="{{ p.allowed_models | join(', ') }}"></label>
-          <label>Requests / min <input type="number" name="rpm" min="1" value="{{ p.rpm if p.rpm is not none else '' }}"></label>
-          <label>Requests / day <input type="number" name="rpd" min="1" value="{{ p.rpd if p.rpd is not none else '' }}"></label>
-          <label>Tokens / min <input type="number" name="tpm" min="1" value="{{ p.tpm if p.tpm is not none else '' }}"></label>
-          <label>Tokens / day <input type="number" name="tpd" min="1" value="{{ p.tpd if p.tpd is not none else '' }}"></label>
-          <label>At the limit
-            <select name="on_limit">
-              <option value="delay" {% if p.on_limit == "delay" %}selected{% endif %}>delay (wait in queue)</option>
-              <option value="reject" {% if p.on_limit == "reject" %}selected{% endif %}>reject (429)</option>
-            </select></label>
-          <label>Max queued <input type="number" name="max_queued" min="0" value="{{ p.max_queued if p.max_queued is not none else '' }}"></label>
-          <label>Max active <input type="number" name="max_active" min="1" value="{{ p.max_active if p.max_active is not none else '' }}"></label>
-          <label>Queue timeout (s) <input type="number" step="any" name="queue_timeout_s" min="1" value="{{ p.queue_timeout_s if p.queue_timeout_s is not none else '' }}"></label>
-          <label>Total timeout (s) <input type="number" step="any" name="total_timeout_s" min="1" value="{{ p.total_timeout_s if p.total_timeout_s is not none else '' }}"></label>
-          <label>Max retries <input type="number" name="max_retries" min="-1" value="{{ p.max_retries if p.max_retries is not none else '' }}"></label>
-          <div class="align-end"><button type="submit" class="secondary">Save limits</button></div>
-        </form>
-        <p class="small muted">Blank = no limit / global default. Rate limits count started requests and finished tokens over rolling windows.</p>
-      </details>
     </td>
     <td data-label="Key"><code>{{ c.key_prefix }}…</code></td>
     <td data-label="Now">{{ now.active }} active · {{ now.queued }} queued</td>
@@ -69,6 +44,35 @@ shown once when created. Changes apply immediately.</p>
           <button type="submit" class="danger">Delete</button>
         </form>
       </div>
+    </td>
+  </tr>
+  <tr class="policy-row">
+    <td colspan="5" data-label="">
+        {% set p = c.policy %}
+        <details class="policy">
+          <summary class="small">Limits{% if p.allowed_models or p.rate_limited or p.max_queued is not none or p.max_active is not none or p.total_timeout_s or p.queue_timeout_s or p.max_retries is not none %} <span class="badge">set</span>{% endif %}</summary>
+          <form method="post" action="/admin/clients/{{ c.id }}/policy" class="grid tight">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <label class="span-all">Allowed models <small class="muted">comma-separated; empty = all</small>
+              <input name="allowed_models" value="{{ p.allowed_models | join(', ') }}"></label>
+            <label>Requests / min <input type="number" name="rpm" min="1" value="{{ p.rpm if p.rpm is not none else '' }}"></label>
+            <label>Requests / day <input type="number" name="rpd" min="1" value="{{ p.rpd if p.rpd is not none else '' }}"></label>
+            <label>Tokens / min <input type="number" name="tpm" min="1" value="{{ p.tpm if p.tpm is not none else '' }}"></label>
+            <label>Tokens / day <input type="number" name="tpd" min="1" value="{{ p.tpd if p.tpd is not none else '' }}"></label>
+            <label>At the limit
+              <select name="on_limit">
+                <option value="delay" {% if p.on_limit == "delay" %}selected{% endif %}>delay (wait in queue)</option>
+                <option value="reject" {% if p.on_limit == "reject" %}selected{% endif %}>reject (429)</option>
+              </select></label>
+            <label>Max queued <input type="number" name="max_queued" min="0" value="{{ p.max_queued if p.max_queued is not none else '' }}"></label>
+            <label>Max active <input type="number" name="max_active" min="1" value="{{ p.max_active if p.max_active is not none else '' }}"></label>
+            <label>Queue timeout (s) <input type="number" step="any" name="queue_timeout_s" min="1" value="{{ p.queue_timeout_s if p.queue_timeout_s is not none else '' }}"></label>
+            <label>Total timeout (s) <input type="number" step="any" name="total_timeout_s" min="1" value="{{ p.total_timeout_s if p.total_timeout_s is not none else '' }}"></label>
+            <label>Max retries <input type="number" name="max_retries" min="-1" value="{{ p.max_retries if p.max_retries is not none else '' }}"></label>
+            <div class="align-end"><button type="submit" class="secondary">Save limits</button></div>
+          </form>
+          <p class="small muted">Blank = no limit / global default. Rate limits count started requests and finished tokens over rolling windows.</p>
+        </details>
     </td>
   </tr>
   {% else %}

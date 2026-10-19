@@ -110,7 +110,7 @@ legend { font-weight: 600; padding: 0 6px; }
 .nav-spacer { flex: 1; }
 .nav-toggle, .nav-burger { display: none; }
 
-@media (max-width: 760px) {
+@media (max-width: 1100px) {
   .nav-burger { display: block; margin-left: auto; font-size: 1.4rem; cursor: pointer; padding: 4px 8px; }
   .nav { display: none; flex-basis: 100%; flex-direction: column; align-items: stretch; }
   .nav-toggle:checked ~ .nav { display: flex; }
@@ -202,3 +202,5 @@ details.policy form { margin-top: 8px; }
 
 fieldset.plain { border: 0; padding: 0; margin: 0; }
 ul.columns { columns: 16em; margin: 8px 0 0; padding-left: 18px; }
+tr.policy-row td { padding-top: 0; }
+tr:has(+ tr.policy-row) td { border-bottom: 0; }
