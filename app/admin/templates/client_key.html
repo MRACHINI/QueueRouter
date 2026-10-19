@@ -28,6 +28,20 @@
 </details>
 
 <details class="card">
+  <summary><strong>opencode plugin</strong> (optional add-on, recommended)</summary>
+  <p class="small">Tags opencode's requests with its session and task, so QueueRouter finishes a
+  conversation (and its subagents) before starting new ones and applies run budgets per task; sends
+  title generation at low priority; and loads your models on every start from <code>QUEUEROUTER_KEY</code>
+  (no login needed). Install once, then restart opencode:</p>
+  <p class="small muted">Linux / macOS:</p>
+<pre class="mono wrap-any" id="plugin-posix">{{ plugin.posix }}</pre>
+  <button type="button" class="secondary" data-copy="#plugin-posix">Copy</button>
+  <p class="small muted">Windows (PowerShell):</p>
+<pre class="mono wrap-any" id="plugin-windows">{{ plugin.windows }}</pre>
+  <button type="button" class="secondary" data-copy="#plugin-windows">Copy</button>
+</details>
+
+<details class="card">
   <summary><strong>opencode — config file</strong> (older opencode, or no login)</summary>
   <p class="small">Download the generated config and point opencode at it (re-run to refresh the model list):</p>
 <pre class="mono wrap-any" id="oc-file">curl -H "Authorization: Bearer {{ key }}" {{ base_url }}/opencode-config -o ~/.config/opencode/queuerouter.json</pre>

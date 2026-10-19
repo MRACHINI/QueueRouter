@@ -27,6 +27,7 @@ from ..agents import parse_tags
 from ..auth import AuthGuard, client_ip
 from ..config import ON_LIMIT, PRIORITIES, TUNABLES, Bootstrap, ClientPolicy
 from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
+from ..opencode import plugin_install_commands
 from ..params import parse_rules
 from ..presets import ARLIAI_PLANS, PRESETS, plan_for
 from ..pricing import PriceCatalog, resolve, summarize_usage
@@ -451,13 +452,23 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             regenerated=regenerated,
             base_url=f"{base}/v1",
             site_url=base,
+            plugin=plugin_install_commands(base),
         )
 
     @app.get("/admin/clients")
     async def clients(request: Request):
         session = require(request, "admin")
         live = ctx.live_state().get("clients", {})
-        return page(request, "clients.html", session, clients=store.list_clients(), priorities=PRIORITIES, live=live)
+        base = bootstrap.public_url or f"{request.url.scheme}://{request.url.netloc}"
+        return page(
+            request,
+            "clients.html",
+            session,
+            clients=store.list_clients(),
+            priorities=PRIORITIES,
+            live=live,
+            plugin=plugin_install_commands(base),
+        )
 
     @app.post("/admin/clients")
     async def clients_create(request: Request):

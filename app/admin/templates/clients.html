@@ -5,6 +5,20 @@
 <p class="muted">Each app (opencode, scripts, n8n…) gets its own key. Keys are stored only as hashes and
 shown once when created. Changes apply immediately.</p>
 
+<details class="card">
+  <summary><strong>opencode plugin</strong> (optional add-on, recommended)</summary>
+  <p class="small">Tags opencode's requests with its session and task, so QueueRouter finishes a
+  conversation (and its subagents) before starting new ones and applies run budgets per task; sends
+  title generation at low priority; and loads your models on every start from <code>QUEUEROUTER_KEY</code>
+  (no login needed). Install once, then restart opencode:</p>
+  <p class="small muted">Linux / macOS:</p>
+<pre class="mono wrap-any" id="plugin-posix">{{ plugin.posix }}</pre>
+  <button type="button" class="secondary" data-copy="#plugin-posix">Copy</button>
+  <p class="small muted">Windows (PowerShell):</p>
+<pre class="mono wrap-any" id="plugin-windows">{{ plugin.windows }}</pre>
+  <button type="button" class="secondary" data-copy="#plugin-windows">Copy</button>
+</details>
+
 <div class="table-wrap">
 <table class="cards">
   <thead><tr><th>Client</th><th>Key</th><th>Now</th><th>Settings</th><th></th></tr></thead>
