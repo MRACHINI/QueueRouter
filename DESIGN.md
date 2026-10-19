@@ -1074,6 +1074,9 @@ re-ask) and for non-streaming replies; JSON Schema is not validated beyond parsi
 ### Phase 3 — Extras
 Prometheus metrics, monthly token quotas, recurring (cron) jobs, OpenTelemetry.
 
+**Status: shipped as v0.14.0.** Notes: metrics and the OTLP exporter are written by hand (no
+client/SDK dependencies); quotas also cover requests and cost, not only tokens; cron is UTC.
+
 ---
 
 ## 21. Open questions

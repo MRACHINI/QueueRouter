@@ -25,7 +25,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from . import __version__, anthropic_api, content_log, metrics, responses_api, structured
+from . import __version__, anthropic_api, content_log, metrics, responses_api, structured, tracing
 from . import cron as cron_mod
 from . import jobs as jobs_mod
 from .admin import AdminContext, mount_admin
@@ -342,9 +342,13 @@ def create_app(
             if share is not None:
                 alerts.quota(key.name, share, month)
 
+    exporter = tracing.Exporter()
+
     def sink(entry: dict) -> None:
         pending_usage.append(entry)
         alerts.observe(entry)
+        if entry.get("trace"):
+            exporter.observe(entry)
         monthly.observe(entry)
 
     stats.sink = sink
@@ -396,6 +400,7 @@ def create_app(
         last_prune = 0.0
         last_sample = 0.0
         last_quota = 0.0
+        last_trace = 0.0
         peak = [0, 0]  # active, queued since the last sample
         while True:
             await asyncio.sleep(1)
@@ -417,6 +422,17 @@ def create_app(
                 await alerts.check_slow()
             except Exception as exc:  # alerts must never stop the loop
                 log.error(json.dumps({"event": "alert_check_failed", "error": repr(exc)[:200]}))
+            if exporter.pending and (time.monotonic() - last_trace > 5 or len(exporter.pending) >= tracing.BATCH):
+                last_trace = time.monotonic()
+                s = cfg()
+                if s.otel_endpoint:
+                    asyncio.ensure_future(
+                        exporter.flush(
+                            app.state.client, s.otel_endpoint, s.otel_headers, s.otel_service_name, __version__
+                        )
+                    )
+                else:
+                    exporter.pending.clear()
             if time.monotonic() - last_quota > 60:
                 last_quota = time.monotonic()
                 try:
@@ -477,6 +493,13 @@ def create_app(
         task.cancel()
         await job_runner.stop()
         await flush_usage()
+        if exporter.pending and cfg().otel_endpoint:
+            with contextlib.suppress(Exception):
+                s = cfg()
+                await asyncio.wait_for(
+                    exporter.flush(app.state.client, s.otel_endpoint, s.otel_headers, s.otel_service_name, __version__),
+                    10,
+                )
         with contextlib.suppress(Exception):
             await asyncio.wait_for(alerts.drain(), 15)
         await app.state.client.aclose()
@@ -1668,6 +1691,10 @@ def create_app(
                     )
         position = queue.predict_position(client.name, lane, session)
         rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies))
+        if cfg().otel_endpoint:  # tracing: continue the caller's trace, hand ours to the provider
+            trace = tracing.start(request_headers.get("traceparent"))
+            rlog.fields["trace"] = trace
+            request_headers = {**request_headers, "traceparent": trace["upstream_traceparent"]}
         rlog.fields.update(
             client=client.name,
             priority=LANE_NAMES[lane],

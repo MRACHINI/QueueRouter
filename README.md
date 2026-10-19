@@ -41,6 +41,13 @@ from a **web admin UI**.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.
+- **Recurring jobs**: cron schedules (UTC, e.g. `0 2 * * *`) that create jobs — from the admin Jobs
+  page or `/v1/schedules`; pause, resume or run now.
+- **Monthly quotas** per client: requests, tokens and cost (at official prices) per calendar month;
+  beyond them requests get 429 until the next month; alerts at 80 % and when used up.
+- **Monitoring**: Prometheus `/metrics` (token-protected: queue, pools, circuits, requests, tokens,
+  wait histograms, jobs) and OpenTelemetry traces over OTLP/HTTP (honours the caller's
+  `traceparent`; GenAI attributes; queue and upstream spans). Both off until set in Settings.
 - **Async jobs and batches**: `POST /v1/jobs` (or any request with `X-QueueRouter-Async: true`)
   returns at once and runs later — scheduled (`run_at`), with a `deadline`, only when idle, with a
   signed HTTPS callback; plus the OpenAI **Batch API** (`/v1/files`, `/v1/batches`) so SDK batch code
@@ -249,6 +256,8 @@ Everything else is configured in the admin UI.
 | `GET /opencode/queuerouter.js` | opencode plugin (session/task tags, priorities, model list) |
 | `GET /.well-known/opencode` | opencode login manifest (`/windows/.well-known/opencode` for Windows) |
 | `GET /stats` | full stats as JSON (client key required) |
+| `GET /metrics` | Prometheus metrics; `Authorization: Bearer <metrics token>` (Settings → Monitoring) |
+| `/v1/schedules` | recurring jobs: `POST` `{"name", "cron", "request", ...job fields}`, `GET`, `PATCH {"enabled"}`, `DELETE`, `POST /{id}/run` |
 | `GET /health` | liveness |
 
 **Request headers** (optional, never forwarded upstream): `X-QueueRouter-Priority:
