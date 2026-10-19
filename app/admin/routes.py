@@ -131,6 +131,7 @@ class AdminContext:
     models_by_upstream: Callable[[], dict[str, list[str]]]
     prices: PriceCatalog
     refresh_prices: Callable[[], Awaitable[bool]]
+    playground: Callable[[Request, str, bytes], Awaitable[Response]]
 
 
 class NeedLogin(Exception):
@@ -905,6 +906,32 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         store.delete_alias(alias_id, session.user.username)
         ctx.reload()
         return back("/admin/models", "deleted")
+
+    # -- playground ----------------------------------------------------------------------
+
+    @app.get("/admin/playground")
+    async def playground_page(request: Request):
+        session = require(request, "operator")
+        model_ids = sorted({m for ids in ctx.models_by_upstream().values() for m in ids})
+        aliases = [a.name for a in store.list_aliases() if a.enabled]
+        clients = [c for c in store.list_clients() if c.enabled and not c.expired]
+        return page(request, "playground.html", session, models=model_ids, aliases=aliases, clients=clients)
+
+    @app.post("/admin/playground/send")
+    async def playground_send(request: Request):
+        """JSON in (fetch from the page, CSRF token in a header), OpenAI response / SSE out."""
+        session = require(request, "operator")
+        if not csrf_ok(session, request.headers.get("x-csrf-token")):
+            raise PermissionError("csrf")
+        try:
+            data = json.loads(await request.body())
+            client_name = str(data.pop("client"))
+        except (ValueError, KeyError, AttributeError):
+            return JSONResponse({"error": {"message": "bad playground request", "code": 400}}, status_code=400)
+        allowed = {"model", "messages", "stream", "max_tokens", "temperature", "stream_options"}
+        body = json.dumps({k: v for k, v in data.items() if k in allowed}).encode()
+        store.audit(session.user.username, "playground", client_name, {"model": data.get("model")})
+        return await ctx.playground(request, client_name, body)
 
     # -- audit ---------------------------------------------------------------------------
 

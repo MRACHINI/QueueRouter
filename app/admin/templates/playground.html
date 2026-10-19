@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Playground{% endblock %}
+{% block content %}
+<h1>Playground</h1>
+<p class="muted small">Chat as one of your clients: its priority, limits, parameter rules, aliases and fallbacks all
+apply, and requests go through the same queue as real traffic (tagged <code>playground</code>).</p>
+
+<div id="playground" data-csrf="{{ csrf }}">
+  <div class="card grid">
+    <label>As client
+      <select id="pg-client">{% for c in clients %}<option value="{{ c.name }}">{{ c.name }} ({{ c.priority }})</option>{% endfor %}</select>
+    </label>
+    <label>Model or alias
+      <input id="pg-model" list="pg-models" value="{{ (aliases[0] if aliases else (models[0] if models else '')) }}" required>
+      <datalist id="pg-models">{% for a in aliases %}<option value="{{ a }}">alias</option>{% endfor %}{% for m in models %}<option value="{{ m }}">{% endfor %}</datalist>
+    </label>
+    <label>Max tokens <input id="pg-max" type="number" min="1" value="512"></label>
+    <label class="check"><input id="pg-stream" type="checkbox" checked> <span>Stream</span></label>
+    <label class="span-all">System prompt <textarea id="pg-system" rows="2" placeholder="optional"></textarea></label>
+  </div>
+
+  <div id="pg-log" class="chat"></div>
+
+  <form id="pg-form" class="row wrap">
+    <textarea id="pg-input" rows="3" class="grow" placeholder="Message… (Ctrl+Enter to send)" required></textarea>
+    <div class="stack">
+      <button type="submit" id="pg-send">Send</button>
+      <button type="button" class="secondary" id="pg-clear">Clear</button>
+    </div>
+  </form>
+  <p class="small muted" id="pg-meta"></p>
+</div>
+{% if not clients %}<p class="notice err">Create a client first (Clients page).</p>{% endif %}
+{% endblock %}
