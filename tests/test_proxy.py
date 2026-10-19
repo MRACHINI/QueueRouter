@@ -271,3 +271,79 @@ async def test_tool_call_payload_passes_through_untouched(make_stack):
         assert r.status_code == 200
     assert stack.mock["last_body"] == raw
     assert stack.mock["last_auth"] == "Bearer upstream-secret"
+
+
+# -- scheduling and hints --------------------------------------------------------------------
+
+KEYS = ("chat:k-chat:high", "batch:k-batch:low")
+
+
+def auth(key):
+    return {"Authorization": f"Bearer {key}"}
+
+
+async def test_high_priority_client_goes_first(make_stack):
+    stack = make_stack(limit=1, access_keys=KEYS)
+    async with httpx.AsyncClient(timeout=30) as c:
+        url = f"{stack.url}/v1/chat/completions"
+        blocker = asyncio.create_task(c.post(url, headers=auth("k-batch"), json=chat("blocker", mock_delay=0.1)))
+        await eventually(lambda: stack.mock["active"] == 1)
+        batch = asyncio.create_task(c.post(url, headers=auth("k-batch"), json=chat("batch")))
+        await asyncio.sleep(0.1)
+        chat_req = asyncio.create_task(c.post(url, headers=auth("k-chat"), json=chat("chat")))
+        await asyncio.gather(blocker, batch, chat_req)
+    starts = [tag for event, tag in stack.mock["log"] if event == "start"]
+    assert starts == ["blocker", "chat", "batch"]
+
+
+async def test_priority_header_can_only_lower(make_stack):
+    stack = make_stack(limit=1, access_keys=KEYS)
+    async with httpx.AsyncClient(timeout=30) as c:
+        url = f"{stack.url}/v1/chat/completions"
+        blocker = asyncio.create_task(c.post(url, headers=auth("k-chat"), json=chat("blocker", mock_delay=0.1)))
+        await eventually(lambda: stack.mock["active"] == 1)
+        # batch asks for "high" (ignored: it's a low client); chat asks for "low" (honoured)
+        batch = asyncio.create_task(
+            c.post(url, headers={**auth("k-batch"), "X-QueueRouter-Priority": "high"}, json=chat("batch"))
+        )
+        await asyncio.sleep(0.1)
+        lowered_headers = {**auth("k-chat"), "X-QueueRouter-Priority": "low", "X-Session-Id": "separate-task"}
+        lowered = asyncio.create_task(c.post(url, headers=lowered_headers, json=chat("lowered")))
+        await asyncio.gather(blocker, batch, lowered)
+    starts = [tag for event, tag in stack.mock["log"] if event == "start"]
+    assert starts == ["blocker", "batch", "lowered"]
+
+
+async def test_queue_hints(make_stack):
+    stack = make_stack(limit=1)
+    async with httpx.AsyncClient(timeout=30) as c:
+        url = f"{stack.url}/v1/chat/completions"
+        first = await c.post(url, headers=stack.headers, json=chat("warmup"))
+        assert first.headers["X-QueueRouter-Position"] == "0"
+        assert first.headers["X-QueueRouter-Slots"] == "0/1"
+
+        blocker = asyncio.create_task(c.post(url, headers=stack.headers, json=chat("blocker", mock_delay=0.1)))
+        await eventually(lambda: stack.mock["active"] == 1)
+        q = (await c.get(f"{stack.url}/v1/queue", headers=stack.headers)).json()
+        assert q["active"] == 1 and q["max_concurrency"] == 1
+        assert q["client"]["name"] == "client1" and q["estimated_wait_ms"] > 0
+
+        queued = await c.post(url, headers=stack.headers, json=chat("queued"))
+        assert queued.headers["X-QueueRouter-Position"] == "1"
+        assert queued.headers["X-QueueRouter-Slots"] == "1/1"
+        assert int(queued.headers["X-QueueRouter-Est-Wait-Ms"]) > 0
+        assert int(queued.headers["X-Queue-Wait-Ms"]) > 0
+        await blocker
+
+
+async def test_stats_per_client(make_stack):
+    stack = make_stack(access_keys=KEYS)
+    async with httpx.AsyncClient(timeout=30) as c:
+        url = f"{stack.url}/v1/chat/completions"
+        await c.post(url, headers=auth("k-chat"), json=chat())
+        await c.post(url, headers=auth("k-batch"), json=chat())
+        await c.post(url, headers=auth("k-batch"), json=chat())
+        s = (await c.get(f"{stack.url}/stats", headers=auth("k-chat"))).json()
+    assert s["per_client"]["chat"]["outcomes"] == {"done": 1}
+    assert s["per_client"]["batch"]["outcomes"] == {"done": 2}
+    assert s["queued_by_lane"] == {"high": 0, "normal": 0, "low": 0}

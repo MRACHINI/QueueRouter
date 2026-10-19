@@ -1,4 +1,4 @@
-"""Phase 0 settings, read from environment variables (see .env.example).
+"""Settings, read from environment variables (see .env.example).
 
 These move into the database / web UI in Phase 1a.
 """
@@ -6,6 +6,39 @@ These move into the database / web UI in Phase 1a.
 import ipaddress
 import os
 from dataclasses import dataclass, field
+
+PRIORITIES = ("high", "normal", "low")
+
+
+@dataclass(frozen=True)
+class ClientKey:
+    name: str
+    key: str
+    priority: str = "normal"
+
+
+def parse_access_keys(entries: tuple[str, ...]) -> tuple[ClientKey, ...]:
+    """Parse ACCESS_KEYS entries: ``key``, ``name:key`` or ``name:key:priority``."""
+    clients = []
+    for i, entry in enumerate(entries, 1):
+        parts = [p.strip() for p in entry.split(":")]
+        if len(parts) == 1:
+            name, key, priority = f"client{i}", parts[0], "normal"
+        elif len(parts) == 2:
+            name, key, priority = parts[0], parts[1], "normal"
+        elif len(parts) == 3:
+            name, key, priority = parts
+        else:
+            raise ValueError(f"ACCESS_KEYS entry #{i} must be 'key', 'name:key' or 'name:key:priority'")
+        if not name or not key:
+            raise ValueError(f"ACCESS_KEYS entry #{i} has an empty name or key")
+        if priority not in PRIORITIES:
+            raise ValueError(f"ACCESS_KEYS entry #{i}: priority must be one of {', '.join(PRIORITIES)}")
+        clients.append(ClientKey(name, key, priority))
+    names = [c.name for c in clients]
+    if len(set(names)) != len(names):
+        raise ValueError("ACCESS_KEYS client names must be unique")
+    return tuple(clients)
 
 
 def _int(env: dict[str, str], name: str, default: int) -> int:
@@ -34,6 +67,12 @@ class Settings:
     min_spacing_ms: int = 0
     max_queue_wait_s: float = 0  # 0 = unlimited
     keepalive_interval_s: float = 15
+
+    # Scheduling
+    aging_s: float = 120  # waiting this long bumps a request one priority lane up
+    session_aware: bool = True  # sessions already mid-task go before new ones
+    session_window_s: float = 60  # how long a session counts as "mid-task" after a request
+    fair_share: bool = True  # among equals, the client served least recently goes first
 
     # Upstream retry safety net (429 / 5xx / connection errors)
     max_retries: int = 8  # -1 = forever, 0 = none
@@ -65,6 +104,10 @@ class Settings:
             min_spacing_ms=_int(env, "MIN_SPACING_MS", cls.min_spacing_ms),
             max_queue_wait_s=_float(env, "MAX_QUEUE_WAIT_S", cls.max_queue_wait_s),
             keepalive_interval_s=_float(env, "KEEPALIVE_INTERVAL_S", cls.keepalive_interval_s),
+            aging_s=_float(env, "AGING_S", cls.aging_s),
+            session_aware=_bool(env, "SESSION_AWARE", cls.session_aware),
+            session_window_s=_float(env, "SESSION_WINDOW_S", cls.session_window_s),
+            fair_share=_bool(env, "FAIR_SHARE", cls.fair_share),
             max_retries=_int(env, "MAX_RETRIES", cls.max_retries),
             retry_base_delay_s=_float(env, "RETRY_BASE_DELAY_S", cls.retry_base_delay_s),
             retry_max_delay_s=_float(env, "RETRY_MAX_DELAY_S", cls.retry_max_delay_s),
@@ -91,3 +134,8 @@ class Settings:
             raise ValueError("MAX_CONCURRENCY must be >= 1")
         if not self.access_keys and not self.allow_no_auth:
             raise ValueError("ACCESS_KEYS is required (or set ALLOW_NO_AUTH=true on a private network)")
+        parse_access_keys(self.access_keys)
+
+    @property
+    def clients(self) -> tuple[ClientKey, ...]:
+        return parse_access_keys(self.access_keys)
