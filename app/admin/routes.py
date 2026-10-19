@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import sqlite3
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -26,7 +27,8 @@ from .. import __version__, totp
 from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
 from ..auth import AuthGuard, client_ip
-from ..config import ON_LIMIT, PRIORITIES, TUNABLES, Bootstrap, ClientPolicy
+from ..backup import MAX_UPLOAD_BYTES, RestoreError, backup_path, list_backups, make_archive, stage_restore
+from ..config import ON_LIMIT, PRIORITIES, TUNABLES, Bootstrap, ClientPolicy, Settings
 from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
@@ -72,6 +74,7 @@ MESSAGES = {
     "webhook_failed": "The test notification could not be delivered; see the error on the webhook.",
     "read": "All notifications marked as read.",
     "2fa_off": "Two-factor sign-in is off.",
+    "backup_missing": "That backup file doesn't exist.",
     "2fa_reset": "Two-factor sign-in was reset for that user; they sign in with their password "
     "and can set it up again.",
 }
@@ -96,6 +99,11 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Usage",
         "Keep request log (days)",
         "Per-request metadata rows; 0 = keep none. Daily totals are kept forever.",
+    ),
+    "backup_keep_days": (
+        "Backup",
+        "Daily backups to keep",
+        "A copy of the database is made in /data/backups every day; 0 = off. See the Backup page.",
     ),
     "lb_strategy": (
         "Upstreams",
@@ -146,6 +154,7 @@ class AdminContext:
     playground: Callable[[Request, str, bytes], Awaitable[Response]]
     opencode_config: Callable[[Request, str], Awaitable[dict | None]]
     alerts: Alerts
+    restart: Callable[[], None]
 
 
 class NeedLogin(Exception):
@@ -1200,6 +1209,87 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         return back(
             "/admin/alerts#webhooks", "webhook_ok" if error is None else None, "webhook_failed" if error else None
         )
+
+    # -- backup and restore ----------------------------------------------------------------
+
+    def backup_page(request: Request, session: AdminSession, **context) -> HTMLResponse:
+        return page(
+            request,
+            "backup.html",
+            session,
+            files=list_backups(bootstrap.data_dir),
+            keep_days=store.get_tunables().get("backup_keep_days", Settings().backup_keep_days),
+            env_key=bool(bootstrap.secret_key),
+            **context,
+        )
+
+    @app.get("/admin/backup")
+    async def backup(request: Request):
+        session = require(request, "owner")
+        return backup_page(request, session)
+
+    @app.post("/admin/backup/download")
+    async def backup_download(request: Request):
+        session, form = await require_post(request, "owner")
+        include_key = form.get("include_key") == "on"
+        data = await asyncio.to_thread(make_archive, store, bootstrap.data_dir, include_key, __version__)
+        store.audit(session.user.username, "backup.download", "", {"includes_key": include_key})
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        return Response(
+            data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="queuerouter-backup-{stamp}.zip"'},
+        )
+
+    @app.get("/admin/backup/files/{name}")
+    async def backup_file(name: str, request: Request):
+        session = require(request, "owner")
+        path = backup_path(bootstrap.data_dir, name)
+        if path is None:
+            return back("/admin/backup", error="backup_missing")
+        store.audit(session.user.username, "backup.file_download", name)
+        return FileResponse(path, media_type="application/vnd.sqlite3", filename=name)
+
+    async def staged(request: Request, session: AdminSession, path: str, source: str) -> HTMLResponse:
+        try:
+            summary = await asyncio.to_thread(
+                stage_restore, bootstrap.data_dir, path, store.fernet, bool(bootstrap.secret_key)
+            )
+        except RestoreError as exc:
+            return backup_page(request, session, error=str(exc))
+        store.audit(session.user.username, "backup.restore", source, summary)
+        asyncio.get_running_loop().call_later(1.5, ctx.restart)  # after this page has been sent
+        return page(request, "backup_restarting.html", session, summary=summary)
+
+    @app.post("/admin/backup/files/{name}/restore")
+    async def backup_file_restore(name: str, request: Request):
+        session, _ = await require_post(request, "owner")
+        path = backup_path(bootstrap.data_dir, name)
+        if path is None:
+            return back("/admin/backup", error="backup_missing")
+        return await staged(request, session, path, name)
+
+    @app.post("/admin/backup/restore")
+    async def backup_restore(request: Request):
+        session = require(request, "owner")
+        async with request.form(max_files=1, max_part_size=MAX_UPLOAD_BYTES) as form:
+            if not csrf_ok(session, str(form.get("csrf", ""))):
+                raise PermissionError("csrf")
+            upload = form.get("file")
+            if upload is None or isinstance(upload, str) or not upload.filename:
+                return backup_page(request, session, error="Choose a backup file (.zip or .db) to restore.")
+            fd, path = tempfile.mkstemp(dir=bootstrap.data_dir, prefix=".upload-")
+            try:
+                size = 0
+                with os.fdopen(fd, "wb") as out:
+                    while chunk := await upload.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > MAX_UPLOAD_BYTES:
+                            return backup_page(request, session, error="That file is too large.")
+                        out.write(chunk)
+                return await staged(request, session, path, upload.filename)
+            finally:
+                os.remove(path)
 
     # -- audit ---------------------------------------------------------------------------
 

@@ -112,6 +112,14 @@ SPECS: dict[str, RuleSpec] = {
             "days",
         ),
         RuleSpec(
+            "backup_failed",
+            "Automatic backup failed",
+            "The daily database copy couldn't be written (disk full, permissions...).",
+            "error",
+            True,
+            86_400,
+        ),
+        RuleSpec(
             "daily_tokens",
             "Daily tokens",
             "All clients together used more tokens than this today (UTC).",
