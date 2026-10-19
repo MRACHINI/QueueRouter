@@ -174,6 +174,39 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE requests ADD COLUMN tags TEXT;
     """,
+    # 9: alerts: rule overrides, webhooks (URL and secret encrypted), in-app notifications
+    """
+    CREATE TABLE alert_rules (
+        kind TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL,
+        threshold REAL,
+        window_s INTEGER,
+        cooldown_s INTEGER
+    );
+    CREATE TABLE webhooks (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        url TEXT NOT NULL,
+        secret TEXT,
+        min_level TEXT NOT NULL DEFAULT 'warning',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_at REAL,
+        last_ok INTEGER,
+        last_error TEXT,
+        created_at REAL NOT NULL
+    );
+    CREATE TABLE notifications (
+        id INTEGER PRIMARY KEY,
+        ts REAL NOT NULL,
+        level TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        read INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX notifications_ts ON notifications (ts);
+    """,
 ]
 
 REQUEST_COLUMNS = (
@@ -253,6 +286,20 @@ class Client:
     @property
     def expired(self) -> bool:
         return self.expires_at is not None and self.expires_at <= time.time()
+
+
+@dataclass(frozen=True)
+class Webhook:
+    id: int
+    name: str
+    kind: str  # discord | slack | ntfy | json
+    url: str
+    secret: str | None  # HMAC key for "json" webhooks
+    min_level: str
+    enabled: bool
+    last_at: float | None = None
+    last_ok: bool | None = None
+    last_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -851,6 +898,116 @@ class Store:
         with self.tx() as db:
             db.execute("DELETE FROM aliases WHERE id = ?", (alias_id,))
         self.audit(actor, "alias.delete", str(alias_id))
+
+    # -- alerts, webhooks, notifications -------------------------------------------------
+
+    def alert_rule_overrides(self) -> dict[str, sqlite3.Row]:
+        return {r["kind"]: r for r in self.query("SELECT * FROM alert_rules")}
+
+    def save_alert_rule(
+        self,
+        kind: str,
+        enabled: bool,
+        threshold: float | None,
+        window_s: int | None,
+        cooldown_s: int | None,
+        actor: str,
+    ) -> None:
+        with self.tx() as db:
+            db.execute(
+                "INSERT INTO alert_rules (kind, enabled, threshold, window_s, cooldown_s) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(kind) DO UPDATE SET enabled = excluded.enabled, threshold = excluded.threshold, "
+                "window_s = excluded.window_s, cooldown_s = excluded.cooldown_s",
+                (kind, int(enabled), threshold, window_s, cooldown_s),
+            )
+        self.audit(
+            actor,
+            "alert.rule",
+            kind,
+            {"enabled": enabled, "threshold": threshold, "window_s": window_s, "cooldown_s": cooldown_s},
+        )
+
+    def list_webhooks(self) -> list[Webhook]:
+        return [
+            Webhook(
+                r["id"],
+                r["name"],
+                r["kind"],
+                self.decrypt(r["url"]),
+                self.decrypt(r["secret"]) if r["secret"] else None,
+                r["min_level"],
+                bool(r["enabled"]),
+                r["last_at"],
+                None if r["last_ok"] is None else bool(r["last_ok"]),
+                r["last_error"],
+            )
+            for r in self.query("SELECT * FROM webhooks ORDER BY name")
+        ]
+
+    def create_webhook(self, name: str, kind: str, url: str, secret: str | None, min_level: str, actor: str) -> int:
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT INTO webhooks (name, kind, url, secret, min_level, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (name, kind, self.encrypt(url), self.encrypt(secret) if secret else None, min_level, time.time()),
+            )
+        self.audit(actor, "webhook.create", name, {"kind": kind, "min_level": min_level})
+        return cur.lastrowid
+
+    def update_webhook(self, webhook_id: int, actor: str, **fields: object) -> None:
+        if "url" in fields:
+            fields["url"] = self.encrypt(str(fields["url"]))
+        if "secret" in fields:
+            fields["secret"] = self.encrypt(str(fields["secret"])) if fields["secret"] else None
+        self._update("webhooks", webhook_id, {"url", "secret", "min_level", "enabled", "kind"}, fields)
+        logged = {k: v for k, v in fields.items() if k not in ("url", "secret")}
+        logged.update({k: "changed" for k in ("url", "secret") if k in fields})
+        self.audit(actor, "webhook.update", str(webhook_id), logged)
+
+    def webhook_result(self, webhook_id: int, ok: bool, error: str | None) -> None:
+        with self.tx() as db:
+            db.execute(
+                "UPDATE webhooks SET last_at = ?, last_ok = ?, last_error = ? WHERE id = ?",
+                (time.time(), int(ok), error, webhook_id),
+            )
+
+    def delete_webhook(self, webhook_id: int, actor: str) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM webhooks WHERE id = ?", (webhook_id,))
+        self.audit(actor, "webhook.delete", str(webhook_id))
+
+    def add_notification(self, level: str, kind: str, title: str, body: str = "") -> int:
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT INTO notifications (ts, level, kind, title, body) VALUES (?, ?, ?, ?, ?)",
+                (time.time(), level, kind, title, body),
+            )
+        return cur.lastrowid
+
+    def list_notifications(self, limit: int = 100) -> list[sqlite3.Row]:
+        return self.query("SELECT * FROM notifications ORDER BY id DESC LIMIT ?", (limit,))
+
+    def unread_notifications(self) -> int:
+        return self.query("SELECT COUNT(*) AS n FROM notifications WHERE read = 0")[0]["n"]
+
+    def mark_notifications_read(self) -> None:
+        with self.tx() as db:
+            db.execute("UPDATE notifications SET read = 1 WHERE read = 0")
+
+    def prune_notifications(self, keep_days: int = 30, keep_rows: int = 1000) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM notifications WHERE ts < ?", (time.time() - keep_days * 86_400,))
+            db.execute(
+                "DELETE FROM notifications WHERE id NOT IN (SELECT id FROM notifications ORDER BY id DESC LIMIT ?)",
+                (keep_rows,),
+            )
+
+    def tokens_on(self, day: str) -> dict[str, int]:
+        """Tokens (prompt + completion) per client on a UTC day (YYYY-MM-DD), from the rollup."""
+        rows = self.query(
+            "SELECT client, SUM(prompt_tokens + completion_tokens) AS n FROM usage_daily WHERE day = ? GROUP BY client",
+            (day,),
+        )
+        return {r["client"]: int(r["n"] or 0) for r in rows}
 
     # -- admin users and sessions --------------------------------------------------------
 

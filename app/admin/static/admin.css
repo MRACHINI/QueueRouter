@@ -217,3 +217,7 @@ textarea.rules { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace
 .bubble.error { border-color: var(--danger); color: var(--danger); }
 a.button { display: inline-block; text-decoration: none; font-weight: 600; padding: 8px 14px; border-radius: 8px; }
 a.button.secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+.nav-count { display: inline-block; min-width: 1.4em; margin-left: 4px; padding: 0 5px; border-radius: 999px;
+  background: var(--danger); color: #fff; font-size: 0.75em; font-weight: 700; text-align: center; line-height: 1.5; }
+.nav-count[hidden] { display: none; }
+tr.unread td { background: color-mix(in srgb, var(--danger) 6%, transparent); }

@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Alerts{% endblock %}
+{% block content %}
+<h1>Alerts</h1>
+<p class="muted">Rules watch the queue, upstreams and clients. Alerts show up here and in the menu, and are
+sent to your webhooks (Discord, Slack, ntfy or signed JSON).</p>
+
+<h2 id="notifications">Notifications</h2>
+<div class="row wrap">
+  <span class="muted small">Latest 200, kept 30 days.</span>
+  {% if alerts_unread %}
+  <form method="post" action="/admin/alerts/read">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="secondary">Mark all read ({{ alerts_unread }})</button>
+  </form>
+  {% endif %}
+</div>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>When (UTC)</th><th>Level</th><th>Alert</th></tr></thead>
+  <tbody>
+  {% for n in notifications %}
+  <tr {% if not n.read %}class="unread"{% endif %}>
+    <td data-label="When"><time data-ts="{{ n.ts }}">{{ n.ts | int }}</time></td>
+    <td data-label="Level"><span class="badge {{ 'high' if n.level == 'error' else 'low' if n.level == 'info' else '' }}">{{ n.level }}</span></td>
+    <td data-label="Alert"><strong>{{ n.title }}</strong>{% if not n.read %} <span class="badge high">new</span>{% endif %}
+      {% if n.body %}<div class="small muted">{{ n.body }}</div>{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="3" class="muted">Nothing yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2 id="rules">Rules</h2>
+{% if user.can("admin") %}
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Rule</th><th>Settings</th></tr></thead>
+  <tbody>
+  {% for kind, r in rules.items() %}
+  <tr>
+    <td data-label="Rule"><strong>{{ r.spec.label }}</strong> <span class="badge">{{ r.spec.level }}</span>
+      <div class="small muted">{{ r.spec.help }}</div></td>
+    <td data-label="">
+      <form method="post" action="/admin/alerts/rules/{{ kind }}" class="row wrap">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="check"><input type="checkbox" name="enabled" {% if r.enabled %}checked{% endif %}> on</label>
+        {% if r.spec.threshold is not none %}
+        <label class="inline-field">{{ r.spec.unit }} <input type="number" name="threshold" min="0" step="any" value="{{ '%g' % r.threshold }}"></label>
+        {% endif %}
+        {% if r.spec.window_s is not none %}
+        <label class="inline-field">{{ r.spec.window_label }} <input type="number" name="window_s" min="0" value="{{ r.window_s }}"></label>
+        {% endif %}
+        {% if kind != "started" %}
+        <label class="inline-field">repeat after (s) <input type="number" name="cooldown_s" min="0" value="{{ r.cooldown_s }}"></label>
+        {% endif %}
+        <button type="submit" class="secondary">Save</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2 id="webhooks">Webhooks</h2>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Webhook</th><th>Settings</th><th></th></tr></thead>
+  <tbody>
+  {% for h, masked in webhooks %}
+  <tr>
+    <td data-label="Webhook"><strong>{{ h.name }}</strong> <span class="badge">{{ h.kind }}</span>
+      {% if not h.enabled %}<span class="badge">disabled</span>{% endif %}
+      <div class="small muted mono wrap-any">{{ masked }}</div>
+      {% if h.last_at %}<div class="small {{ 'muted' if h.last_ok else '' }}">
+        last send <time data-ts="{{ h.last_at }}">{{ h.last_at | int }}</time>:
+        {% if h.last_ok %}delivered{% else %}<strong>failed</strong> — {{ h.last_error }}{% endif %}</div>{% endif %}
+    </td>
+    <td data-label="">
+      <form method="post" action="/admin/alerts/webhooks/{{ h.id }}" class="row wrap">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <select name="kind" aria-label="Type">
+          {% for k in webhook_kinds %}<option value="{{ k }}" {% if k == h.kind %}selected{% endif %}>{{ k }}</option>{% endfor %}
+        </select>
+        <input name="url" type="password" placeholder="new URL (blank = keep)" autocomplete="off" aria-label="URL" class="grow">
+        {% if h.kind == "json" %}
+        <input name="secret" type="password" placeholder="new signing secret (blank = keep)" autocomplete="off" aria-label="Signing secret">
+        {% if h.secret %}<label class="check"><input type="checkbox" name="clear_secret"> remove secret</label>{% endif %}
+        {% endif %}
+        <label class="inline-field">from level <select name="min_level">
+          {% for l in levels %}<option value="{{ l }}" {% if l == h.min_level %}selected{% endif %}>{{ l }}</option>{% endfor %}
+        </select></label>
+        <label class="check"><input type="checkbox" name="enabled" {% if h.enabled %}checked{% endif %}> enabled</label>
+        <button type="submit" class="secondary">Save</button>
+      </form>
+    </td>
+    <td data-label="">
+      <div class="row wrap">
+        <form method="post" action="/admin/alerts/webhooks/{{ h.id }}/test">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="secondary">Send test</button>
+        </form>
+        <form method="post" action="/admin/alerts/webhooks/{{ h.id }}/delete" data-confirm="Delete webhook {{ h.name }}?">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </div>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="3" class="muted">No webhooks yet — alerts only show up here.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h3>Add webhook</h3>
+<form method="post" action="/admin/alerts/webhooks" class="card grid">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Name <input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" placeholder="discord"></label>
+  <label>Type <select name="kind">{% for k in webhook_kinds %}<option value="{{ k }}">{{ k }}</option>{% endfor %}</select></label>
+  <label>URL <input name="url" type="password" required autocomplete="off"
+    placeholder="https://discord.com/api/webhooks/… · https://ntfy.sh/your-topic"></label>
+  <label>Signing secret (json only, optional) <input name="secret" type="password" autocomplete="off"></label>
+  <label>Send from level <select name="min_level">
+    {% for l in levels %}<option value="{{ l }}" {% if l == "warning" %}selected{% endif %}>{{ l }}</option>{% endfor %}
+  </select></label>
+  <p class="small muted">Discord / Slack: an incoming-webhook URL. ntfy: the topic URL (subscribe in the ntfy app).
+  json: POSTs <code>{"source", "kind", "level", "title", "body", "ts"}</code>; with a secret, the
+  <code>X-QueueRouter-Signature: sha256=&lt;HMAC of the body&gt;</code> header proves it came from here.
+  URLs and secrets are stored encrypted.</p>
+  <div><button type="submit">Add webhook</button></div>
+</form>
+{% else %}
+<p class="muted">Rules and webhooks are managed by admins.</p>
+{% endif %}
+{% endblock %}

@@ -24,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import __version__
 from ..agents import parse_tags
+from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
 from ..auth import AuthGuard, client_ip
 from ..config import ON_LIMIT, PRIORITIES, TUNABLES, Bootstrap, ClientPolicy
 from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
@@ -64,6 +65,9 @@ MESSAGES = {
     "(see the example).",
     "client_unavailable": "That client is disabled or expired; enable it first.",
     "refresh_failed": "Couldn't download prices from models.dev right now; the previous list is kept.",
+    "webhook_ok": "Test notification delivered.",
+    "webhook_failed": "The test notification could not be delivered; see the error on the webhook.",
+    "read": "All notifications marked as read.",
 }
 
 SETTING_CHOICES: dict[str, tuple[str, ...]] = {"lb_strategy": STRATEGIES}
@@ -135,6 +139,7 @@ class AdminContext:
     refresh_prices: Callable[[], Awaitable[bool]]
     playground: Callable[[Request, str, bytes], Awaitable[Response]]
     opencode_config: Callable[[Request, str], Awaitable[dict | None]]
+    alerts: Alerts
 
 
 class NeedLogin(Exception):
@@ -186,6 +191,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 "flash": flash,
                 "error": context.pop("error", None) or error,
                 "path": request.url.path,
+                "alerts_unread": store.unread_notifications() if session else 0,
                 **context,
             },
         )
@@ -961,6 +967,109 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         store.audit(session.user.username, "playground", client_name, {"model": data.get("model")})
         return await ctx.playground(request, client_name, body)
 
+    # -- alerts ----------------------------------------------------------------------------
+
+    @app.get("/admin/alerts")
+    async def alerts_page(request: Request):
+        session = require(request, "viewer")
+        hooks = store.list_webhooks() if session.user.can("admin") else []
+        return page(
+            request,
+            "alerts.html",
+            session,
+            notifications=store.list_notifications(200),
+            rules=ctx.alerts.rules,
+            webhooks=[(h, _mask_url(h.url)) for h in hooks],
+            webhook_kinds=WEBHOOK_KINDS,
+            levels=LEVELS,
+        )
+
+    @app.post("/admin/alerts/read")
+    async def alerts_read(request: Request):
+        await require_post(request, "viewer")
+        store.mark_notifications_read()
+        return back("/admin/alerts", "read")
+
+    @app.post("/admin/alerts/rules/{kind}")
+    async def alerts_rule(kind: str, request: Request):
+        session, form = await require_post(request, "admin")
+        spec = SPECS.get(kind)
+        if spec is None:
+            return back("/admin/alerts#rules", error="invalid")
+        try:
+            threshold = float(form["threshold"]) if spec.threshold is not None else None
+            window_s = int(form["window_s"]) if spec.window_s is not None else None
+            cooldown_s = int(form.get("cooldown_s") or spec.cooldown_s)
+        except (KeyError, ValueError):
+            return back("/admin/alerts#rules", error="invalid")
+        if (threshold is not None and threshold < 0) or (window_s is not None and window_s < 0) or cooldown_s < 0:
+            return back("/admin/alerts#rules", error="invalid")
+        store.save_alert_rule(kind, form.get("enabled") == "on", threshold, window_s, cooldown_s, session.user.username)
+        ctx.alerts.reload()
+        return back("/admin/alerts#rules", "saved")
+
+    def webhook_fields(form: dict, creating: bool) -> dict:
+        kind = str(form.get("kind", "")).strip()
+        level = str(form.get("min_level", "warning")).strip()
+        url = str(form.get("url", "")).strip()
+        if kind not in WEBHOOK_KINDS or level not in LEVELS:
+            raise ValueError("kind/level")
+        fields: dict = {"kind": kind, "min_level": level}
+        if url or creating:
+            if not WEBHOOK_URL.fullmatch(url):
+                raise ValueError("url")
+            fields["url"] = url
+        secret = str(form.get("secret", "")).strip()
+        if secret or form.get("clear_secret") == "on":
+            fields["secret"] = secret or None
+        return fields
+
+    @app.post("/admin/alerts/webhooks")
+    async def webhooks_create(request: Request):
+        session, form = await require_post(request, "admin")
+        name = str(form.get("name", "")).strip()
+        try:
+            if not CLIENT_NAME.fullmatch(name):
+                raise ValueError("name")
+            fields = webhook_fields(form, creating=True)
+            store.create_webhook(
+                name, fields["kind"], fields["url"], fields.get("secret"), fields["min_level"], session.user.username
+            )
+        except ValueError:
+            return back("/admin/alerts#webhooks", error="invalid")
+        except sqlite3.IntegrityError:
+            return back("/admin/alerts#webhooks", error="exists")
+        return back("/admin/alerts#webhooks", "created")
+
+    @app.post("/admin/alerts/webhooks/{webhook_id}")
+    async def webhooks_update(webhook_id: int, request: Request):
+        session, form = await require_post(request, "admin")
+        try:
+            fields = webhook_fields(form, creating=False)
+            store.update_webhook(webhook_id, session.user.username, enabled=form.get("enabled") == "on", **fields)
+        except (ValueError, KeyError):
+            return back("/admin/alerts#webhooks", error="invalid")
+        return back("/admin/alerts#webhooks", "saved")
+
+    @app.post("/admin/alerts/webhooks/{webhook_id}/delete")
+    async def webhooks_delete(webhook_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        store.delete_webhook(webhook_id, session.user.username)
+        return back("/admin/alerts#webhooks", "deleted")
+
+    @app.post("/admin/alerts/webhooks/{webhook_id}/test")
+    async def webhooks_test(webhook_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        hook = next((h for h in store.list_webhooks() if h.id == webhook_id), None)
+        if hook is None:
+            return back("/admin/alerts#webhooks", error="invalid")
+        note = Note("warning", "test", "Test notification", f"Sent from the admin by {session.user.username}.")
+        error = await ctx.alerts.send(hook, note, attempts=1)
+        store.audit(session.user.username, "webhook.test", hook.name, {"ok": error is None})
+        return back(
+            "/admin/alerts#webhooks", "webhook_ok" if error is None else None, "webhook_failed" if error else None
+        )
+
     # -- audit ---------------------------------------------------------------------------
 
     @app.get("/admin/audit")
@@ -972,6 +1081,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 CLIENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 ALIAS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 URL = re.compile(r"https?://[^\s/?#]+(/[^\s?#]*)?")
+WEBHOOK_URL = re.compile(r"https?://[^\s/?#]+\S*")
 
 
 def _parse_date(value: str) -> float | None:
@@ -1064,3 +1174,10 @@ class AdminGuard:
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
+
+
+def _mask_url(url: str) -> str:
+    """Webhook URLs often embed a token: show only scheme and host."""
+    scheme, _, rest = url.partition("://")
+    host, _, path = rest.partition("/")
+    return f"{scheme}://{host}/" + ("…" if path else "")

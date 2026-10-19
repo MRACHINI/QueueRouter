@@ -265,6 +265,11 @@ function liveDashboard(root) {
     set("tokens_total", s.tokens.prompt + s.tokens.completion);
     set("uptime", s.uptime_s);
     set("upstream", s.upstream || "none");
+    const badge = document.getElementById("nav-alerts-count");
+    if (badge) {
+      badge.textContent = s.alerts_unread || 0;
+      badge.hidden = !s.alerts_unread;
+    }
 
     const upstreamRows = (s.upstreams || []).map((u) => {
       const tr = document.createElement("tr");

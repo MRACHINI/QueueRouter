@@ -27,6 +27,12 @@ def create_mock(limit: int = 2) -> FastAPI:
             return JSONResponse({"error": {"message": "too many parallel requests"}}, status_code=429)
         return None
 
+    @app.post("/hook")
+    async def hook(request: Request):
+        """Webhook receiver (alerts tests); answers with the status given in ?status=."""
+        state.setdefault("hooks", []).append({"body": await request.body(), "headers": dict(request.headers)})
+        return JSONResponse({}, status_code=int(request.query_params.get("status", 200)))
+
     @app.get("/v1/models")
     async def models():
         return {"object": "list", "data": [{"id": "mock-model", "object": "model", "max_model_len": 262144}]}

@@ -1060,7 +1060,8 @@ content logging, alerts + webhooks + UI notifications, cost estimates, TOTP 2FA,
 backup/restore.
 
 **Progress:** opencode plugin (session/task headers, low-priority titles, model list without
-login) shipped as v0.6.0.
+login) shipped as v0.6.0; alerts, webhooks (Discord, Slack, ntfy, signed JSON) and in-app
+notifications as v0.7.0.
 
 ### Phase 3 — Extras
 Prometheus metrics, monthly token quotas, recurring (cron) jobs, OpenTelemetry.

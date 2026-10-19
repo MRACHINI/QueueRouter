@@ -47,6 +47,9 @@ from a **web admin UI**.
   (prices from [models.dev](https://models.dev), refreshed daily; cached prompt tokens at the
   cached rate), and how much your flat-rate plan saves. Per-model overrides on the Models page;
   set your plan price on the pool (ArliAI plans fill it in).
+- **Alerts**: upstream down/recovered, queue backed up, long waits, high error rate, clients hitting
+  their limits, keys about to expire, daily tokens — shown in the admin (unread badge) and sent to
+  Discord, Slack, ntfy or a signed JSON webhook, with per-rule thresholds and cooldowns.
 - **Admin UI**: dashboard, clients (keys shown once, stored hashed), upstreams, models, usage,
   requests, settings, users with roles (owner / admin / operator / viewer), audit log. Dark mode
   and phone-friendly. Changes apply instantly.
