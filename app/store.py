@@ -170,6 +170,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE aliases ADD COLUMN fallbacks TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE aliases ADD COLUMN fallback_on TEXT NOT NULL DEFAULT '["unavailable", "errors", "context"]';
     """,
+    # 8: request tags
+    """
+    ALTER TABLE requests ADD COLUMN tags TEXT;
+    """,
 ]
 
 REQUEST_COLUMNS = (
@@ -193,6 +197,7 @@ REQUEST_COLUMNS = (
     "prompt_tokens",
     "completion_tokens",
     "cached_tokens",
+    "tags",
     "finish_reason",
     "ip",
 )
@@ -701,11 +706,14 @@ class Store:
             if value := filters.get(column):
                 clauses.append(f"{column} = ?")
                 params.append(value)
+        if tag := filters.get("tag"):
+            clauses.append("(',' || tags || ',') LIKE ?")
+            params.append(f"%,{tag},%")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.query(f"SELECT * FROM requests {where} ORDER BY ts DESC LIMIT ?", (*params, limit))  # noqa: S608
 
     def request_filter_values(self) -> dict[str, list[str]]:
-        return {
+        values = {
             column: [
                 r[0]
                 for r in self.query(
@@ -714,6 +722,11 @@ class Store:
             ]  # noqa: S608
             for column in ("client", "outcome", "model", "upstream")
         }
+        tags: set[str] = set()
+        for (text,) in self.query("SELECT DISTINCT tags FROM requests WHERE tags IS NOT NULL AND tags != '' LIMIT 500"):
+            tags.update(text.split(","))
+        values["tag"] = sorted(tags)
+        return values
 
     def usage(self, days: int = 30) -> list[sqlite3.Row]:
         """Usage per day, client and model (cost is computed per model, then grouped)."""

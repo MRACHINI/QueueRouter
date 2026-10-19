@@ -40,6 +40,12 @@ class ClientPolicy:
     total_timeout_s: float | None = None  # whole request incl. generation
     max_retries: int | None = None  # overrides the global retry budget
     params: str = ""  # parameter rules JSON (app/params.py)
+    tags: str = ""  # default tags for this client's requests (comma-separated)
+    run_max_tokens: int | None = None  # per agent run (X-Run-Id, else the conversation)
+    run_max_requests: int | None = None
+    run_max_minutes: float | None = None
+    loop_threshold: int | None = None  # the same request this many times within 5 min = a loop
+    loop_action: str = "warn"  # warn (log it) | reject (429)
 
     @classmethod
     def from_json(cls, text: str | None) -> ClientPolicy:

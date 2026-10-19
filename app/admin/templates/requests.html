@@ -6,7 +6,7 @@
 <code>finish_reason = length</code> means the reply was cut off by the token limit.</p>
 
 <form method="get" action="/admin/requests" class="card row wrap">
-  {% for key in ("client", "outcome", "model", "upstream") %}
+  {% for key in ("client", "outcome", "model", "upstream", "tag") %}
   <label class="inline-field">{{ key }}
     <select name="{{ key }}">
       <option value="">all</option>
@@ -25,7 +25,7 @@
   {% for r in rows %}
   <tr>
     <td data-label="Time"><time data-ts="{{ r.ts }}">{{ r.ts | int }}</time></td>
-    <td data-label="Client">{{ r.client }} <span class="badge {{ r.priority }}">{{ r.priority }}</span></td>
+    <td data-label="Client">{{ r.client }} <span class="badge {{ r.priority }}">{{ r.priority }}</span>{% if r.tags %}<div class="small muted">{% for t in r.tags.split(",") %}#{{ t }} {% endfor %}</div>{% endif %}</td>
     <td data-label="Model" class="wrap-any">{{ r.model }}{% if r.target_model %} <span class="muted small">→ {{ r.target_model }}</span>{% endif %}</td>
     <td data-label="Upstream">{{ r.upstream or "—" }}</td>
     <td data-label="Outcome">{{ r.outcome }} <span class="muted small">{{ r.status }}{% if r.retries %} · {{ r.retries }} retries{% endif %}</span></td>
