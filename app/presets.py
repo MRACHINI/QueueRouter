@@ -1,0 +1,81 @@
+"""Provider presets: sensible defaults when adding an upstream. Every field stays editable."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class Plan:
+    name: str
+    max_concurrency: int
+    context_cap: int | None
+
+
+@dataclass(frozen=True)
+class Preset:
+    key: str
+    label: str
+    base_url: str
+    max_concurrency: int
+    key_required: bool = True
+    plans: tuple[Plan, ...] = field(default_factory=tuple)
+    note: str = ""
+
+
+# ArliAI plans from arliai.com/pricing (October 2026).
+ARLIAI_PLANS = (
+    Plan("Free", 1, 12_288),
+    Plan("Core", 1, 32_768),
+    Plan("Plus", 1, 131_072),
+    Plan("Pro", 2, 262_144),
+    Plan("Max", 6, 524_288),
+)
+
+PRESETS: dict[str, Preset] = {
+    p.key: p
+    for p in (
+        Preset(
+            "arliai",
+            "ArliAI",
+            "https://api.arliai.com/v1",
+            2,
+            plans=ARLIAI_PLANS,
+            note="Parallel requests and context cap depend on your plan.",
+        ),
+        Preset("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", 8),
+        Preset("openai", "OpenAI", "https://api.openai.com/v1", 8),
+        Preset("groq", "Groq", "https://api.groq.com/openai/v1", 4),
+        Preset("together", "Together AI", "https://api.together.xyz/v1", 8),
+        Preset("deepinfra", "DeepInfra", "https://api.deepinfra.com/v1/openai", 8),
+        Preset("mistral", "Mistral", "https://api.mistral.ai/v1", 4),
+        Preset(
+            "ollama",
+            "Ollama",
+            "http://ollama:11434/v1",
+            1,
+            key_required=False,
+            note="Concurrency = OLLAMA_NUM_PARALLEL on that server.",
+        ),
+        Preset("lmstudio", "LM Studio", "http://lmstudio:1234/v1", 1, key_required=False),
+        Preset("vllm", "vLLM", "http://vllm:8000/v1", 8, key_required=False),
+        Preset(
+            "llamacpp",
+            "llama.cpp server",
+            "http://llamacpp:8080/v1",
+            1,
+            key_required=False,
+            note="Concurrency = the server's --parallel slots.",
+        ),
+        Preset("koboldcpp", "KoboldCpp", "http://koboldcpp:5001/v1", 1, key_required=False),
+        Preset("tabbyapi", "TabbyAPI", "http://tabbyapi:5000/v1", 1),
+        Preset("custom", "Custom (OpenAI-compatible)", "https://", 1),
+    )
+}
+
+
+def plan_for(preset_key: str | None, plan_name: str | None) -> Plan | None:
+    preset = PRESETS.get(preset_key or "")
+    if not preset or not plan_name:
+        return None
+    return next((p for p in preset.plans if p.name == plan_name), None)

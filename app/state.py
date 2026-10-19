@@ -6,7 +6,6 @@ restart is needed.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import logging
 from dataclasses import dataclass, field
@@ -18,45 +17,48 @@ log = logging.getLogger("queuerouter")
 
 
 @dataclass(frozen=True)
-class ActiveUpstream:
-    """The upstream requests currently go to (multi-upstream routing arrives with pools)."""
+class Target:
+    """An upstream with what's needed to call it."""
 
     upstream: Upstream
     pool: Pool
     api_key: str
+
+    @property
+    def id(self) -> int:
+        return self.upstream.id
+
+    @property
+    def usable(self) -> bool:
+        return self.upstream.enabled and not self.upstream.paused
 
 
 @dataclass(frozen=True)
 class Snapshot:
     settings: Settings
     clients: dict[str, ClientKey] = field(default_factory=dict)  # key_hash -> client
-    upstream: ActiveUpstream | None = None
+    pools: dict[int, Pool] = field(default_factory=dict)
+    upstreams: dict[int, Target] = field(default_factory=dict)  # in display / failover order
+
+    @property
+    def configured(self) -> bool:
+        return any(t.usable for t in self.upstreams.values())
 
 
 def load_snapshot(store: Store) -> Snapshot:
-    tunables = store.get_tunables()
+    settings = Settings(**store.get_tunables())
     pools = {p.id: p for p in store.list_pools()}
-    active = None
-    for upstream in store.list_upstreams():
-        if upstream.enabled and upstream.pool_id in pools:
-            active = ActiveUpstream(upstream, pools[upstream.pool_id], store.upstream_key(upstream.id))
-            break
-
-    settings = Settings(**tunables)
-    if active is not None:
-        settings = dataclasses.replace(
-            settings,
-            upstream_url=active.upstream.base_url,
-            upstream_api_key=active.api_key,
-            max_concurrency=active.pool.max_concurrency,
-            min_spacing_ms=active.pool.min_spacing_ms,
-        )
+    upstreams = {
+        u.id: Target(u, pools[u.pool_id], store.upstream_key(u.id))
+        for u in store.list_upstreams()
+        if u.pool_id in pools
+    }
     clients = {
         c.key_hash: ClientKey(c.name, c.key_hash, c.priority)
         for c in store.list_clients()
         if c.enabled and not c.expired
     }
-    return Snapshot(settings, clients, active)
+    return Snapshot(settings, clients, pools, upstreams)
 
 
 def open_store(bootstrap: Bootstrap, seed: Settings | None) -> Store:

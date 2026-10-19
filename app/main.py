@@ -1,9 +1,10 @@
-"""QueueRouter: an OpenAI-compatible proxy that queues instead of exceeding the upstream's
-concurrency limit."""
+"""QueueRouter: an OpenAI-compatible proxy that queues instead of exceeding the upstreams'
+concurrency limits."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -20,23 +21,29 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from . import __version__
 from .admin import AdminContext, mount_admin
 from .auth import AuthGuard, client_ip, find_client, presented_key
+from .catalog import Catalogs, fetch_models
+from .circuit import Circuits
 from .config import PRIORITIES, Bootstrap, ClientKey, Settings
 from .sessions import session_key
-from .slots import LANE_NAMES, LANES, SlotQueue
-from .state import load_snapshot, open_store
+from .slots import LANE_NAMES, LANES, Candidate, SlotQueue
+from .state import Target, load_snapshot, open_store
 from .stats import Stats
 from .upstream import (
-    UpstreamFailed,
+    BUSY_STATUS,
+    FAILURE_STATUS,
+    RETRYABLE_ERRORS,
     UsageSniffer,
-    Wait,
     finish_reason_from_body,
     response_headers,
-    send_with_retries,
+    retry_delay,
     upstream_headers,
     usage_from_body,
 )
 
 log = logging.getLogger("queuerouter")
+
+HEALTH_INTERVAL_S = 30
+CATALOG_MAX_AGE_S = 3600
 
 
 def error_body(message: str, status: int, kind: str = "queuerouter_error") -> dict:
@@ -65,6 +72,7 @@ class RequestLog:
             "priority": None,
             "session": None,
             "model": None,
+            "upstream": None,
             "stream": False,
             "status": None,
             "outcome": None,
@@ -96,14 +104,52 @@ class RequestLog:
 
 @dataclass
 class Admission:
-    """Everything the queue needs to know about one request."""
+    """Everything needed to queue and send one request."""
 
     request_id: str
     client: str
     lane: int
     session: str | None
+    candidates: tuple[Candidate, ...]
+    method: str
+    path: str
+    query: str
+    headers: dict[str, str]
+    body: bytes
     rlog: RequestLog
     hints: dict[str, str]
+
+
+# Events from the attempt loop to the response writers.
+@dataclass
+class Queued:
+    position: int
+
+
+@dataclass
+class Waiting:
+    position: int
+    waited_s: float
+
+
+@dataclass
+class Backoff:
+    delay: float
+    attempt: int
+    reason: str
+
+
+@dataclass
+class Got:
+    response: httpx.Response
+    target: Target
+
+
+@dataclass
+class Failed:
+    status: int
+    message: str
+    kind: str = "upstream_error"
 
 
 def create_app(
@@ -115,57 +161,99 @@ def create_app(
 
     store = open_store(bootstrap, seed)
     snapshot = load_snapshot(store)
-    initial = snapshot.settings
-    queue = SlotQueue(
-        initial.max_concurrency,
-        initial.min_spacing_ms,
-        aging_s=initial.aging_s,
-        session_window_s=initial.session_window_s,
-        session_aware=initial.session_aware,
-        fair_share=initial.fair_share,
-    )
     stats = Stats()
-    guard = AuthGuard(initial.auth_fail_limit, initial.auth_block_s)
-    models_cache: dict = {"at": 0.0, "status": 0, "body": b"", "headers": {}}
+    catalogs = Catalogs()
+    circuits = Circuits()
+    guard = AuthGuard(snapshot.settings.auth_fail_limit, snapshot.settings.auth_block_s)
+
+    def available(upstream_id: int) -> bool:
+        target = snapshot.upstreams.get(upstream_id)
+        return target is not None and target.usable and circuits.allows(upstream_id)
+
+    queue = SlotQueue(available=available, on_grant=lambda c: circuits.begin(c.upstream_id))
 
     def cfg() -> Settings:
         return snapshot.settings
+
+    def apply_snapshot() -> None:
+        s = snapshot.settings
+        queue.set_scheduling(s.aging_s, s.session_window_s, s.session_aware, s.fair_share, s.lb_strategy)
+        queue.set_pools({p.id: (p.max_concurrency, p.min_spacing_ms) for p in snapshot.pools.values()})
+        circuits.threshold, circuits.cooldown_s = s.circuit_threshold, s.circuit_cooldown_s
+        guard.limit, guard.block_s = s.auth_fail_limit, s.auth_block_s
+        catalogs.forget(set(snapshot.upstreams))
 
     def reload() -> None:
         """Re-read configuration from the database and apply it live."""
         nonlocal snapshot
         snapshot = load_snapshot(store)
-        s = snapshot.settings
-        queue.reconfigure(
-            s.max_concurrency, s.min_spacing_ms, s.aging_s, s.session_window_s, s.session_aware, s.fair_share
-        )
-        guard.limit, guard.block_s = s.auth_fail_limit, s.auth_block_s
-        models_cache["at"] = 0.0
-        log.info(json.dumps({"event": "config_reloaded", **startup_summary()}))
+        apply_snapshot()
+        log.info(json.dumps({"event": "config_reloaded", **summary()}))
 
-    def startup_summary() -> dict:
+    def summary() -> dict:
         s = snapshot.settings
         return {
-            "upstream": snapshot.upstream.upstream.name if snapshot.upstream else None,
-            "max_concurrency": s.max_concurrency,
+            "upstreams": {t.upstream.name: t.pool.name for t in snapshot.upstreams.values() if t.usable},
+            "pools": {p.name: p.max_concurrency for p in snapshot.pools.values()},
             "clients": {c.name: c.priority for c in snapshot.clients.values()} or "none",
             "scheduling": {
                 "aging_s": s.aging_s,
                 "session_aware": s.session_aware,
-                "session_window_s": s.session_window_s,
                 "fair_share": s.fair_share,
+                "lb_strategy": s.lb_strategy,
             },
         }
+
+    def on_circuit_change(upstream_id: int, state: str, reason: str) -> None:
+        target = snapshot.upstreams.get(upstream_id)
+        name = target.upstream.name if target else upstream_id
+        log.warning(json.dumps({"event": "circuit", "upstream": name, "state": state, "reason": reason}))
+        if state == "closed":
+            queue.poke()
+
+    circuits.on_change = on_circuit_change
+    apply_snapshot()
+
+    async def refresh_catalog(target: Target) -> bool:
+        return await catalogs.refresh(app.state.client, target.id, target.upstream.base_url, target.api_key)
+
+    async def background() -> None:
+        """Wake waiters when circuit cooldowns end; probe broken upstreams; refresh model lists."""
+        last_health = 0.0
+        while True:
+            await asyncio.sleep(1)
+            if queue.queued:
+                queue.poke()
+            if time.monotonic() - last_health < HEALTH_INTERVAL_S:
+                continue
+            last_health = time.monotonic()
+            for target in list(snapshot.upstreams.values()):
+                if not target.usable:
+                    continue
+                state = circuits.state(target.id)
+                if state == "half-open" and circuits.allows(target.id):
+                    circuits.begin(target.id)
+                    if await refresh_catalog(target):
+                        circuits.success(target.id)
+                    else:
+                        circuits.failure(target.id, "health probe failed")
+                elif state == "closed" and catalogs.stale(target.id, CATALOG_MAX_AGE_S):
+                    await refresh_catalog(target)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.client = httpx.AsyncClient(
-            transport=transport, limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
+            transport=transport, limits=httpx.Limits(max_connections=200, max_keepalive_connections=40)
         )
-        log.info(json.dumps({"event": "startup", "version": __version__, **startup_summary()}))
-        if snapshot.upstream is None:
+        log.info(json.dumps({"event": "startup", "version": __version__, **summary()}))
+        if not snapshot.configured:
             log.warning(json.dumps({"event": "no_upstream", "message": "add an upstream in the admin UI"}))
+        for target in snapshot.upstreams.values():
+            if target.usable:
+                asyncio.ensure_future(refresh_catalog(target))
+        task = asyncio.ensure_future(background())
         yield
+        task.cancel()
         await app.state.client.aclose()
         store.close()
 
@@ -176,18 +264,7 @@ def create_app(
     app.state.reload = reload
     app.state.bootstrap = bootstrap
     app.state.stats = stats
-
-    def live_state() -> dict:
-        return {
-            "version": __version__,
-            "configured": snapshot.upstream is not None,
-            "upstream": snapshot.upstream.upstream.name if snapshot.upstream else None,
-            **queue_state(),
-            **stats.snapshot(),
-            "recent": list(stats.recent)[-25:],
-        }
-
-    mount_admin(app, AdminContext(store, bootstrap, reload, live_state))
+    app.state.circuits = circuits
 
     # -- helpers ---------------------------------------------------------------------------
 
@@ -204,9 +281,21 @@ def create_app(
         return client, None
 
     def not_configured() -> JSONResponse | None:
-        if snapshot.upstream is None:
+        if not snapshot.configured:
             return error_response("no upstream configured yet: add one in the admin UI", 503, "not_configured")
         return None
+
+    def candidates_for(model: str | None) -> tuple[Candidate, ...]:
+        """Usable upstreams for ``model``: those that list it, or all of them if none does
+        (the upstream then decides; lists may be stale or incomplete)."""
+        usable = [t for t in snapshot.upstreams.values() if t.usable]
+        if model:
+            listing = [t for t in usable if (ids := catalogs.ids(t.id)) is not None and model in ids]
+            unknown = [t for t in usable if catalogs.ids(t.id) is None]
+            if listing:
+                usable = listing + unknown
+        order = {uid: i for i, uid in enumerate(snapshot.upstreams)}
+        return tuple(Candidate(t.id, t.pool.id, t.upstream.weight, order[t.id]) for t in usable)
 
     def request_lane(request: Request, client: ClientKey) -> int:
         """Client's priority, optionally lowered (never raised) by X-QueueRouter-Priority."""
@@ -218,7 +307,7 @@ def create_app(
 
     def estimate_wait_ms(position: int) -> int:
         """Rough wait before a request at ``position`` starts, from recent upstream durations."""
-        if position <= 0:
+        if position <= 0 or queue.max_concurrency <= 0:
             return 0
         return round(math.ceil(position / queue.max_concurrency) * stats.avg_upstream_ms())
 
@@ -231,21 +320,158 @@ def create_app(
             **queue.snapshot(),
         }
 
-    def build_upstream_request(request: Request, path: str, body: bytes | None) -> httpx.Request:
+    def upstream_info() -> list[dict]:
+        active = queue.snapshot()["upstreams_active"]
+        return [
+            {
+                "id": t.id,
+                "name": t.upstream.name,
+                "pool": t.pool.name,
+                "usable": t.usable,
+                "active": active.get(t.id, 0),
+                **circuits.describe(t.id),
+                **{f"catalog_{k}": v for k, v in catalogs.describe(t.id).items()},
+            }
+            for t in snapshot.upstreams.values()
+        ]
+
+    def live_state() -> dict:
+        state = queue_state()
+        pool_names = {p.id: p.name for p in snapshot.pools.values()}
+        state["pools"] = {pool_names.get(pid, str(pid)): v for pid, v in state["pools"].items()}
+        state.pop("upstreams_active", None)
+        return {
+            "version": __version__,
+            "configured": snapshot.configured,
+            "upstream": ", ".join(t.upstream.name for t in snapshot.upstreams.values() if t.usable) or None,
+            "upstreams": upstream_info(),
+            **state,
+            **stats.snapshot(),
+            "recent": list(stats.recent)[-25:],
+        }
+
+    async def probe(base_url: str, api_key: str) -> tuple[bool, str]:
+        """Admin 'Test' button: can we list models with this URL and key?"""
+        try:
+            models = await fetch_models(app.state.client, base_url, api_key)
+        except (httpx.HTTPError, ValueError) as exc:
+            return False, f"{type(exc).__name__}: {exc}"[:300]
+        sample = ", ".join(m["id"] for m in models[:5])
+        return True, f"OK — {len(models)} models" + (f" (e.g. {sample})" if sample else "")
+
+    mount_admin(app, AdminContext(store, bootstrap, reload, live_state, probe, upstream_info))
+
+    # -- the attempt loop ----------------------------------------------------------------
+
+    def can_retry(retries: int) -> bool:
+        return cfg().max_retries < 0 or retries < cfg().max_retries
+
+    def build_request(adm: Admission, target: Target) -> httpx.Request:
         s = cfg()
-        url = f"{s.upstream_url}/{path}"
-        if request.url.query:
-            url += f"?{request.url.query}"
-        timeout = httpx.Timeout(
-            connect=s.upstream_connect_timeout_s, read=s.upstream_read_timeout_s, write=30, pool=None
-        )
+        url = f"{target.upstream.base_url}/{adm.path}" + (f"?{adm.query}" if adm.query else "")
         return app.state.client.build_request(
-            request.method,
+            adm.method,
             url,
-            content=body,
-            headers=upstream_headers(request.headers, s.upstream_api_key),
-            timeout=timeout,
+            content=adm.body or None,
+            headers=upstream_headers(adm.headers, target.api_key),
+            timeout=httpx.Timeout(
+                connect=s.upstream_connect_timeout_s, read=s.upstream_read_timeout_s, write=30, pool=None
+            ),
         )
+
+    async def attempts(adm: Admission) -> AsyncIterator[Queued | Waiting | Backoff | Got | Failed | None]:
+        """Queue for a slot, send, retry and fail over. Yields progress events, then exactly one
+        ``Got`` / ``Failed`` (or ``None`` on a queue timeout). The granted slot is held until the
+        consumer closes this generator, i.e. after the response has been fully forwarded."""
+        ticket = None
+        first_enqueued = first_seq = None
+        excluded: set[int] = set()
+        retries = 0
+        verdict = False
+        try:
+            while True:
+                pool = tuple(c for c in adm.candidates if c.upstream_id not in excluded) or adm.candidates
+                ticket = queue.enqueue(
+                    adm.request_id, adm.client, adm.lane, adm.session, pool, first_enqueued, first_seq
+                )
+                verdict = False
+                if first_enqueued is None:
+                    first_enqueued, first_seq = ticket.enqueued_at, ticket.seq
+                    if not ticket.granted:
+                        yield Queued(queue.position(ticket))
+                keepalive = cfg().keepalive_interval_s
+                while not await queue.wait(ticket, keepalive):
+                    max_wait = cfg().max_queue_wait_s
+                    if max_wait and ticket.wait_s >= max_wait:
+                        yield None
+                        return
+                    yield Waiting(queue.position(ticket), ticket.wait_s)
+                await queue.apply_spacing(ticket)
+                adm.rlog.fields["queue_ms"] = round((time.monotonic() - first_enqueued) * 1000)
+
+                target = snapshot.upstreams.get(ticket.target.upstream_id)
+                if target is None:  # removed by an admin while we waited
+                    excluded.add(ticket.target.upstream_id)
+                    queue.cancel(ticket)
+                    if not candidates_for(None):
+                        yield Failed(503, "no upstream configured", "not_configured")
+                        return
+                    continue
+                adm.rlog.fields["upstream"] = target.upstream.name
+
+                while True:  # attempts on this slot
+                    headers, response = None, None
+                    try:
+                        response = await app.state.client.send(build_request(adm, target), stream=True)
+                    except RETRYABLE_ERRORS as exc:
+                        reason = type(exc).__name__
+                    else:
+                        status = response.status_code
+                        if status == BUSY_STATUS and can_retry(retries):
+                            delay = retry_delay(
+                                retries, response.headers, cfg().retry_base_delay_s, cfg().retry_max_delay_s
+                            )
+                            await response.aclose()
+                            retries += 1
+                            yield Backoff(delay, retries, "HTTP 429")
+                            continue
+                        if status not in FAILURE_STATUS:
+                            circuits.success(target.id)
+                            verdict = True
+                            yield Got(response, target)
+                            return
+                        reason, headers = f"HTTP {status}", response.headers
+
+                    circuits.failure(target.id, reason)
+                    verdict = True
+                    if not can_retry(retries):
+                        if response is not None:
+                            yield Got(response, target)  # pass the upstream's error through
+                        else:
+                            yield Failed(502, f"upstream unreachable: {reason}")
+                        return
+                    if response is not None:
+                        await response.aclose()
+                    retries += 1
+                    others = [
+                        c
+                        for c in adm.candidates
+                        if c.upstream_id != target.id and c.upstream_id not in excluded and available(c.upstream_id)
+                    ]
+                    if others:  # fail over, keeping our place in the queue
+                        excluded.add(target.id)
+                        queue.cancel(ticket)
+                        ticket = None
+                        yield Backoff(0, retries, f"{reason} on {target.upstream.name}, failing over")
+                        break
+                    delay = retry_delay(retries - 1, headers, cfg().retry_base_delay_s, cfg().retry_max_delay_s)
+                    yield Backoff(delay, retries, reason)
+        finally:
+            adm.rlog.fields["retries"] = retries
+            if ticket is not None:
+                if ticket.target is not None and not verdict:
+                    circuits.abandon(ticket.target.upstream_id)
+                queue.cancel(ticket)
 
     # -- routes ----------------------------------------------------------------------------
 
@@ -258,7 +484,7 @@ def create_app(
         _, denied = authenticate(request)
         if denied:
             return denied
-        return {"version": __version__, **queue_state(), **stats.snapshot()}
+        return {"version": __version__, **live_state()}
 
     @app.get("/v1/queue")
     async def get_queue(request: Request):
@@ -280,32 +506,40 @@ def create_app(
 
     @app.get("/v1/models")
     async def models(request: Request):
+        """Union of all usable upstreams' model lists (cached; doesn't use a slot)."""
         _, denied = authenticate(request)
         if denied:
             return denied
         if unavailable := not_configured():
             return unavailable
-        now = time.monotonic()
-        if models_cache["status"] != 200 or now - models_cache["at"] > cfg().models_cache_s:
-            try:
-                resp = await app.state.client.send(build_upstream_request(request, "models", None))
-            except httpx.HTTPError as exc:
-                return error_response(f"upstream unreachable: {type(exc).__name__}", 502, "upstream_error")
-            models_cache.update(
-                at=now, status=resp.status_code, body=resp.content, headers=response_headers(resp.headers)
-            )
-        return Response(models_cache["body"], models_cache["status"], headers=models_cache["headers"])
+        targets = [t for t in snapshot.upstreams.values() if t.usable]
+        stale = [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s)]
+        if stale:
+            await asyncio.gather(*(refresh_catalog(t) for t in stale))
+        merged: dict[str, dict] = {}
+        for target in targets:
+            for model in catalogs.models(target.id):
+                merged.setdefault(model["id"], model)
+        if not merged and all(catalogs.ids(t.id) is None for t in targets):
+            return error_response("no upstream returned a model list", 502, "upstream_error")
+        return {"object": "list", "data": list(merged.values())}
 
     @app.get("/v1/{path:path}")
     async def passthrough_get(path: str, request: Request):
-        """Non-generation GETs don't use a slot."""
+        """Non-generation GETs go to the first usable upstream and don't use a slot."""
         _, denied = authenticate(request)
         if denied:
             return denied
         if unavailable := not_configured():
             return unavailable
+        target = next(t for t in snapshot.upstreams.values() if t.usable)
+        url = f"{target.upstream.base_url}/{path}" + (f"?{request.url.query}" if request.url.query else "")
         try:
-            resp = await app.state.client.send(build_upstream_request(request, path, None))
+            resp = await app.state.client.get(
+                url,
+                headers=upstream_headers(request.headers, target.api_key),
+                timeout=httpx.Timeout(cfg().upstream_read_timeout_s, connect=cfg().upstream_connect_timeout_s),
+            )
         except httpx.HTTPError as exc:
             return error_response(f"upstream unreachable: {type(exc).__name__}", 502, "upstream_error")
         return Response(resp.content, resp.status_code, headers=response_headers(resp.headers))
@@ -334,6 +568,7 @@ def create_app(
             payload = json.loads(body) if body else {}
         except ValueError:
             payload = {}
+        model = payload.get("model") if isinstance(payload, dict) else None
 
         request_id = f"qr-{uuid.uuid4().hex[:12]}"
         lane = request_lane(request, client)
@@ -341,12 +576,13 @@ def create_app(
         position = queue.predict_position(client.name, lane, session)
         rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies))
         rlog.fields.update(
-            client=client.name, priority=LANE_NAMES[lane], session=session and session[:8], position=position
+            client=client.name,
+            priority=LANE_NAMES[lane],
+            session=session and session[:8],
+            position=position,
+            model=model if isinstance(model, str) else None,
+            stream=isinstance(payload, dict) and payload.get("stream") is True,
         )
-        if isinstance(payload, dict):
-            rlog.fields["model"] = payload.get("model")
-            rlog.fields["stream"] = payload.get("stream") is True
-
         hints = {
             "X-Request-Id": request_id,
             "X-QueueRouter-Queue-Depth": str(queue.queued),
@@ -354,15 +590,27 @@ def create_app(
             "X-QueueRouter-Est-Wait-Ms": str(estimate_wait_ms(position)),
             "X-QueueRouter-Slots": f"{queue.active}/{queue.max_concurrency}",
         }
-        admission = Admission(request_id, client.name, lane, session, rlog, hints)
-        upstream_request = build_upstream_request(request, path, body)
+        adm = Admission(
+            request_id,
+            client.name,
+            lane,
+            session,
+            candidates_for(rlog.fields["model"]),
+            "POST",
+            path,
+            request.url.query,
+            dict(request.headers),
+            body,
+            rlog,
+            hints,
+        )
         if rlog.fields["stream"]:
             return StreamingResponse(
-                stream_flow(upstream_request, admission),
+                stream_flow(adm),
                 media_type="text/event-stream",
                 headers={**hints, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        return await run_until_disconnect(request, nonstream_flow(upstream_request, admission))
+        return await run_until_disconnect(request, nonstream_flow(adm))
 
     # -- non-streaming -------------------------------------------------------------------
 
@@ -375,57 +623,44 @@ def create_app(
                 return task.result()
             if await request.is_disconnected():
                 task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
-                except asyncio.CancelledError:
-                    pass
                 return Response(status_code=499)
 
-    async def nonstream_flow(upstream_request: httpx.Request, adm: Admission) -> Response:
+    async def nonstream_flow(adm: Admission) -> Response:
         rlog = adm.rlog
-        ticket = queue.enqueue(adm.request_id, adm.client, adm.lane, adm.session)
-        outcome, status, waits = "error", 500, []
-        upstream_started = None
+        outcome, status = "error", 500
         try:
-            timeout = cfg().max_queue_wait_s or None
-            if not await queue.wait(ticket, timeout):
-                outcome, status = "timeout", 504
-                return error_response("timed out waiting in queue", 504, "queue_timeout")
-            await queue.apply_spacing()
-            rlog.fields["queue_ms"] = round(ticket.wait_s * 1000)
-            upstream_started = time.monotonic()
-
-            response = None
-            async for event in send_with_retries(
-                app.state.client,
-                upstream_request,
-                cfg().max_retries,
-                cfg().retry_base_delay_s,
-                cfg().retry_max_delay_s,
-            ):
-                if isinstance(event, Wait):
-                    waits.append(event)
-                    await asyncio.sleep(event.delay)
-                else:
-                    response = event
-            try:
-                content = await response.aread()
-            finally:
-                await response.aclose()
-
-            status = response.status_code
-            outcome = "done" if status < 400 else "error"
-            prompt, completion = usage_from_body(content) if status < 400 else (None, None)
-            rlog.fields.update(
-                prompt_tokens=prompt, completion_tokens=completion, finish_reason=finish_reason_from_body(content)
-            )
-            headers = response_headers(response.headers)
-            headers.update(adm.hints)
-            headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])
-            return Response(content, status, headers=headers)
-        except UpstreamFailed as exc:
-            status = exc.status
-            return error_response(exc.message, exc.status, "upstream_error")
+            async with contextlib.aclosing(attempts(adm)) as events:
+                async for event in events:
+                    if isinstance(event, Backoff):
+                        await asyncio.sleep(event.delay)
+                    elif event is None:
+                        outcome, status = "timeout", 504
+                        return error_response("timed out waiting in queue", 504, "queue_timeout")
+                    elif isinstance(event, Failed):
+                        status = event.status
+                        return error_response(event.message, event.status, event.kind)
+                    elif isinstance(event, Got):
+                        response = event.response
+                        try:
+                            content = await response.aread()
+                        finally:
+                            await response.aclose()
+                        status = response.status_code
+                        outcome = "done" if status < 400 else "error"
+                        if status < 400:
+                            prompt, completion = usage_from_body(content)
+                            rlog.fields.update(
+                                prompt_tokens=prompt,
+                                completion_tokens=completion,
+                                finish_reason=finish_reason_from_body(content),
+                            )
+                        headers = response_headers(response.headers)
+                        headers.update(adm.hints)
+                        headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])
+                        return Response(content, status, headers=headers)
+            return error_response("no response", 502, "upstream_error")
         except httpx.HTTPError as exc:
             status = 502
             return error_response(f"upstream error: {type(exc).__name__}", 502, "upstream_error")
@@ -433,78 +668,64 @@ def create_app(
             outcome, status = "cancelled", 499
             raise
         finally:
-            queue.cancel(ticket)
-            upstream_ms = round((time.monotonic() - upstream_started) * 1000) if upstream_started else None
-            rlog.finish(stats, outcome=outcome, status=status, retries=len(waits), upstream_ms=upstream_ms)
+            started = _granted_at(rlog)
+            upstream_ms = round((time.monotonic() - started) * 1000) if started else None
+            rlog.finish(stats, outcome=outcome, status=status, upstream_ms=upstream_ms)
 
     # -- streaming -----------------------------------------------------------------------
 
-    async def stream_flow(upstream_request: httpx.Request, adm: Admission) -> AsyncIterator[bytes]:
+    async def stream_flow(adm: Admission) -> AsyncIterator[bytes]:
         rlog = adm.rlog
-        ticket = queue.enqueue(adm.request_id, adm.client, adm.lane, adm.session)
-        outcome, status, waits = "error", 200, []
-        upstream_started = None
+        outcome, status = "error", 200
         response = None
         sniffer = UsageSniffer()
-        keepalive = cfg().keepalive_interval_s
         try:
-            if not ticket.granted:
-                position = queue.position(ticket)
-                note = f": queued id={adm.request_id} position={position} est_wait_ms={estimate_wait_ms(position)}\n\n"
-                yield note.encode()
-            while not await queue.wait(ticket, keepalive):
-                if cfg().max_queue_wait_s and ticket.wait_s >= cfg().max_queue_wait_s:
-                    outcome, status = "timeout", 504
-                    yield sse_error("timed out waiting in queue", 504, "queue_timeout")
-                    return
-                yield f": queued position={queue.position(ticket)} waited={int(ticket.wait_s)}s\n\n".encode()
-            await queue.apply_spacing()
-            rlog.fields["queue_ms"] = round(ticket.wait_s * 1000)
-            upstream_started = time.monotonic()
-
-            try:
-                async for event in send_with_retries(
-                    app.state.client,
-                    upstream_request,
-                    cfg().max_retries,
-                    cfg().retry_base_delay_s,
-                    cfg().retry_max_delay_s,
-                ):
-                    if isinstance(event, Wait):
-                        waits.append(event)
-                        deadline = time.monotonic() + event.delay
-                        note = f": upstream busy ({event.reason}), retry {event.attempt} in {event.delay:.0f}s\n\n"
+            async with contextlib.aclosing(attempts(adm)) as events:
+                async for event in events:
+                    if isinstance(event, Queued):
+                        note = (
+                            f": queued id={adm.request_id} position={event.position} "
+                            f"est_wait_ms={estimate_wait_ms(event.position)}\n\n"
+                        )
                         yield note.encode()
+                    elif isinstance(event, Waiting):
+                        yield f": queued position={event.position} waited={int(event.waited_s)}s\n\n".encode()
+                    elif isinstance(event, Backoff):
+                        yield f": {event.reason}, retry {event.attempt} in {event.delay:.0f}s\n\n".encode()
+                        deadline = time.monotonic() + event.delay
                         while (remaining := deadline - time.monotonic()) > 0:
-                            await asyncio.sleep(min(remaining, keepalive))
+                            await asyncio.sleep(min(remaining, cfg().keepalive_interval_s))
                             if deadline - time.monotonic() > 0:
                                 yield b": waiting to retry\n\n"
-                    else:
-                        response = event
-            except UpstreamFailed as exc:
-                status = exc.status
-                yield sse_error(exc.message, exc.status)
-                return
-
-            status = response.status_code
-            if status != 200:
-                content = await response.aread()
-                try:
-                    message = json.loads(content)["error"]["message"]
-                except (ValueError, KeyError, TypeError):
-                    message = content.decode(errors="replace")[:500] or f"upstream returned HTTP {status}"
-                yield sse_error(message, status)
-                return
-
-            try:
-                async for chunk in response.aiter_bytes():
-                    sniffer.feed(chunk)
-                    yield chunk
-            except httpx.HTTPError as exc:
-                status = 502
-                yield sse_error(f"upstream stream interrupted: {type(exc).__name__}", 502)
-                return
-            outcome = "done"
+                    elif event is None:
+                        outcome, status = "timeout", 504
+                        yield sse_error("timed out waiting in queue", 504, "queue_timeout")
+                        return
+                    elif isinstance(event, Failed):
+                        status = event.status
+                        yield sse_error(event.message, event.status, event.kind)
+                        return
+                    elif isinstance(event, Got):
+                        response = event.response
+                        status = response.status_code
+                        if status != 200:
+                            content = await response.aread()
+                            try:
+                                message = json.loads(content)["error"]["message"]
+                            except (ValueError, KeyError, TypeError):
+                                message = content.decode(errors="replace")[:500] or f"upstream returned HTTP {status}"
+                            yield sse_error(message, status)
+                            return
+                        try:
+                            async for chunk in response.aiter_bytes():
+                                sniffer.feed(chunk)
+                                yield chunk
+                        except httpx.HTTPError as exc:
+                            status = 502
+                            yield sse_error(f"upstream stream interrupted: {type(exc).__name__}", 502)
+                            return
+                        outcome = "done"
+                        return
         except (asyncio.CancelledError, GeneratorExit):
             # Client disconnected: Starlette cancels us, or the generator is closed.
             outcome = "cancelled"
@@ -512,13 +733,12 @@ def create_app(
         finally:
             if response is not None:
                 await response.aclose()
-            queue.cancel(ticket)
-            upstream_ms = round((time.monotonic() - upstream_started) * 1000) if upstream_started else None
+            started = _granted_at(rlog)
+            upstream_ms = round((time.monotonic() - started) * 1000) if started else None
             rlog.finish(
                 stats,
                 outcome=outcome,
                 status=status,
-                retries=len(waits),
                 upstream_ms=upstream_ms,
                 prompt_tokens=sniffer.prompt_tokens,
                 completion_tokens=sniffer.completion_tokens,
@@ -526,6 +746,13 @@ def create_app(
             )
 
     return app
+
+
+def _granted_at(rlog: RequestLog) -> float | None:
+    """When the request first got a slot (start time + queue wait), if it did."""
+    if rlog.fields["queue_ms"] is None:
+        return None
+    return rlog.started + rlog.fields["queue_ms"] / 1000
 
 
 def build_app() -> FastAPI:

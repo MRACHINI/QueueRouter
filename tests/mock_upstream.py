@@ -36,6 +36,7 @@ def create_mock(limit: int = 2) -> FastAPI:
         raw = await request.body()
         state["last_body"] = raw
         state["last_auth"] = request.headers.get("authorization")
+        state["last_headers"] = {k.lower(): v for k, v in request.headers.items()}
         body = json.loads(raw)
         if rejected := over_limit():
             return rejected

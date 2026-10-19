@@ -7,12 +7,12 @@ import json
 import random
 import re
 import time
-from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping
 
 import httpx
 
-RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+BUSY_STATUS = 429  # upstream full: keep the slot, back off, retry the same upstream
+FAILURE_STATUS = {500, 502, 503, 504}  # upstream broken: counts toward its circuit breaker
 RETRYABLE_ERRORS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
@@ -42,13 +42,21 @@ _DROP_REQUEST_HEADERS = {
     "x-forwarded-proto",
     "x-real-ip",
 }
+# QueueRouter's own request headers (X-QueueRouter-Priority, X-Session-Id...) stay here.
+_OWN_HEADER_PREFIXES = ("x-queuerouter-", "x-session-id", "x-run-id")
 # Only these upstream response headers are passed back on non-streaming responses.
 _KEEP_RESPONSE_HEADERS = {"content-type", "retry-after", "x-ratelimit-limit", "x-ratelimit-remaining"}
 
 
 def upstream_headers(incoming: Mapping[str, str], api_key: str) -> dict[str, str]:
-    headers = {k: v for k, v in incoming.items() if k.lower() not in _DROP_REQUEST_HEADERS}
-    headers["authorization"] = f"Bearer {api_key}"
+    """Client headers minus credentials, hop-by-hop and our own control headers."""
+    headers = {
+        k: v
+        for k, v in incoming.items()
+        if k.lower() not in _DROP_REQUEST_HEADERS and not k.lower().startswith(_OWN_HEADER_PREFIXES)
+    }
+    if api_key:  # local servers (Ollama, llama.cpp...) may need none
+        headers["authorization"] = f"Bearer {api_key}"
     headers["accept-encoding"] = "identity"  # we pipe bytes through untouched
     return headers
 
@@ -71,57 +79,6 @@ def retry_delay(attempt: int, headers: Mapping[str, str] | None, base: float, ca
                 return min(cap, max(0.0, parsed.timestamp() - time.time()))
     delay = min(cap, base * (2**attempt))
     return delay * random.uniform(0.8, 1.2)
-
-
-@dataclass
-class Wait:
-    """The caller should sleep ``delay`` seconds before the next attempt."""
-
-    delay: float
-    attempt: int
-    reason: str
-
-
-class UpstreamFailed(Exception):
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(message)
-        self.status = status
-        self.message = message
-
-
-async def send_with_retries(
-    client: httpx.AsyncClient,
-    request: httpx.Request,
-    max_retries: int,
-    base_delay: float,
-    max_delay: float,
-) -> AsyncIterator[Wait | httpx.Response]:
-    """Yield ``Wait`` events between attempts, then the final (streaming) response.
-
-    The caller does the sleeping, so a streaming caller can emit keep-alives meanwhile.
-    The final response may still be an error status once the retry budget is exhausted.
-    """
-    attempt = 0
-    while True:
-        can_retry = max_retries < 0 or attempt < max_retries
-        try:
-            response = await client.send(request, stream=True)
-        except RETRYABLE_ERRORS as exc:
-            if not can_retry:
-                raise UpstreamFailed(502, f"upstream unreachable: {type(exc).__name__}") from exc
-            yield Wait(retry_delay(attempt, None, base_delay, max_delay), attempt + 1, type(exc).__name__)
-            attempt += 1
-            continue
-
-        if response.status_code in RETRYABLE_STATUS and can_retry:
-            delay = retry_delay(attempt, response.headers, base_delay, max_delay)
-            await response.aclose()
-            yield Wait(delay, attempt + 1, f"HTTP {response.status_code}")
-            attempt += 1
-            continue
-
-        yield response
-        return
 
 
 _FINISH_REASON = re.compile(rb'"finish_reason"\s*:\s*"([A-Za-z_]+)"')

@@ -185,3 +185,10 @@ pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px
 details.card { margin-bottom: 12px; }
 details summary { cursor: pointer; }
 details[open] summary { margin-bottom: 8px; }
+
+/* compact inline fields in table forms */
+label.inline-field { flex-direction: row; align-items: center; gap: 6px; font-weight: 400; color: var(--muted); }
+label.inline-field input { width: 7.5em; }
+.grow { flex: 1 1 16em; }
+.badge.ok { color: var(--ok-text); border-color: var(--ok-text); }
+[hidden] { display: none !important; }

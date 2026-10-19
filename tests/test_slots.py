@@ -1,7 +1,7 @@
 import asyncio
 import time
 
-from app.slots import LANES, SlotQueue
+from app.slots import LANES, Candidate, SlotQueue
 
 
 async def test_grants_immediately_when_free():
@@ -185,3 +185,76 @@ async def test_predict_position_and_snapshot():
     snap = q.snapshot()
     assert snap["queued_by_lane"] == {"high": 0, "normal": 0, "low": 1}
     assert snap["clients"] == {"a": {"queued": 1, "active": 1}}
+
+
+# -- pools, candidates, strategies -----------------------------------------------------------
+
+A = Candidate(upstream_id=1, pool_id=10, weight=1, order=0)
+B = Candidate(upstream_id=2, pool_id=20, weight=1, order=1)
+
+
+def two_pools(**kwargs) -> SlotQueue:
+    q = SlotQueue(**kwargs)
+    q.set_pools({10: (1, 0), 20: (1, 0)})
+    return q
+
+
+async def test_pools_are_independent_and_least_busy_spreads():
+    q = two_pools()
+    first = q.enqueue("1", candidates=(A, B))
+    second = q.enqueue("2", candidates=(A, B))
+    assert {first.target.pool_id, second.target.pool_id} == {10, 20}
+    assert q.active == 2 and q.max_concurrency == 2
+    third = q.enqueue("3", candidates=(A, B))
+    assert not third.granted
+    q.cancel(second)
+    assert third.granted and third.target.pool_id == second.target.pool_id
+
+
+async def test_blocked_waiter_does_not_block_other_pool():
+    q = two_pools()
+    holder = q.enqueue("holder-a", candidates=(A,))
+    waits_for_a = q.enqueue("needs-a", candidates=(A,))
+    for_b = q.enqueue("needs-b", candidates=(B,))
+    assert not waits_for_a.granted and for_b.granted
+    q.cancel(holder)
+    assert waits_for_a.granted
+
+
+async def test_unavailable_upstream_is_skipped_until_poked():
+    down = {1}
+    q = two_pools(available=lambda uid: uid not in down)
+    t = q.enqueue("x", candidates=(A,))
+    assert not t.granted  # its only upstream is down: it waits, it isn't rejected
+    other = q.enqueue("y", candidates=(A, B))
+    assert other.granted and other.target.upstream_id == 2
+    down.clear()
+    q.poke()
+    assert t.granted
+
+
+async def test_ordered_strategy_prefers_first():
+    q = two_pools(strategy="ordered")
+    t = q.enqueue("x", candidates=(B, A))
+    assert t.target.upstream_id == 1  # lowest "order", not list position
+
+
+async def test_removed_pool_drains():
+    q = two_pools()
+    running = q.enqueue("x", candidates=(A,))
+    q.set_pools({20: (1, 0)})  # pool 10 removed while busy
+    waiting = q.enqueue("y", candidates=(A,))
+    assert not waiting.granted
+    q.cancel(running)
+    assert not waiting.granted and q.max_concurrency == 1
+
+
+async def test_failover_requeue_keeps_place():
+    q = SlotQueue(1)
+    holder = q.enqueue("holder")
+    early = q.enqueue("early")
+    late = q.enqueue("late")
+    q.cancel(early)  # e.g. its upstream failed: re-enter with the same seq/enqueued_at
+    again = q.enqueue("early-again", enqueued_at=early.enqueued_at, seq=early.seq)
+    q.cancel(holder)
+    assert again.granted and not late.granted

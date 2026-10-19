@@ -124,6 +124,9 @@ TUNABLES: dict[str, type] = {
     "auth_fail_limit": int,
     "auth_block_s": float,
     "models_cache_s": float,
+    "lb_strategy": str,
+    "circuit_threshold": int,
+    "circuit_cooldown_s": float,
 }
 
 
@@ -161,6 +164,11 @@ class Settings:
     auth_block_s: float = 300
 
     models_cache_s: float = 300
+
+    # Several upstreams
+    lb_strategy: str = "least-busy"  # least-busy | weighted | ordered (failover)
+    circuit_threshold: int = 5  # consecutive failures before an upstream is taken out
+    circuit_cooldown_s: float = 60  # then one trial request decides whether it's back
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
