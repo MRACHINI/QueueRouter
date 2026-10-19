@@ -12,6 +12,8 @@ services:
       - qr_data:/data         # database, secret key, backups: back this up
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID]   # only used at start to fix /data ownership, then dropped
+    # environment: PUID / PGID = owner of /data (default 10001)
     stop_grace_period: 60s    # let in-flight streams finish on shutdown
     deploy:
       replicas: 1             # never scale: the queue lives in memory

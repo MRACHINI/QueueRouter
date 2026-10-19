@@ -70,6 +70,7 @@ services:
     tmpfs: [/tmp]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID]   # only at start: fix /data ownership, then dropped
     stop_grace_period: 60s
     deploy:
       replicas: 1                # never scale: the queue lives in memory
@@ -113,18 +114,15 @@ with a backup in `/data/backups` first).
 
 ### Data volume permissions
 
-The container runs as an unprivileged user (UID/GID `10001`). A **new named volume** gets the
-right owner automatically. A **bind mount** (`./data:/data`, a NAS/Portainer path) or a volume
-that already existed may be owned by root — QueueRouter then refuses to start and logs
-`/data is not writable…` with the exact fix. Either give the folder to UID 10001:
+Like linuxserver.io images, the container starts as root only to make `/data` belong to
+`PUID:PGID` (default `10001:10001`), then permanently drops to that user with **no
+capabilities** before QueueRouter starts — so bind mounts and existing volumes just work. This
+needs `cap_add: [CHOWN, SETUID, SETGID]` next to `cap_drop: [ALL]`, as in the compose file above.
 
-```bash
-sudo chown -R 10001:10001 /path/on/host            # bind mount
-docker run --rm -v <volume>:/data alpine chown -R 10001:10001 /data   # named volume
-```
-
-or run the container as the folder's owner by adding `user: "1000:1000"` (your UID:GID) to the
-service.
+- Want the files owned by your own user? Set `PUID` / `PGID` (e.g. `1000`).
+- Prefer the container never to start as root? Use `user: "1000:1000"` instead (no `cap_add`
+  needed) and make sure that user owns the folder; otherwise QueueRouter refuses to start and
+  logs the exact fix.
 
 ### Upgrading from 0.1 / 0.2
 
