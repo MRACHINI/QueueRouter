@@ -8,6 +8,7 @@ import contextlib
 import json
 import logging
 import math
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -29,6 +30,7 @@ from .sessions import session_key
 from .slots import LANE_NAMES, LANES, Candidate, SlotQueue
 from .state import MODES, Target, load_snapshot, open_store
 from .stats import Stats
+from .store import DataDirError
 from .upstream import (
     BUSY_STATUS,
     FAILURE_STATUS,
@@ -923,4 +925,8 @@ def _granted_at(rlog: RequestLog) -> float | None:
 
 def build_app() -> FastAPI:
     """Entry point for uvicorn (``--factory``)."""
-    return create_app(Bootstrap.from_env(), seed=Settings.from_env())
+    try:
+        return create_app(Bootstrap.from_env(), seed=Settings.from_env())
+    except DataDirError as exc:  # a configuration problem, not a bug: no traceback
+        print(f"QueueRouter cannot start: {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(78) from None  # EX_CONFIG

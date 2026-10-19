@@ -111,6 +111,21 @@ buffering** and allow long responses (Nginx: `proxy_buffering off; proxy_read_ti
 Update: `docker compose pull && docker compose up -d` (database migrations run automatically,
 with a backup in `/data/backups` first).
 
+### Data volume permissions
+
+The container runs as an unprivileged user (UID/GID `10001`). A **new named volume** gets the
+right owner automatically. A **bind mount** (`./data:/data`, a NAS/Portainer path) or a volume
+that already existed may be owned by root — QueueRouter then refuses to start and logs
+`/data is not writable…` with the exact fix. Either give the folder to UID 10001:
+
+```bash
+sudo chown -R 10001:10001 /path/on/host            # bind mount
+docker run --rm -v <volume>:/data alpine chown -R 10001:10001 /data   # named volume
+```
+
+or run the container as the folder's owner by adding `user: "1000:1000"` (your UID:GID) to the
+service.
+
 ### Upgrading from 0.1 / 0.2
 
 0.3 keeps its configuration in a database under `/data`. **Add the `/data` volume** (see above)

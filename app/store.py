@@ -258,6 +258,51 @@ def _admin(row: sqlite3.Row) -> AdminUser:
     )
 
 
+class DataDirError(RuntimeError):
+    """The data directory can't be used; the message says how to fix it."""
+
+
+def check_data_dir(data_dir: str) -> None:
+    """Fail early, with a fix, when the data directory (or a file in it) isn't writable.
+
+    Typical cause: a bind mount or pre-existing volume owned by root, while the container
+    runs as an unprivileged user.
+    """
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except PermissionError:
+        pass  # reported below with the ownership details
+    uid, gid = os.getuid(), os.getgid()
+    problems = []
+    if not os.access(data_dir, os.W_OK | os.X_OK):
+        problems.append(data_dir)
+    elif os.path.isdir(data_dir):
+        for name in os.listdir(data_dir):
+            path = os.path.join(data_dir, name)
+            if os.path.isfile(path) and not os.access(path, os.R_OK | os.W_OK):
+                problems.append(path)
+    if not problems:
+        return
+    try:
+        st = os.stat(data_dir)
+        owner_uid, owner = st.st_uid, f"{st.st_uid}:{st.st_gid}"
+    except OSError:
+        owner_uid, owner = None, "unknown"
+    run_as_owner = (
+        f'  - or run the container as the owner: add  user: "{owner}"  to the service\n'
+        if owner_uid not in (None, 0)  # never suggest running as root
+        else ""
+    )
+    raise DataDirError(
+        f"{', '.join(problems)} is not writable by this container (running as {uid}:{gid}; "
+        f"{data_dir} is owned by {owner}). Fix it on the Docker host with one of:\n"
+        f"  - named volume:  docker run --rm -v <volume>:{data_dir} alpine chown -R {uid}:{gid} {data_dir}\n"
+        f"  - bind mount:    sudo chown -R {uid}:{gid} /path/on/host\n"
+        f"{run_as_owner}"
+        "See README > Data volume permissions."
+    )
+
+
 def load_fernet(data_dir: str, secret_key: str | None) -> Fernet:
     """Fernet from SECRET_KEY, or from <data_dir>/secret.key (created on first start)."""
     if secret_key:
@@ -285,7 +330,7 @@ class Store:
 
     @classmethod
     def open(cls, data_dir: str, secret_key: str | None) -> Store:
-        os.makedirs(data_dir, exist_ok=True)
+        check_data_dir(data_dir)
         store = cls(os.path.join(data_dir, "queuerouter.db"), load_fernet(data_dir, secret_key))
         store.migrate()
         return store

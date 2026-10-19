@@ -6,7 +6,7 @@ from cryptography.fernet import Fernet
 
 from app.config import Bootstrap, Settings
 from app.state import load_snapshot, open_store
-from app.store import MIGRATIONS, Store, hash_key
+from app.store import MIGRATIONS, DataDirError, Store, hash_key
 
 SEED = Settings(
     upstream_url="https://api.arliai.com/v1",
@@ -130,3 +130,15 @@ def test_tunables_and_pool_updates(data_dir):
     (target,) = snap.upstreams.values()
     assert target.pool.max_concurrency == 6
     assert target.api_key == "rotated"
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root can write anywhere")
+def test_unwritable_data_dir_explains_the_fix(tmp_path):
+    locked = tmp_path / "data"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        with pytest.raises(DataDirError, match="chown"):
+            Store.open(str(locked), None)
+    finally:
+        locked.chmod(0o700)
