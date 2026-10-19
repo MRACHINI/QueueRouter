@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Key for {{ name }}{% endblock %}
+{% block content %}
+<h1>{% if regenerated %}New key{% else %}Client created{% endif %}: {{ name }}</h1>
+<p class="notice err" role="alert">Copy this key now — it is stored only as a hash and can't be shown again.
+{% if regenerated %}The previous key has stopped working.{% endif %}</p>
+
+<div class="secret">
+  <code id="new-key">{{ key }}</code>
+  <button type="button" class="secondary" data-copy="#new-key">Copy</button>
+</div>
+
+<h2>Use it</h2>
+<p class="muted">Base URL <code id="base-url">{{ base_url }}</code>
+  <button type="button" class="ghost" data-copy="#base-url">Copy</button>, API key = the key above.</p>
+
+<details class="card">
+  <summary><strong>opencode</strong> (<code>opencode.json</code>)</summary>
+<pre class="mono wrap-any" id="opencode-snippet">{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "queuerouter": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "QueueRouter",
+      "options": {
+        "baseURL": "{{ base_url }}",
+        "apiKey": "{env:QUEUEROUTER_KEY}",
+        "timeout": false
+      },
+      "models": {
+        "MODEL_ID": { "name": "MODEL_ID", "limit": { "context": 262144, "output": 16384 } }
+      }
+    }
+  },
+  "model": "queuerouter/MODEL_ID"
+}</pre>
+  <button type="button" class="secondary" data-copy="#opencode-snippet">Copy config</button>
+  <p class="small muted">Set the environment variable <code>QUEUEROUTER_KEY</code> to the key above.
+  Replace <code>MODEL_ID</code> with an id from <code>GET /v1/models</code>.</p>
+</details>
+
+<details class="card">
+  <summary><strong>curl</strong></summary>
+<pre class="mono wrap-any" id="curl-snippet">curl {{ base_url }}/chat/completions \
+  -H "Authorization: Bearer {{ key }}" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "MODEL_ID", "messages": [{"role": "user", "content": "Hello"}]}'</pre>
+  <button type="button" class="secondary" data-copy="#curl-snippet">Copy</button>
+</details>
+
+<p><a href="/admin/clients">Back to clients</a></p>
+{% endblock %}

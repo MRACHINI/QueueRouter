@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
@@ -18,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 
 from .. import __version__
 from ..auth import AuthGuard, client_ip
-from ..config import TUNABLES, Bootstrap
+from ..config import PRIORITIES, TUNABLES, Bootstrap
 from ..store import ROLES, Store
 from .security import (
     AdminSession,
@@ -84,6 +86,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     store, bootstrap = ctx.store, ctx.bootstrap
     sessions = Sessions(store, bootstrap)
     templates = Jinja2Templates(directory=os.path.join(HERE, "templates"))
+    templates.env.filters["expiry_date"] = _expiry_date
     login_guard = AuthGuard(limit_per_minute=5, block_s=300)
     setup = {"token": None}
 
@@ -111,12 +114,12 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def need_login(request: Request, exc: NeedLogin):
         return RedirectResponse(f"/admin/login?next={quote(request.url.path)}", status_code=303)
 
-    def page(request: Request, name: str, session: AdminSession | None, **context) -> HTMLResponse:
+    def page(request: Request, template: str, session: AdminSession | None, **context) -> HTMLResponse:
         flash = MESSAGES.get(request.query_params.get("m", ""))
         error = MESSAGES.get(request.query_params.get("e", ""))
         return templates.TemplateResponse(
             request,
-            name,
+            template,
             {
                 "user": session.user if session else None,
                 "csrf": session.csrf if session else "",
@@ -354,12 +357,102 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         sessions.set_cookie(response, request, token)
         return response
 
+    # -- clients -------------------------------------------------------------------------
+
+    def show_new_key(request: Request, session: AdminSession, name: str, key: str, regenerated: bool):
+        base = bootstrap.public_url or f"{request.url.scheme}://{request.url.netloc}"
+        return page(
+            request, "client_key.html", session, name=name, key=key, regenerated=regenerated, base_url=f"{base}/v1"
+        )
+
+    @app.get("/admin/clients")
+    async def clients(request: Request):
+        session = require(request, "admin")
+        live = ctx.live_state().get("clients", {})
+        return page(request, "clients.html", session, clients=store.list_clients(), priorities=PRIORITIES, live=live)
+
+    @app.post("/admin/clients")
+    async def clients_create(request: Request):
+        session, form = await require_post(request, "admin")
+        name = str(form.get("name", "")).strip()
+        priority = str(form.get("priority", "normal"))
+        try:
+            expires_at = _parse_date(str(form.get("expires", "")))
+        except ValueError:
+            return back("/admin/clients", error="invalid")
+        if not CLIENT_NAME.fullmatch(name) or priority not in PRIORITIES:
+            return back("/admin/clients", error="invalid")
+        try:
+            key = store.create_client(
+                name,
+                session.user.username,
+                priority=priority,
+                notes=str(form.get("notes", ""))[:500],
+                expires_at=expires_at,
+            )
+        except sqlite3.IntegrityError:
+            return back("/admin/clients", error="exists")
+        ctx.reload()
+        return show_new_key(request, session, name, key, regenerated=False)
+
+    @app.post("/admin/clients/{client_id}")
+    async def clients_update(client_id: int, request: Request):
+        session, form = await require_post(request, "admin")
+        try:
+            fields = {
+                "priority": str(form.get("priority", "normal")),
+                "enabled": form.get("enabled") == "on",
+                "notes": str(form.get("notes", ""))[:500],
+                "expires_at": _parse_date(str(form.get("expires", ""))),
+            }
+            store.update_client(client_id, session.user.username, **fields)
+        except (ValueError, KeyError):
+            return back("/admin/clients", error="invalid")
+        ctx.reload()
+        return back("/admin/clients", "saved")
+
+    @app.post("/admin/clients/{client_id}/regenerate")
+    async def clients_regenerate(client_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        target = next((c for c in store.list_clients() if c.id == client_id), None)
+        if target is None:
+            return back("/admin/clients", error="invalid")
+        key = store.regenerate_client_key(client_id, session.user.username)
+        ctx.reload()
+        return show_new_key(request, session, target.name, key, regenerated=True)
+
+    @app.post("/admin/clients/{client_id}/delete")
+    async def clients_delete(client_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        store.delete_client(client_id, session.user.username)
+        ctx.reload()
+        return back("/admin/clients", "deleted")
+
     # -- audit ---------------------------------------------------------------------------
 
     @app.get("/admin/audit")
     async def audit(request: Request):
         session = require(request, "admin")
         return page(request, "audit.html", session, rows=store.list_audit(300))
+
+
+CLIENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def _parse_date(value: str) -> float | None:
+    """``YYYY-MM-DD`` (end of that day, UTC) -> timestamp; empty -> None (never expires)."""
+    value = value.strip()
+    if not value:
+        return None
+    day = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+    return (day + timedelta(days=1)).timestamp()
+
+
+def _expiry_date(timestamp: float | None) -> str:
+    """Inverse of ``_parse_date`` for <input type=date> values."""
+    if not timestamp:
+        return ""
+    return datetime.fromtimestamp(timestamp - 1, UTC).strftime("%Y-%m-%d")
 
 
 def _safe_next(value: str | None) -> str:
