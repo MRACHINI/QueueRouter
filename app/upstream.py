@@ -5,6 +5,7 @@ from __future__ import annotations
 import email.utils
 import json
 import random
+import re
 import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -123,6 +124,9 @@ async def send_with_retries(
         return
 
 
+_FINISH_REASON = re.compile(rb'"finish_reason"\s*:\s*"([A-Za-z_]+)"')
+
+
 def usage_from_body(body: bytes) -> tuple[int | None, int | None]:
     try:
         usage = json.loads(body).get("usage") or {}
@@ -131,13 +135,20 @@ def usage_from_body(body: bytes) -> tuple[int | None, int | None]:
     return usage.get("prompt_tokens"), usage.get("completion_tokens")
 
 
+def finish_reason_from_body(body: bytes) -> str | None:
+    """``stop``, ``length`` (cut off by the token limit), ``tool_calls``, ``content_filter``..."""
+    match = _FINISH_REASON.search(body)
+    return match.group(1).decode() if match else None
+
+
 class UsageSniffer:
-    """Watches an SSE byte stream for the chunk carrying ``usage`` (usually the last one)."""
+    """Watches an SSE byte stream for usage (usually the last chunk) and the finish reason."""
 
     def __init__(self) -> None:
         self._buffer = b""
         self.prompt_tokens: int | None = None
         self.completion_tokens: int | None = None
+        self.finish_reason: str | None = None
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += chunk
@@ -145,7 +156,11 @@ class UsageSniffer:
         if len(self._buffer) > 1_000_000:  # never hold a runaway partial line
             self._buffer = b""
         for line in lines:
-            if line.startswith(b"data:") and b'"usage"' in line:
+            if not line.startswith(b"data:"):
+                continue
+            if b'"finish_reason"' in line and (reason := finish_reason_from_body(line)):
+                self.finish_reason = reason
+            if b'"usage"' in line:
                 payload = line[5:].strip()
                 prompt, completion = usage_from_body(payload)
                 if prompt is not None or completion is not None:

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Account{% endblock %}
+{% block main_class %}narrow{% endblock %}
+{% block content %}
+<h1>{{ user.username }}</h1>
+<p class="muted">Role: <strong>{{ user.role }}</strong></p>
+<h2>Change password</h2>
+<form method="post" action="/admin/account" class="card stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Current password <input name="current" type="password" required autocomplete="current-password"></label>
+  <label>New password <input name="password" type="password" required minlength="12" autocomplete="new-password"></label>
+  <label>Confirm new password <input name="confirm" type="password" required minlength="12" autocomplete="new-password"></label>
+  <button type="submit">Change password</button>
+</form>
+{% endblock %}

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+{% block content %}
+<h1>Admin users</h1>
+<p class="muted small">
+  <strong>owner</strong>: everything incl. users ·
+  <strong>admin</strong>: all configuration ·
+  <strong>operator</strong>: dashboard and operations ·
+  <strong>viewer</strong>: read-only
+</p>
+
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>User</th><th>Role</th><th>Enabled</th><th>Reset password</th><th></th></tr></thead>
+  <tbody>
+  {% for u in users %}
+  <tr>
+    <td data-label="User"><strong>{{ u.username }}</strong>{% if u.id == user.id %} <span class="badge">you</span>{% endif %}</td>
+    <td data-label="Role" colspan="3">
+      <form method="post" action="/admin/users/{{ u.id }}" class="row wrap">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <select name="role" aria-label="Role">
+          {% for r in roles %}<option value="{{ r }}" {% if r == u.role %}selected{% endif %}>{{ r }}</option>{% endfor %}
+        </select>
+        <label class="check"><input type="checkbox" name="enabled" {% if u.enabled %}checked{% endif %}> enabled</label>
+        <input type="password" name="password" placeholder="new password (optional)" minlength="12" autocomplete="new-password">
+        <button type="submit" class="secondary">Save</button>
+      </form>
+    </td>
+    <td data-label="">
+      {% if u.id != user.id %}
+      <form method="post" action="/admin/users/{{ u.id }}/delete" data-confirm="Delete user {{ u.username }}?">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Add user</h2>
+<form method="post" action="/admin/users" class="card grid">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Username <input name="username" required autocomplete="off"></label>
+  <label>Role
+    <select name="role">{% for r in roles %}<option value="{{ r }}" {% if r == "viewer" %}selected{% endif %}>{{ r }}</option>{% endfor %}</select>
+  </label>
+  <label>Password <input name="password" type="password" required minlength="12" autocomplete="new-password"></label>
+  <div class="align-end"><button type="submit">Add user</button></div>
+</form>
+{% endblock %}

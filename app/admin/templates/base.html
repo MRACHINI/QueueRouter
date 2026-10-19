@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}QueueRouter{% endblock %} · QueueRouter</title>
+  <link rel="stylesheet" href="/admin/static/admin.css?v={{ version }}">
+  <link rel="icon" href="/admin/static/icon.svg" type="image/svg+xml">
+  <script src="/admin/static/admin.js?v={{ version }}"></script>
+</head>
+<body>
+  {% if user %}
+  <header class="topbar">
+    <a class="brand" href="/admin">QueueRouter</a>
+    <input type="checkbox" id="nav-toggle" class="nav-toggle" aria-label="Menu">
+    <label for="nav-toggle" class="nav-burger" aria-hidden="true">☰</label>
+    <nav class="nav">
+      <a href="/admin" {% if path == "/admin" %}aria-current="page"{% endif %}>Dashboard</a>
+      {% if user.can("admin") %}
+      <a href="/admin/clients" {% if path.startswith("/admin/clients") %}aria-current="page"{% endif %}>Clients</a>
+      <a href="/admin/upstreams" {% if path.startswith("/admin/upstreams") %}aria-current="page"{% endif %}>Upstreams</a>
+      <a href="/admin/settings" {% if path == "/admin/settings" %}aria-current="page"{% endif %}>Settings</a>
+      <a href="/admin/audit" {% if path == "/admin/audit" %}aria-current="page"{% endif %}>Audit</a>
+      {% endif %}
+      {% if user.can("owner") %}
+      <a href="/admin/users" {% if path == "/admin/users" %}aria-current="page"{% endif %}>Users</a>
+      {% endif %}
+      <span class="nav-spacer"></span>
+      <button type="button" class="ghost" id="theme-toggle" title="Theme">◐</button>
+      <a href="/admin/account" {% if path == "/admin/account" %}aria-current="page"{% endif %}>{{ user.username }}</a>
+      <form method="post" action="/admin/logout" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="ghost">Sign out</button>
+      </form>
+    </nav>
+  </header>
+  {% endif %}
+  <main class="{% block main_class %}container{% endblock %}">
+    {% if flash %}<p class="notice ok" role="status">{{ flash }}</p>{% endif %}
+    {% if error %}<p class="notice err" role="alert">{{ error }}</p>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="footer">QueueRouter {{ version }}</footer>
+</body>
+</html>

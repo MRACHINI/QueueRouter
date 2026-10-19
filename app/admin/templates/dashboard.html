@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<div id="dashboard" data-endpoint="/admin/api/stats">
+  <div class="row between">
+    <h1>Dashboard</h1>
+    <span class="muted small" id="live-status">live</span>
+  </div>
+
+  {% if not state.configured %}
+  <p class="notice err">No upstream is configured yet, so requests get <code>503</code>.
+    Add one under <a href="/admin/upstreams">Upstreams</a>.</p>
+  {% endif %}
+
+  <section class="tiles">
+    <div class="tile">
+      <div class="tile-label">Slots in use</div>
+      <div class="tile-value"><span data-k="active">{{ state.active }}</span> / <span data-k="max_concurrency">{{ state.max_concurrency }}</span></div>
+      <meter data-k="slots" min="0" max="{{ state.max_concurrency }}" value="{{ state.active }}"></meter>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Queued</div>
+      <div class="tile-value" data-k="queued">{{ state.queued }}</div>
+      <div class="small muted">
+        high <span data-k="lane_high">{{ state.queued_by_lane.high }}</span> ·
+        normal <span data-k="lane_normal">{{ state.queued_by_lane.normal }}</span> ·
+        low <span data-k="lane_low">{{ state.queued_by_lane.low }}</span>
+      </div>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Oldest wait</div>
+      <div class="tile-value"><span data-k="oldest_wait_s">{{ state.oldest_wait_s }}</span> s</div>
+      <div class="small muted">p95 wait <span data-k="wait_p95">{{ state.wait_ms.p95 }}</span> ms</div>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Requests</div>
+      <div class="tile-value" data-k="done">{{ state.outcomes.get("done", 0) }}</div>
+      <div class="small muted">
+        errors <span data-k="errors">{{ state.outcomes.get("error", 0) }}</span> ·
+        cancelled <span data-k="cancelled">{{ state.outcomes.get("cancelled", 0) }}</span> ·
+        retries <span data-k="retries">{{ state.retries }}</span>
+      </div>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Tokens (since start)</div>
+      <div class="tile-value" data-k="tokens_total">{{ state.tokens.prompt + state.tokens.completion }}</div>
+      <div class="small muted">in <span data-k="tokens_prompt">{{ state.tokens.prompt }}</span> ·
+        out <span data-k="tokens_completion">{{ state.tokens.completion }}</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Clients</h2>
+    <div class="table-wrap">
+      <table class="cards">
+        <thead><tr><th>Client</th><th>Active</th><th>Queued</th><th>Done</th><th>Errors</th><th>Tokens</th></tr></thead>
+        <tbody id="clients-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Recent requests</h2>
+    <div class="table-wrap">
+      <table class="cards">
+        <thead><tr><th>Time</th><th>Client</th><th>Prio</th><th>Model</th><th>Outcome</th><th>Queue ms</th><th>Upstream ms</th><th>Tokens</th></tr></thead>
+        <tbody id="recent-body"></tbody>
+      </table>
+    </div>
+  </section>
+  <p class="small muted">Uptime <span data-k="uptime">{{ state.uptime_s }}</span> s · upstream
+    <span data-k="upstream">{{ state.upstream or "none" }}</span></p>
+</div>
+{% endblock %}

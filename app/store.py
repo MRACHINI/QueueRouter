@@ -145,6 +145,29 @@ class Client:
         return self.expires_at is not None and self.expires_at <= time.time()
 
 
+ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
+
+
+@dataclass(frozen=True)
+class AdminUser:
+    id: int
+    username: str
+    role: str
+    can_view_content: bool
+    enabled: bool
+    created_at: float
+
+    def can(self, role: str) -> bool:
+        """Whether this user has at least ``role``."""
+        return ROLES.index(self.role) >= ROLES.index(role)
+
+
+def _admin(row: sqlite3.Row) -> AdminUser:
+    return AdminUser(
+        row["id"], row["username"], row["role"], bool(row["can_view_content"]), bool(row["enabled"]), row["created_at"]
+    )
+
+
 def load_fernet(data_dir: str, secret_key: str | None) -> Fernet:
     """Fernet from SECRET_KEY, or from <data_dir>/secret.key (created on first start)."""
     if secret_key:
@@ -446,6 +469,83 @@ class Store:
         with self.tx() as db:
             db.execute("DELETE FROM clients WHERE id = ?", (client_id,))
         self.audit(actor, "client.delete", str(client_id))
+
+    # -- admin users and sessions --------------------------------------------------------
+
+    def count_admins(self, role: str | None = None, enabled_only: bool = False) -> int:
+        sql, params = "SELECT COUNT(*) AS n FROM admin_users WHERE 1=1", []
+        if role:
+            sql += " AND role = ?"
+            params.append(role)
+        if enabled_only:
+            sql += " AND enabled = 1"
+        return self.query(sql, tuple(params))[0]["n"]
+
+    def list_admins(self) -> list[AdminUser]:
+        return [_admin(r) for r in self.query("SELECT * FROM admin_users ORDER BY username")]
+
+    def get_admin(self, user_id: int | None = None, username: str | None = None) -> AdminUser | None:
+        if user_id is not None:
+            rows = self.query("SELECT * FROM admin_users WHERE id = ?", (user_id,))
+        else:
+            rows = self.query("SELECT * FROM admin_users WHERE username = ?", (username,))
+        return _admin(rows[0]) if rows else None
+
+    def password_hash(self, user_id: int) -> str:
+        return self.query("SELECT password_hash FROM admin_users WHERE id = ?", (user_id,))[0]["password_hash"]
+
+    def create_admin(self, username: str, password_hash: str, role: str, actor: str) -> int:
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT INTO admin_users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+                (username, password_hash, role, time.time()),
+            )
+        self.audit(actor, "user.create", username, {"role": role})
+        return cur.lastrowid
+
+    def update_admin(self, user_id: int, actor: str, **fields: object) -> None:
+        allowed = {"role", "enabled", "password_hash", "can_view_content"}
+        self._update("admin_users", user_id, allowed, fields)
+        if "password_hash" in fields or fields.get("enabled") is False:
+            self.delete_sessions(user_id)
+        logged = {k: v for k, v in fields.items() if k != "password_hash"}
+        if "password_hash" in fields:
+            logged["password"] = "changed"
+        self.audit(actor, "user.update", str(user_id), logged)
+
+    def delete_admin(self, user_id: int, actor: str) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))
+        self.audit(actor, "user.delete", str(user_id))
+
+    def create_session(self, user_id: int, token_hash: str, csrf: str, ip: str, ttl_s: float) -> None:
+        now = time.time()
+        with self.tx() as db:
+            db.execute("DELETE FROM admin_sessions WHERE expires_at < ?", (now,))
+            db.execute(
+                "INSERT INTO admin_sessions (token_hash, user_id, csrf, ip, created_at, last_seen, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (token_hash, user_id, csrf, ip, now, now, now + ttl_s),
+            )
+
+    def get_session(self, token_hash: str) -> sqlite3.Row | None:
+        rows = self.query("SELECT * FROM admin_sessions WHERE token_hash = ?", (token_hash,))
+        return rows[0] if rows else None
+
+    def touch_session(self, token_hash: str) -> None:
+        with self.tx() as db:
+            db.execute("UPDATE admin_sessions SET last_seen = ? WHERE token_hash = ?", (time.time(), token_hash))
+
+    def delete_session(self, token_hash: str) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM admin_sessions WHERE token_hash = ?", (token_hash,))
+
+    def delete_sessions(self, user_id: int) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM admin_sessions WHERE user_id = ?", (user_id,))
+
+    def list_audit(self, limit: int = 200) -> list[sqlite3.Row]:
+        return self.query("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
 
     # -- helpers -------------------------------------------------------------------------
 

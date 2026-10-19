@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Audit log{% endblock %}
+{% block content %}
+<h1>Audit log</h1>
+<p class="muted small">Latest 300 entries. Secrets are never recorded.</p>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>When (UTC)</th><th>Who</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td data-label="When"><time data-ts="{{ r.ts }}">{{ r.ts | int }}</time></td>
+    <td data-label="Who">{{ r.actor }}</td>
+    <td data-label="Action"><code>{{ r.action }}</code></td>
+    <td data-label="Target">{{ r.target }}</td>
+    <td data-label="Detail" class="small mono wrap-any">{{ r.detail }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">Nothing yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

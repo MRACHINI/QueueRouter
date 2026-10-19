@@ -18,6 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from . import __version__
+from .admin import AdminContext, mount_admin
 from .auth import AuthGuard, client_ip, find_client, presented_key
 from .config import PRIORITIES, Bootstrap, ClientKey, Settings
 from .sessions import session_key
@@ -28,6 +29,7 @@ from .upstream import (
     UpstreamFailed,
     UsageSniffer,
     Wait,
+    finish_reason_from_body,
     response_headers,
     send_with_retries,
     upstream_headers,
@@ -72,6 +74,7 @@ class RequestLog:
             "retries": 0,
             "prompt_tokens": None,
             "completion_tokens": None,
+            "finish_reason": None,
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -87,6 +90,7 @@ class RequestLog:
             f["completion_tokens"],
             client=f["client"] or "default",
         )
+        stats.recent.append({**f, "ts": time.time()})
         log.info(json.dumps(f))
 
 
@@ -171,6 +175,19 @@ def create_app(
     app.state.store = store
     app.state.reload = reload
     app.state.bootstrap = bootstrap
+    app.state.stats = stats
+
+    def live_state() -> dict:
+        return {
+            "version": __version__,
+            "configured": snapshot.upstream is not None,
+            "upstream": snapshot.upstream.upstream.name if snapshot.upstream else None,
+            **queue_state(),
+            **stats.snapshot(),
+            "recent": list(stats.recent)[-25:],
+        }
+
+    mount_admin(app, AdminContext(store, bootstrap, reload, live_state))
 
     # -- helpers ---------------------------------------------------------------------------
 
@@ -399,7 +416,9 @@ def create_app(
             status = response.status_code
             outcome = "done" if status < 400 else "error"
             prompt, completion = usage_from_body(content) if status < 400 else (None, None)
-            rlog.fields.update(prompt_tokens=prompt, completion_tokens=completion)
+            rlog.fields.update(
+                prompt_tokens=prompt, completion_tokens=completion, finish_reason=finish_reason_from_body(content)
+            )
             headers = response_headers(response.headers)
             headers.update(adm.hints)
             headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])
@@ -503,6 +522,7 @@ def create_app(
                 upstream_ms=upstream_ms,
                 prompt_tokens=sniffer.prompt_tokens,
                 completion_tokens=sniffer.completion_tokens,
+                finish_reason=sniffer.finish_reason,
             )
 
     return app

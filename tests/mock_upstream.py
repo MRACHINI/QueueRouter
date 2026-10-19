@@ -78,7 +78,13 @@ def create_mock(limit: int = 2) -> FastAPI:
                     chunk = {
                         "id": "x",
                         "object": "chat.completion.chunk",
-                        "choices": [{"index": 0, "delta": {"content": f"t{i} "}}],
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": f"t{i} "},
+                                "finish_reason": body.get("mock_finish", "stop") if i == chunks - 1 else None,
+                            }
+                        ],
                     }
                     yield f"data: {json.dumps(chunk)}\n\n"
                 usage = {
