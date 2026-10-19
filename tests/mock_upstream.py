@@ -27,6 +27,12 @@ def create_mock(limit: int = 2) -> FastAPI:
             return JSONResponse({"error": {"message": "too many parallel requests"}}, status_code=429)
         return None
 
+    @app.post("/v1/traces")
+    async def traces(request: Request):
+        """OTLP/HTTP receiver (tracing tests)."""
+        state.setdefault("traces", []).append({"body": await request.body(), "headers": dict(request.headers)})
+        return JSONResponse({})
+
     @app.post("/hook")
     async def hook(request: Request):
         """Webhook receiver (alerts tests); answers with the status given in ?status=."""
