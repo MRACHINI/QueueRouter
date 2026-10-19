@@ -26,6 +26,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from . import __version__, anthropic_api, content_log, metrics, responses_api, structured
+from . import cron as cron_mod
 from . import jobs as jobs_mod
 from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
@@ -1158,6 +1159,80 @@ def create_app(
         if row["batch_id"]:
             await asyncio.to_thread(jobs_mod.finish_batch_if_done, store, row["batch_id"])
         return jobs_mod.job_view(store, await asyncio.to_thread(store.get_job, job_id), with_result=False)
+
+    @app.post("/v1/schedules")
+    async def schedules_create(request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        body = await json_body(request)
+        if isinstance(body, Response):
+            return body
+        try:
+            schedule = jobs_mod.new_schedule(client.name, body)
+        except jobs_mod.JobError as exc:
+            return job_error(exc)
+        await asyncio.to_thread(store.create_schedule, schedule)
+        row = await asyncio.to_thread(store.get_schedule, schedule["id"])
+        return JSONResponse(jobs_mod.schedule_view(row), status_code=201)
+
+    @app.get("/v1/schedules")
+    async def schedules_list(request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        rows = await asyncio.to_thread(store.list_schedules, client.name)
+        return {"object": "list", "data": [jobs_mod.schedule_view(r) for r in rows]}
+
+    async def own_schedule(request: Request, schedule_id: str):
+        client, denied = authenticate(request)
+        if denied:
+            return None, denied
+        row = await asyncio.to_thread(store.get_schedule, schedule_id, client.name)
+        if row is None:
+            return None, error_response(f"schedule '{schedule_id}' not found", 404, "not_found")
+        return row, None
+
+    @app.get("/v1/schedules/{schedule_id}")
+    async def schedules_get(schedule_id: str, request: Request):
+        row, denied = await own_schedule(request, schedule_id)
+        return denied or jobs_mod.schedule_view(row)
+
+    @app.patch("/v1/schedules/{schedule_id}")
+    async def schedules_patch(schedule_id: str, request: Request):
+        """Pause / resume: ``{"enabled": false}``."""
+        row, denied = await own_schedule(request, schedule_id)
+        if denied:
+            return denied
+        body = await json_body(request)
+        if isinstance(body, Response):
+            return body
+        if not isinstance(body.get("enabled"), bool):
+            return error_response("only 'enabled' (true/false) can be changed", 400, "invalid_request_error")
+        fields: dict = {"enabled": body["enabled"]}
+        if body["enabled"]:  # resuming: next run from now, not the missed ones
+            fields["next_run"] = cron_mod.parse(row["cron"]).next_after(time.time())
+        await asyncio.to_thread(store.set_schedule, schedule_id, **fields)
+        return jobs_mod.schedule_view(await asyncio.to_thread(store.get_schedule, schedule_id))
+
+    @app.delete("/v1/schedules/{schedule_id}")
+    async def schedules_delete(schedule_id: str, request: Request):
+        row, denied = await own_schedule(request, schedule_id)
+        if denied:
+            return denied
+        await asyncio.to_thread(store.delete_schedule, schedule_id)
+        return {"id": schedule_id, "object": "schedule", "deleted": True}
+
+    @app.post("/v1/schedules/{schedule_id}/run")
+    async def schedules_run(schedule_id: str, request: Request):
+        """Run now (once), without changing the schedule."""
+        row, denied = await own_schedule(request, schedule_id)
+        if denied:
+            return denied
+        job_id = await asyncio.to_thread(jobs_mod.fire_schedule, store, row, time.time(), True)
+        return JSONResponse(
+            jobs_mod.job_view(store, await asyncio.to_thread(store.get_job, job_id), with_result=False), status_code=202
+        )
 
     @app.post("/v1/files")
     async def files_upload(request: Request):

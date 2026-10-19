@@ -293,6 +293,29 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX request_content_ts ON request_content (ts);
     """,
+    # 14: recurring jobs (cron schedules that create jobs)
+    """
+    CREATE TABLE schedules (
+        id TEXT PRIMARY KEY,
+        client TEXT NOT NULL,
+        name TEXT NOT NULL,
+        cron TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        request TEXT NOT NULL,
+        priority TEXT NOT NULL DEFAULT 'low',
+        tags TEXT,
+        idle_only INTEGER NOT NULL DEFAULT 0,
+        deadline_s REAL,
+        callback_url TEXT,
+        callback_secret TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created REAL NOT NULL,
+        next_run REAL,
+        last_run REAL,
+        last_job_id TEXT
+    );
+    CREATE INDEX schedules_due ON schedules (enabled, next_run);
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -1298,6 +1321,61 @@ class Store:
                 "AND id NOT IN (SELECT error_file_id FROM batches WHERE error_file_id IS NOT NULL)",
                 (cutoff,),
             )
+
+    def create_schedule(self, s: dict) -> None:
+        with self.tx() as db:
+            db.execute(
+                "INSERT INTO schedules (id, client, name, cron, endpoint, request, priority, tags, idle_only, "
+                "deadline_s, callback_url, callback_secret, enabled, created, next_run) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    s["id"],
+                    s["client"],
+                    s["name"],
+                    s["cron"],
+                    s["endpoint"],
+                    self.encrypt(json.dumps(s["request"])),
+                    s.get("priority", "low"),
+                    ",".join(s.get("tags") or ()) or None,
+                    int(bool(s.get("idle_only"))),
+                    s.get("deadline_s"),
+                    s.get("callback_url"),
+                    self.encrypt(s["callback_secret"]) if s.get("callback_secret") else None,
+                    int(s.get("enabled", True)),
+                    time.time(),
+                    s["next_run"],
+                ),
+            )
+
+    def list_schedules(self, client: str | None = None) -> list[sqlite3.Row]:
+        if client is None:
+            return self.query("SELECT * FROM schedules ORDER BY client, name")
+        return self.query("SELECT * FROM schedules WHERE client = ? ORDER BY name", (client,))
+
+    def get_schedule(self, schedule_id: str, client: str | None = None) -> sqlite3.Row | None:
+        sql, params = "SELECT * FROM schedules WHERE id = ?", [schedule_id]
+        if client is not None:
+            sql += " AND client = ?"
+            params.append(client)
+        rows = self.query(sql, tuple(params))
+        return rows[0] if rows else None
+
+    def due_schedules(self, now: float) -> list[sqlite3.Row]:
+        return self.query("SELECT * FROM schedules WHERE enabled = 1 AND next_run <= ? ORDER BY next_run", (now,))
+
+    def set_schedule(self, schedule_id: str, **fields: object) -> None:
+        columns = ", ".join(f"{name} = ?" for name in fields)
+        values = [int(v) if isinstance(v, bool) else v for v in fields.values()]
+        with self.tx() as db:
+            db.execute(f"UPDATE schedules SET {columns} WHERE id = ?", (*values, schedule_id))  # noqa: S608
+
+    def delete_schedule(self, schedule_id: str, client: str | None = None) -> bool:
+        with self.tx() as db:
+            if client is None:
+                cur = db.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+            else:
+                cur = db.execute("DELETE FROM schedules WHERE id = ? AND client = ?", (schedule_id, client))
+        return cur.rowcount == 1
 
     def create_file(self, file_id: str, client: str, purpose: str, filename: str, data: bytes) -> sqlite3.Row:
         with self.tx() as db:

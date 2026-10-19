@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import __version__, totp
+from .. import cron as cron_mod
 from .. import jobs as jobs_mod
 from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
@@ -78,6 +79,7 @@ MESSAGES = {
     "2fa_off": "Two-factor sign-in is off.",
     "backup_missing": "That backup file doesn't exist.",
     "content_purged": "Logged prompts and replies were deleted.",
+    "schedule_invalid": "Check the schedule: a name, a valid cron expression (e.g. 0 2 * * *) and a JSON request body.",
     "content_missing": "No logged content for that request (logging was off, or it expired).",
     "2fa_reset": "Two-factor sign-in was reset for that user; they sign in with their password "
     "and can set it up again.",
@@ -1431,6 +1433,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             jobs=[jobs_mod.job_view(store, r, with_result=False) | {"client": r["client"]} for r in rows],
             batches=[jobs_mod.batch_view(store, b) | {"client": b["client"]} for b in batches],
             statuses=("queued", "running", "succeeded", "failed", "cancelled", "expired"),
+            schedules=[jobs_mod.schedule_view(s) | {"client": s["client"]} for s in store.list_schedules()],
+            clients=[c.name for c in store.list_clients()],
             status=status or "",
             client=client or "",
             batch=batch or "",
@@ -1455,6 +1459,64 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             return back("/admin/jobs", error="invalid")
         store.audit(session.user.username, "job.retry", job_id)
         return back("/admin/jobs", "saved")
+
+    @app.post("/admin/schedules")
+    async def schedules_create_admin(request: Request):
+        session, form = await require_post(request, "admin")
+        client = str(form.get("client", ""))
+        if client not in {c.name for c in store.list_clients()}:
+            return back("/admin/jobs#schedules", error="invalid")
+        try:
+            body = {
+                "name": str(form.get("name", "")),
+                "cron": str(form.get("cron", "")),
+                "endpoint": str(form.get("endpoint") or "/v1/chat/completions"),
+                "request": json.loads(str(form.get("request", ""))),
+                "priority": str(form.get("priority", "low")),
+                "idle_only": form.get("idle_only") == "on",
+                "tags": str(form.get("tags", "")),
+            }
+            schedule = jobs_mod.new_schedule(client, body)
+        except (ValueError, jobs_mod.JobError):
+            return back("/admin/jobs#schedules", error="schedule_invalid")
+        store.create_schedule(schedule)
+        store.audit(
+            session.user.username, "schedule.create", schedule["name"], {"client": client, "cron": body["cron"]}
+        )
+        return back("/admin/jobs#schedules", "created")
+
+    @app.post("/admin/schedules/{schedule_id}/toggle")
+    async def schedules_toggle_admin(schedule_id: str, request: Request):
+        session, _ = await require_post(request, "operator")
+        row = store.get_schedule(schedule_id)
+        if row is None:
+            return back("/admin/jobs#schedules", error="invalid")
+        enabled = not row["enabled"]
+        fields: dict = {"enabled": enabled}
+        if enabled:
+            fields["next_run"] = cron_mod.parse(row["cron"]).next_after(time.time())
+        store.set_schedule(schedule_id, **fields)
+        store.audit(session.user.username, "schedule.toggle", row["name"], {"enabled": enabled})
+        return back("/admin/jobs#schedules", "saved")
+
+    @app.post("/admin/schedules/{schedule_id}/run")
+    async def schedules_run_admin(schedule_id: str, request: Request):
+        session, _ = await require_post(request, "operator")
+        row = store.get_schedule(schedule_id)
+        if row is None:
+            return back("/admin/jobs#schedules", error="invalid")
+        jobs_mod.fire_schedule(store, row, time.time(), manual=True)
+        store.audit(session.user.username, "schedule.run", row["name"])
+        return back("/admin/jobs", "saved")
+
+    @app.post("/admin/schedules/{schedule_id}/delete")
+    async def schedules_delete_admin(schedule_id: str, request: Request):
+        session, _ = await require_post(request, "admin")
+        row = store.get_schedule(schedule_id)
+        if row is not None:
+            store.delete_schedule(schedule_id)
+            store.audit(session.user.username, "schedule.delete", row["name"])
+        return back("/admin/jobs#schedules", "deleted")
 
     @app.post("/admin/batches/{batch_id}/cancel")
     async def batches_cancel_admin(batch_id: str, request: Request):

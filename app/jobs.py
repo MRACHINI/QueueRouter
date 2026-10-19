@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import cron
 from .store import JOB_DONE, Store
 
 log = logging.getLogger("queuerouter")
@@ -316,6 +317,8 @@ class JobRunner:
 
     async def tick(self, max_in_flight: int, live_waiting: int) -> None:
         now = time.time()
+        for schedule in await asyncio.to_thread(self.store.due_schedules, now):
+            await asyncio.to_thread(fire_schedule, self.store, schedule, now)
         for batch_id in await asyncio.to_thread(self.store.expire_jobs, now):
             await asyncio.to_thread(finish_batch_if_done, self.store, batch_id)
         free = max_in_flight - len(self.running)
@@ -396,3 +399,77 @@ class JobRunner:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+# -- recurring jobs (cron schedules) ---------------------------------------------------------
+
+
+def new_schedule(client: str, body: dict, now: float | None = None) -> dict:
+    """A schedule from a ``POST /v1/schedules`` body (same fields as a job, plus ``name`` and ``cron``)."""
+    name = str(body.get("name") or "").strip()
+    if not name or len(name) > 100:
+        raise JobError("'name' is required (up to 100 characters)")
+    try:
+        when = cron.parse(str(body.get("cron") or ""))
+    except cron.CronError as exc:
+        raise JobError(f"cron: {exc}") from exc
+    deadline_s = body.get("deadline_s")
+    if deadline_s is not None and (not isinstance(deadline_s, int | float) or deadline_s <= 0):
+        raise JobError("'deadline_s' must be a positive number of seconds")
+    job = new_job(client, {k: v for k, v in body.items() if k not in ("run_at", "deadline")})
+    return {
+        **{k: job[k] for k in ("client", "endpoint", "request", "priority", "tags", "idle_only", "callback_url")},
+        "callback_secret": job["callback_secret"],
+        "id": new_id("sched"),
+        "name": name,
+        "cron": str(body["cron"]).strip(),
+        "deadline_s": deadline_s,
+        "enabled": body.get("enabled", True) is not False,
+        "next_run": when.next_after(now or time.time()),
+    }
+
+
+def schedule_view(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "object": "schedule",
+        "name": row["name"],
+        "cron": row["cron"],
+        "endpoint": row["endpoint"],
+        "priority": row["priority"],
+        "tags": [t for t in (row["tags"] or "").split(",") if t],
+        "idle_only": bool(row["idle_only"]),
+        "deadline_s": row["deadline_s"],
+        "callback_url": row["callback_url"],
+        "enabled": bool(row["enabled"]),
+        "created_at": row["created"],
+        "next_run": row["next_run"] if row["enabled"] else None,
+        "last_run": row["last_run"],
+        "last_job_id": row["last_job_id"],
+    }
+
+
+def fire_schedule(store: Store, row: sqlite3.Row, now: float, manual: bool = False) -> str:
+    """Create this run's job; move the schedule to its next time (unless run by hand). Returns the job id."""
+    job = {
+        "id": new_id("job"),
+        "client": row["client"],
+        "priority": row["priority"],
+        "endpoint": row["endpoint"],
+        "request": json.loads(store.decrypt(row["request"])),
+        "deadline": now + row["deadline_s"] if row["deadline_s"] else None,
+        "idle_only": bool(row["idle_only"]),
+        "callback_url": row["callback_url"],
+        "callback_secret": store.decrypt(row["callback_secret"]) if row["callback_secret"] else None,
+        "tags": ["schedule", *[t for t in (row["tags"] or "").split(",") if t]][:10],
+        "created": now,
+    }
+    store.create_jobs([job])
+    fields: dict = {"last_run": now, "last_job_id": job["id"]}
+    if not manual:
+        try:  # a missed run (e.g. while down) runs once; then the normal rhythm resumes
+            fields["next_run"] = cron.parse(row["cron"]).next_after(now)
+        except cron.CronError:
+            fields["enabled"] = False
+    store.set_schedule(row["id"], **fields)
+    return job["id"]
