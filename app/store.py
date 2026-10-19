@@ -165,6 +165,11 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE aliases ADD COLUMN params TEXT NOT NULL DEFAULT '';
     """,
+    # 7: fallback chains on aliases
+    """
+    ALTER TABLE aliases ADD COLUMN fallbacks TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE aliases ADD COLUMN fallback_on TEXT NOT NULL DEFAULT '["unavailable", "errors", "context"]';
+    """,
 ]
 
 REQUEST_COLUMNS = (
@@ -254,6 +259,8 @@ class Alias:
     enabled: bool
     notes: str
     params: str = ""  # parameter rules JSON (app/params.py)
+    fallbacks: tuple[str, ...] = ()  # backup models, tried in order
+    fallback_on: tuple[str, ...] = ("unavailable", "errors", "context")
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -779,6 +786,8 @@ class Store:
                 bool(r["enabled"]),
                 r["notes"],
                 r["params"],
+                tuple(json.loads(r["fallbacks"] or "[]")),
+                tuple(json.loads(r["fallback_on"] or "[]")),
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -791,20 +800,38 @@ class Store:
         actor: str,
         notes: str = "",
         params: str = "",
+        fallbacks: tuple[str, ...] = (),
+        fallback_on: tuple[str, ...] = ("unavailable", "errors", "context"),
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
-                "INSERT INTO aliases (name, target_model, upstream_ids, notes, params, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (name, target_model, json.dumps(list(upstream_ids)), notes, params, time.time()),
+                "INSERT INTO aliases (name, target_model, upstream_ids, notes, params, fallbacks, fallback_on, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    name,
+                    target_model,
+                    json.dumps(list(upstream_ids)),
+                    notes,
+                    params,
+                    json.dumps(list(fallbacks)),
+                    json.dumps(list(fallback_on)),
+                    time.time(),
+                ),
             )
-        self.audit(actor, "alias.create", name, {"target_model": target_model, "upstreams": list(upstream_ids)})
+        self.audit(
+            actor,
+            "alias.create",
+            name,
+            {"target_model": target_model, "upstreams": list(upstream_ids), "fallbacks": list(fallbacks)},
+        )
         return cur.lastrowid
 
     def update_alias(self, alias_id: int, actor: str, **fields: object) -> None:
-        if "upstream_ids" in fields:
-            fields["upstream_ids"] = json.dumps(list(fields["upstream_ids"]))
-        self._update("aliases", alias_id, {"target_model", "upstream_ids", "enabled", "notes", "params"}, fields)
+        for name in ("upstream_ids", "fallbacks", "fallback_on"):
+            if name in fields:
+                fields[name] = json.dumps(list(fields[name]))
+        allowed = {"target_model", "upstream_ids", "enabled", "notes", "params", "fallbacks", "fallback_on"}
+        self._update("aliases", alias_id, allowed, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)
 
     def delete_alias(self, alias_id: int, actor: str) -> None:

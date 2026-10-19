@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import json
 import logging
@@ -27,6 +28,7 @@ from .auth import AuthGuard, client_ip, find_client, ip_in, presented_key
 from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
+from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
 from .opencode import model_limits, provider_config, wellknown_manifest
 from .params import apply_rules, parse_rules, requested_output, too_long
 from .pricing import PriceCatalog
@@ -92,6 +94,7 @@ class RequestLog:
             "completion_tokens": None,
             "cached_tokens": None,
             "finish_reason": None,
+            "fallback": None,
             "target_model": None,
         }
 
@@ -133,9 +136,29 @@ class Admission:
     hints: dict[str, str]
     policy: ClientPolicy = ClientPolicy()
     deadline: float | None = None  # monotonic time by which the whole request must finish
+    steps: tuple[Step, ...] = ()  # alias fallback chain (first = primary); empty = just this request
+    triggers: frozenset[str] = frozenset()
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
+
+
+@dataclass(frozen=True)
+class Step:
+    """One model in an alias's fallback chain."""
+
+    model: str
+    candidates: tuple[Candidate, ...]
+    body: bytes
+
+
+@dataclass
+class FellBack:
+    """Moving on to the next model in the chain."""
+
+    from_model: str
+    to_model: str
+    reason: str
 
 
 # Events from the attempt loop to the response writers.
@@ -626,6 +649,77 @@ def create_app(
                     circuits.abandon(ticket.target.upstream_id)
                 queue.cancel(ticket)
 
+    async def chained(adm: Admission) -> AsyncIterator:
+        """``attempts`` over the alias's fallback chain: on a trigger (unavailable / errors /
+        refused) the request moves on to the next model, unchanged otherwise. Same events as
+        ``attempts`` plus ``FellBack``; responses may be ``Replay`` wrappers (already inspected)."""
+        steps = adm.steps or (Step(adm.rlog.fields["model"] or "", adm.candidates, adm.body),)
+        triggers = adm.triggers
+        for index, step in enumerate(steps):
+            last = index == len(steps) - 1
+            nxt = None if last else steps[index + 1].model
+
+            def fall(reason: str, step=step, nxt=nxt):
+                adm.rlog.fields["fallback"] = f"{step.model} -> {nxt} ({reason})"
+                return FellBack(step.model, nxt, reason)
+
+            if not last and "unavailable" in triggers and not any(available(c.upstream_id) for c in step.candidates):
+                yield fall("unavailable")
+                continue
+            if index:
+                adm.rlog.fields["target_model"] = step.model
+            step_adm = dataclasses.replace(adm, candidates=step.candidates, body=step.body)
+            async with contextlib.aclosing(attempts(step_adm)) as events:
+                moved_on = False
+                async for event in events:
+                    if last or not isinstance(event, Got | Failed):
+                        yield event
+                        if isinstance(event, Got | Failed) or event is None:
+                            return
+                        continue
+                    if isinstance(event, Failed):
+                        if event.status >= 500 and "errors" in triggers:
+                            yield fall(event.message)
+                            moved_on = True
+                            break
+                        yield event
+                        return
+                    response = event.response
+                    status = response.status_code
+                    if status >= 500 and "errors" in triggers:
+                        await response.aclose()
+                        yield fall(f"HTTP {status}")
+                        moved_on = True
+                        break
+                    if "refused" in triggers:
+                        if 400 <= status < 500:
+                            content = await response.aread()
+                            if is_policy_error(status, content):
+                                await response.aclose()
+                                yield fall(f"refused (HTTP {status})")
+                                moved_on = True
+                                break
+                            yield Got(Replay(response, content, complete=True), event.target)
+                            return
+                        if status == 200:
+                            if adm.rlog.fields["stream"]:
+                                refused, replay = await sniff_stream(response)
+                            else:
+                                content = await response.aread()
+                                refused = is_refusal_text(*message_text(content))
+                                replay = Replay(response, content, complete=True)
+                            if refused:
+                                await replay.aclose()
+                                yield fall("refused")
+                                moved_on = True
+                                break
+                            yield Got(replay, event.target)
+                            return
+                    yield event
+                    return
+                if not moved_on:
+                    return
+
     # -- routes ----------------------------------------------------------------------------
 
     @app.get("/", include_in_schema=False)
@@ -798,36 +892,55 @@ def create_app(
         target_model = alias.target_model if alias else model
         if refusal := policy_refusal(client, model, target_model):
             return refusal
-        candidates = candidates_for(target_model, alias.upstream_ids if alias else ())
-        if not candidates:
-            return error_response(f"no usable upstream for '{model}' right now", 503, "no_upstream")
-
-        rewritten = False
-        if alias:  # the upstream gets the real model name
-            payload["model"] = alias.target_model
-            rewritten = True
+        # The chain: the requested model (or the alias's target), then the alias's fallbacks.
+        chain = [target_model, *(alias.fallbacks if alias else ())]
+        triggers = frozenset(alias.fallback_on) if alias and alias.fallbacks else frozenset()
         param_changes = []
         if isinstance(payload, dict):
             alias_rules = rules_of(alias.params if alias else "")
             client_rules = rules_of(client.policy.params)
             if alias_rules or client_rules:
                 param_changes = apply_rules(payload, alias_rules, client_rules)
-                rewritten = rewritten or bool(param_changes)
-            if cfg().context_check and (over := too_long(payload, model_context(target_model, candidates))):
-                estimate, context = over
+        steps: list[Step] = []
+        too_long_for: tuple | None = None
+        for i, step_model in enumerate(chain):
+            step_candidates = candidates_for(step_model, alias.upstream_ids if alias and i == 0 else ())
+            if not step_candidates:
+                continue
+            if not isinstance(payload, dict):  # not JSON: forward as-is, no chain
+                steps.append(Step(step_model, step_candidates, body))
+                break
+            step_payload = dict(payload)
+            if alias or i > 0:
+                step_payload["model"] = step_model  # the upstream gets the real model name
+            context = model_context(step_model, step_candidates)
+            if cfg().context_check and (over := too_long(step_payload, context)):
+                too_long_for = too_long_for or (*over, step_model, requested_output(step_payload))
+                if "context" in triggers:
+                    continue  # try a model with a bigger context
+                break
+            unchanged = i == 0 and not alias and not param_changes
+            steps.append(Step(step_model, step_candidates, body if unchanged else json.dumps(step_payload).encode()))
+        if not steps:
+            if too_long_for:
+                estimate, context, _, output = too_long_for
                 return JSONResponse(
                     {
                         "error": {
                             "message": f"This request needs about {estimate:,} prompt tokens plus "
-                            f"{requested_output(payload):,} output tokens, but '{model}' accepts {context:,}.",
+                            f"{output:,} output tokens, but '{model}' accepts {context:,}.",
                             "type": "invalid_request_error",
                             "code": "context_length_exceeded",
                         }
                     },
                     status_code=400,
                 )
-        if rewritten:
-            body = json.dumps(payload).encode()
+            return error_response(f"no usable upstream for '{model}' right now", 503, "no_upstream")
+        candidates, body = steps[0].candidates, steps[0].body
+        if steps[0].model != target_model:
+            target_model, alias_used = steps[0].model, True
+        else:
+            alias_used = bool(alias)
 
         request_id = f"qr-{uuid.uuid4().hex[:12]}"
         lane = request_lane(request, client)
@@ -840,7 +953,7 @@ def create_app(
             session=session and session[:8],
             position=position,
             model=model,
-            target_model=target_model if alias else None,
+            target_model=target_model if alias_used else None,
             stream=isinstance(payload, dict) and payload.get("stream") is True,
         )
         hints = {
@@ -865,6 +978,8 @@ def create_app(
             hints,
             client.policy,
             time.monotonic() + client.policy.total_timeout_s if client.policy.total_timeout_s else None,
+            tuple(steps),
+            triggers,
         )
         if rlog.fields["stream"]:
             return StreamingResponse(
@@ -894,7 +1009,7 @@ def create_app(
         outcome, status = "error", 500
         remaining = adm.deadline - time.monotonic() if adm.deadline else None
         try:
-            async with asyncio.timeout(remaining), contextlib.aclosing(attempts(adm)) as events:
+            async with asyncio.timeout(remaining), contextlib.aclosing(chained(adm)) as events:
                 async for event in events:
                     if isinstance(event, Backoff):
                         await asyncio.sleep(event.delay)
@@ -923,6 +1038,7 @@ def create_app(
                         headers = response_headers(response.headers)
                         headers.update(adm.hints)
                         headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])
+                        headers["X-QueueRouter-Model"] = rlog.fields["target_model"] or rlog.fields["model"] or ""
                         return Response(content, status, headers=headers)
             return error_response("no response", 502, "upstream_error")
         except TimeoutError:
@@ -950,9 +1066,11 @@ def create_app(
         response = None
         sniffer = UsageSniffer()
         try:
-            async with contextlib.aclosing(attempts(adm)) as events:
+            async with contextlib.aclosing(chained(adm)) as events:
                 async for event in events:
-                    if isinstance(event, Queued):
+                    if isinstance(event, FellBack):
+                        yield f": {event.from_model} {event.reason}; trying {event.to_model}\n\n".encode()
+                    elif isinstance(event, Queued):
                         note = (
                             f": queued id={adm.request_id} position={event.position} "
                             f"est_wait_ms={estimate_wait_ms(event.position)}\n\n"
