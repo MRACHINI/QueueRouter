@@ -15,7 +15,7 @@
   <tbody>
   {% for u in users %}
   <tr>
-    <td data-label="User"><strong>{{ u.username }}</strong>{% if u.id == user.id %} <span class="badge">you</span>{% endif %}</td>
+    <td data-label="User"><strong>{{ u.username }}</strong>{% if u.id == user.id %} <span class="badge">you</span>{% endif %}{% if u.has_2fa %} <span class="badge ok">2FA</span>{% endif %}</td>
     <td data-label="Role" colspan="3">
       <form method="post" action="/admin/users/{{ u.id }}" class="row wrap">
         <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -29,10 +29,18 @@
     </td>
     <td data-label="">
       {% if u.id != user.id %}
-      <form method="post" action="/admin/users/{{ u.id }}/delete" data-confirm="Delete user {{ u.username }}?">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button type="submit" class="danger">Delete</button>
-      </form>
+      <div class="row wrap">
+        {% if u.has_2fa and user.can("owner") %}
+        <form method="post" action="/admin/users/{{ u.id }}/reset-2fa" data-confirm="Turn off two-factor sign-in for {{ u.username }} (lost phone)?">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="secondary">Reset 2FA</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/admin/users/{{ u.id }}/delete" data-confirm="Delete user {{ u.username }}?">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </div>
       {% endif %}
     </td>
   </tr>

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Set up two-factor sign-in{% endblock %}
+{% block main_class %}narrow{% endblock %}
+{% block content %}
+<h1>Set up two-factor sign-in</h1>
+<ol class="stack">
+  <li>Scan this with an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password,
+    Bitwarden, Aegis…):
+    <div class="qr">{{ qr | safe }}</div>
+    <p class="small muted">Can't scan? Enter this key instead:</p>
+    <div class="secret"><code id="totp-secret">{{ secret }}</code>
+      <button type="button" class="secondary" data-copy="#totp-secret">Copy</button></div>
+  </li>
+  <li>Enter the 6-digit code the app shows:
+    <form method="post" action="/admin/account/2fa/enable" class="card stack">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Code <input name="code" required autocomplete="one-time-code" inputmode="numeric" maxlength="8" autofocus></label>
+      <button type="submit">Turn on</button>
+    </form>
+  </li>
+</ol>
+<p><a href="/admin/account">Cancel</a></p>
+{% endblock %}

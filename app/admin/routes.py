@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .. import __version__
+from .. import __version__, totp
 from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
 from ..auth import AuthGuard, client_ip
@@ -42,11 +42,13 @@ from .security import (
     admin_ip_allowed,
     csrf_ok,
     hash_password,
+    is_https,
     password_problem,
     verify_password,
 )
 
 log = logging.getLogger("queuerouter")
+TWO_FA_COOKIE, TWO_FA_TTL_S = "qr_2fa", 300
 HERE = os.path.dirname(__file__)
 
 # Short, fixed flash messages (passed by code in the redirect URL, never as free text).
@@ -69,6 +71,9 @@ MESSAGES = {
     "webhook_ok": "Test notification delivered.",
     "webhook_failed": "The test notification could not be delivered; see the error on the webhook.",
     "read": "All notifications marked as read.",
+    "2fa_off": "Two-factor sign-in is off.",
+    "2fa_reset": "Two-factor sign-in was reset for that user; they sign in with their password "
+    "and can set it up again.",
 }
 
 SETTING_CHOICES: dict[str, tuple[str, ...]] = {"lb_strategy": STRATEGIES}
@@ -153,6 +158,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     templates = Jinja2Templates(directory=os.path.join(HERE, "templates"))
     templates.env.filters["expiry_date"] = _expiry_date
     login_guard = AuthGuard(limit_per_minute=5, block_s=300)
+    pending_2fa: dict[str, tuple[int, float, str]] = {}  # ticket -> (user id, expires, next)
+    pending_setup: dict[str, tuple[str, float]] = {}  # session -> (new TOTP secret, expires)
     setup = {"token": None}
 
     # -- first admin ---------------------------------------------------------------------
@@ -284,11 +291,67 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             login_guard.fail(f"user:{username}")
             store.audit(username or "?", "login.failed", ip)
             return page(request, "login.html", None, error="Wrong username or password.", next=nxt)
+        if user.has_2fa:  # password was right; now the code from the authenticator app
+            ticket = secrets.token_urlsafe(32)
+            now = time.time()
+            for stale in [k for k, v in pending_2fa.items() if v[1] < now]:
+                pending_2fa.pop(stale, None)
+            pending_2fa[ticket] = (user.id, now + TWO_FA_TTL_S, nxt)
+            response = page(request, "login_2fa.html", None)
+            response.set_cookie(
+                TWO_FA_COOKIE,
+                ticket,
+                max_age=TWO_FA_TTL_S,
+                httponly=True,
+                secure=is_https(request, bootstrap),
+                samesite="strict",
+                path="/admin",
+            )
+            return response
+        return finish_login(request, user, ip, nxt)
+
+    def finish_login(request: Request, user, ip: str, nxt: str, how: str = "") -> RedirectResponse:
         token, _ = sessions.start(request, user)
-        store.audit(username, "login", ip)
+        store.audit(user.username, "login", ip, how)
         response = RedirectResponse(nxt, status_code=303)
         sessions.set_cookie(response, request, token)
+        response.delete_cookie(TWO_FA_COOKIE, path="/admin")
         return response
+
+    @app.post("/admin/login/2fa")
+    async def login_2fa(request: Request):
+        form = dict(await request.form())
+        ip = client_ip(request, bootstrap.trusted_proxies)
+        ticket = request.cookies.get(TWO_FA_COOKIE, "")
+        entry = pending_2fa.get(ticket)
+        if entry is None or entry[1] < time.time():
+            pending_2fa.pop(ticket, None)
+            return page(request, "login.html", None, error="The sign-in expired; please start again.", next="/admin")
+        user_id, _, nxt = entry
+        user = store.get_admin(user_id=user_id)
+        if (
+            user is None
+            or not user.enabled
+            or login_guard.is_blocked(ip)
+            or login_guard.is_blocked(f"user:{user.username}")
+        ):
+            pending_2fa.pop(ticket, None)
+            return page(request, "login.html", None, error="Too many attempts. Try again later.", next=nxt)
+        secret, last, _ = store.totp_state(user.id)
+        code = str(form.get("code", "")).strip()
+        counter = totp.verify(secret, code, after=last) if secret else None
+        if counter is not None:
+            store.totp_used(user.id, counter)
+            how = ""
+        elif secret and len(code) > totp.DIGITS and store.use_recovery_code(user.id, totp.hash_recovery(code)):
+            how = "recovery code"
+        else:
+            login_guard.fail(ip)
+            login_guard.fail(f"user:{user.username}")
+            store.audit(user.username, "login.failed", ip, "2fa")
+            return page(request, "login_2fa.html", None, error="That code didn't work. Try the current one.")
+        pending_2fa.pop(ticket, None)
+        return finish_login(request, user, ip, nxt, how)
 
     @app.post("/admin/logout")
     async def logout(request: Request):
@@ -413,10 +476,76 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 
     # -- account -------------------------------------------------------------------------
 
+    def account_page(request: Request, session: AdminSession, **context) -> HTMLResponse:
+        _, _, recovery = store.totp_state(session.user.id)
+        return page(request, "account.html", session, recovery_left=len(recovery), **context)
+
     @app.get("/admin/account")
     async def account(request: Request):
         session = require(request, "viewer")
-        return page(request, "account.html", session)
+        return account_page(request, session)
+
+    @app.post("/admin/account/2fa/start")
+    async def account_2fa_start(request: Request):
+        session, _ = await require_post(request, "viewer")
+        if session.user.has_2fa:
+            return back("/admin/account")
+        secret = totp.new_secret()
+        pending_setup[session.token_hash] = (secret, time.time() + 600)
+        return account_2fa_setup_page(request, session, secret)
+
+    def account_2fa_setup_page(request: Request, session: AdminSession, secret: str, error: str | None = None):
+        site = (bootstrap.public_url or f"{request.url.scheme}://{request.url.netloc}").split("://")[-1]
+        uri = totp.provisioning_uri(secret, f"{session.user.username}@{site}")
+        grouped = " ".join(secret[i : i + 4] for i in range(0, len(secret), 4))
+        return page(request, "account_2fa.html", session, qr=totp.qr_svg(uri), secret=grouped, error=error)
+
+    @app.post("/admin/account/2fa/enable")
+    async def account_2fa_enable(request: Request):
+        session, form = await require_post(request, "viewer")
+        secret, expires = pending_setup.get(session.token_hash, (None, 0.0))
+        if secret is None or expires < time.time():
+            pending_setup.pop(session.token_hash, None)
+            return account_page(request, session, error="The setup expired; please start again.")
+        counter = totp.verify(secret, str(form.get("code", "")))
+        if counter is None:
+            return account_2fa_setup_page(request, session, secret, "That code didn't match. Check the phone's clock.")
+        pending_setup.pop(session.token_hash, None)
+        codes = totp.new_recovery_codes()
+        store.set_totp(session.user.id, secret, [totp.hash_recovery(c) for c in codes], session.user.username)
+        store.totp_used(session.user.id, counter)
+        return page(request, "account_recovery.html", session, codes=codes)
+
+    @app.post("/admin/account/2fa/recovery")
+    async def account_2fa_recovery(request: Request):
+        session, form = await require_post(request, "viewer")
+        secret, _, _ = store.totp_state(session.user.id)
+        if secret is None:
+            return back("/admin/account")
+        if not verify_password(store.password_hash(session.user.id), str(form.get("current", ""))):
+            return account_page(request, session, error="Current password is wrong.")
+        codes = totp.new_recovery_codes()
+        store.set_totp(session.user.id, secret, [totp.hash_recovery(c) for c in codes], session.user.username)
+        return page(request, "account_recovery.html", session, codes=codes)
+
+    @app.post("/admin/account/2fa/disable")
+    async def account_2fa_disable(request: Request):
+        session, form = await require_post(request, "viewer")
+        if not verify_password(store.password_hash(session.user.id), str(form.get("current", ""))):
+            return account_page(request, session, error="Current password is wrong.")
+        store.set_totp(session.user.id, None, [], session.user.username)
+        return back("/admin/account", "2fa_off")
+
+    @app.post("/admin/users/{user_id}/reset-2fa")
+    async def users_reset_2fa(user_id: int, request: Request):
+        """For a lost phone: the user signs in with the password only, then sets 2FA up again."""
+        session, _ = await require_post(request, "owner")
+        target = store.get_admin(user_id=user_id)
+        if target is None or target.id == session.user.id:
+            return back("/admin/users", error="invalid" if target is None else "self")
+        store.set_totp(target.id, None, [], session.user.username)
+        store.delete_sessions(target.id)
+        return back("/admin/users", "2fa_reset")
 
     @app.post("/admin/account")
     async def account_password(request: Request):

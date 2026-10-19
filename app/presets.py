@@ -51,6 +51,14 @@ PRESETS: dict[str, Preset] = {
         Preset("deepinfra", "DeepInfra", "https://api.deepinfra.com/v1/openai", 8),
         Preset("mistral", "Mistral", "https://api.mistral.ai/v1", 4),
         Preset(
+            "nvidia",
+            "NVIDIA (build.nvidia.com)",
+            "https://integrate.api.nvidia.com/v1",
+            2,
+            note="The free API is limited per minute (about 40 requests/min): keep parallel requests low and "
+            "set a minimum spacing between requests on the pool.",
+        ),
+        Preset(
             "ollama",
             "Ollama",
             "http://ollama:11434/v1",

@@ -12,4 +12,26 @@
   <label>Confirm new password <input name="confirm" type="password" required minlength="12" autocomplete="new-password"></label>
   <button type="submit">Change password</button>
 </form>
+
+<h2 id="2fa">Two-factor sign-in</h2>
+{% if user.has_2fa %}
+<p><span class="badge ok">on</span> Signing in asks for a code from your authenticator app.
+  <span class="muted">{{ recovery_left }} recovery code{{ "s" if recovery_left != 1 }} left.</span></p>
+<form method="post" action="/admin/account/2fa/recovery" class="card stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Current password <input name="current" type="password" required autocomplete="current-password"></label>
+  <button type="submit" class="secondary">New recovery codes</button>
+</form>
+<form method="post" action="/admin/account/2fa/disable" class="card stack" data-confirm="Turn off two-factor sign-in?">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Current password <input name="current" type="password" required autocomplete="current-password"></label>
+  <button type="submit" class="danger">Turn off two-factor sign-in</button>
+</form>
+{% else %}
+<p class="muted">Protect this account with a code from an authenticator app on your phone, in addition to the password.</p>
+<form method="post" action="/admin/account/2fa/start">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">Set up two-factor sign-in</button>
+</form>
+{% endif %}
 {% endblock %}

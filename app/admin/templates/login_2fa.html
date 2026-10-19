@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block main_class %}narrow{% endblock %}
+{% block content %}
+<h1>Two-factor sign-in</h1>
+<form method="post" action="/admin/login/2fa" class="card stack">
+  <label>Code from your authenticator app
+    <input name="code" required autocomplete="one-time-code" inputmode="numeric" autofocus maxlength="32"></label>
+  <p class="small muted">Lost your phone? Enter one of your recovery codes instead.</p>
+  <button type="submit">Sign in</button>
+</form>
+{% endblock %}

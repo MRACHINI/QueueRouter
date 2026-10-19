@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Recovery codes{% endblock %}
+{% block main_class %}narrow{% endblock %}
+{% block content %}
+<h1>Two-factor sign-in is on</h1>
+<p class="notice err" role="alert">Save these recovery codes now (password manager or paper) — they are shown
+only once. Each one signs you in once if you lose your phone.</p>
+<div class="secret">
+  <pre class="mono" id="recovery-codes">{% for c in codes %}{{ c }}
+{% endfor %}</pre>
+  <button type="button" class="secondary" data-copy="#recovery-codes">Copy</button>
+</div>
+<p><a class="button" href="/admin/account">Done</a></p>
+{% endblock %}

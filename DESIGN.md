@@ -1063,6 +1063,7 @@ backup/restore.
 login) shipped as v0.6.0; alerts, webhooks (Discord, Slack, ntfy, signed JSON) and in-app
 notifications as v0.7.0; dashboard live chart and Usage charts as v0.8.0 (polling every 2 s was kept
 instead of SSE: same freshness, simpler behind proxies).
+Two-factor sign-in (TOTP + recovery codes) and an NVIDIA provider preset as v0.9.0.
 
 ### Phase 3 — Extras
 Prometheus metrics, monthly token quotas, recurring (cron) jobs, OpenTelemetry.
