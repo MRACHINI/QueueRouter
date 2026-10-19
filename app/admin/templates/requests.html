@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Requests{% endblock %}
+{% block content %}
+<h1>Requests</h1>
+<p class="muted small">Latest 300 matching requests — metadata only, never prompts or responses.
+<code>finish_reason = length</code> means the reply was cut off by the token limit.</p>
+
+<form method="get" action="/admin/requests" class="card row wrap">
+  {% for key in ("client", "outcome", "model", "upstream") %}
+  <label class="inline-field">{{ key }}
+    <select name="{{ key }}">
+      <option value="">all</option>
+      {% for v in options[key] %}<option value="{{ v }}" {% if v == filters[key] %}selected{% endif %}>{{ v }}</option>{% endfor %}
+    </select>
+  </label>
+  {% endfor %}
+  <button type="submit" class="secondary">Filter</button>
+  <a href="/admin/requests">reset</a>
+</form>
+
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Upstream</th><th>Outcome</th><th>Queue ms</th><th>Upstream ms</th><th>Tokens</th><th>Finish</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td data-label="Time"><time data-ts="{{ r.ts }}">{{ r.ts | int }}</time></td>
+    <td data-label="Client">{{ r.client }} <span class="badge {{ r.priority }}">{{ r.priority }}</span></td>
+    <td data-label="Model" class="wrap-any">{{ r.model }}{% if r.target_model %} <span class="muted small">→ {{ r.target_model }}</span>{% endif %}</td>
+    <td data-label="Upstream">{{ r.upstream or "—" }}</td>
+    <td data-label="Outcome">{{ r.outcome }} <span class="muted small">{{ r.status }}{% if r.retries %} · {{ r.retries }} retries{% endif %}</span></td>
+    <td data-label="Queue ms">{{ r.queue_ms if r.queue_ms is not none else "—" }}</td>
+    <td data-label="Upstream ms">{{ r.upstream_ms if r.upstream_ms is not none else "—" }}</td>
+    <td data-label="Tokens">{{ (r.prompt_tokens or 0) + (r.completion_tokens or 0) }}</td>
+    <td data-label="Finish">{{ r.finish_reason or "—" }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="9" class="muted">No requests logged yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

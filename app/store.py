@@ -108,7 +108,70 @@ MIGRATIONS: list[str] = [
         created_at REAL NOT NULL
     );
     """,
+    # 4: request log (metadata only, never content) and daily usage rollup
+    """
+    CREATE TABLE requests (
+        id TEXT PRIMARY KEY,
+        ts REAL NOT NULL,
+        client TEXT,
+        priority TEXT,
+        session TEXT,
+        path TEXT,
+        model TEXT,
+        target_model TEXT,
+        upstream TEXT,
+        stream INTEGER NOT NULL DEFAULT 0,
+        status INTEGER,
+        outcome TEXT,
+        position INTEGER,
+        queue_ms INTEGER,
+        upstream_ms INTEGER,
+        total_ms INTEGER,
+        retries INTEGER NOT NULL DEFAULT 0,
+        prompt_tokens INTEGER,
+        completion_tokens INTEGER,
+        finish_reason TEXT,
+        ip TEXT
+    );
+    CREATE INDEX requests_ts ON requests(ts);
+    CREATE INDEX requests_client_ts ON requests(client, ts);
+    CREATE TABLE usage_daily (
+        day TEXT NOT NULL,
+        client TEXT NOT NULL,
+        model TEXT NOT NULL,
+        upstream TEXT NOT NULL,
+        requests INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, client, model, upstream)
+    );
+    """,
 ]
+
+REQUEST_COLUMNS = (
+    "id",
+    "ts",
+    "client",
+    "priority",
+    "session",
+    "path",
+    "model",
+    "target_model",
+    "upstream",
+    "stream",
+    "status",
+    "outcome",
+    "position",
+    "queue_ms",
+    "upstream_ms",
+    "total_ms",
+    "retries",
+    "prompt_tokens",
+    "completion_tokens",
+    "finish_reason",
+    "ip",
+)
 
 
 _UPSERT = "INSERT INTO {table} (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
@@ -513,6 +576,81 @@ class Store:
         with self.tx() as db:
             db.execute("DELETE FROM clients WHERE id = ?", (client_id,))
         self.audit(actor, "client.delete", str(client_id))
+
+    # -- request log and usage -----------------------------------------------------------
+
+    def record_requests(self, rows: list[dict], keep_rows: bool = True) -> None:
+        """Store finished requests (metadata) and add them to the daily usage rollup."""
+        if not rows:
+            return
+        placeholders = ", ".join("?" for _ in REQUEST_COLUMNS)
+        with self.tx() as db:
+            for row in rows:
+                if keep_rows:
+                    db.execute(
+                        f"INSERT OR IGNORE INTO requests ({', '.join(REQUEST_COLUMNS)}) VALUES ({placeholders})",
+                        tuple(int(row[c]) if c == "stream" else row.get(c) for c in REQUEST_COLUMNS),
+                    )
+                day = time.strftime("%Y-%m-%d", time.gmtime(row["ts"]))
+                db.execute(
+                    "INSERT INTO usage_daily (day, client, model, upstream, requests, errors, prompt_tokens, "
+                    "completion_tokens) VALUES (?, ?, ?, ?, 1, ?, ?, ?) "
+                    "ON CONFLICT(day, client, model, upstream) DO UPDATE SET requests = requests + 1, "
+                    "errors = errors + excluded.errors, prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
+                    "completion_tokens = completion_tokens + excluded.completion_tokens",
+                    (
+                        day,
+                        row.get("client") or "-",
+                        row.get("target_model") or row.get("model") or "-",
+                        row.get("upstream") or "-",
+                        0 if row.get("outcome") == "done" else 1,
+                        row.get("prompt_tokens") or 0,
+                        row.get("completion_tokens") or 0,
+                    ),
+                )
+
+    def list_requests(self, limit: int = 200, **filters: str) -> list[sqlite3.Row]:
+        clauses, params = [], []
+        for column in ("client", "outcome", "model", "upstream"):
+            if value := filters.get(column):
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return self.query(f"SELECT * FROM requests {where} ORDER BY ts DESC LIMIT ?", (*params, limit))  # noqa: S608
+
+    def request_filter_values(self) -> dict[str, list[str]]:
+        return {
+            column: [
+                r[0]
+                for r in self.query(
+                    f"SELECT DISTINCT {column} FROM requests WHERE {column} IS NOT NULL ORDER BY {column} LIMIT 200"
+                )
+            ]  # noqa: S608
+            for column in ("client", "outcome", "model", "upstream")
+        }
+
+    def usage(self, days: int = 30, group_by_model: bool = False) -> list[sqlite3.Row]:
+        since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86_400))
+        model = ", model" if group_by_model else ""
+        return self.query(
+            f"SELECT day, client{model}, SUM(requests) AS requests, SUM(errors) AS errors, "  # noqa: S608
+            f"SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens "
+            f"FROM usage_daily WHERE day >= ? GROUP BY day, client{model} ORDER BY day DESC, client{model}",
+            (since,),
+        )
+
+    def recent_activity(self, since: float) -> list[sqlite3.Row]:
+        """Dispatched requests since ``since``: to restore rate-limit windows after a restart."""
+        return self.query(
+            "SELECT client, ts, queue_ms, prompt_tokens, completion_tokens FROM requests "
+            "WHERE ts >= ? AND queue_ms IS NOT NULL",
+            (since,),
+        )
+
+    def prune_requests(self, keep_days: int) -> int:
+        with self.tx() as db:
+            cur = db.execute("DELETE FROM requests WHERE ts < ?", (time.time() - keep_days * 86_400,))
+        return cur.rowcount
 
     # -- aliases -------------------------------------------------------------------------
 

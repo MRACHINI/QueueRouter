@@ -68,7 +68,8 @@ def make_stack(tmp_path_factory):
             retry_max_delay_s=0.2,
         )
         settings = dataclasses.replace(settings, **overrides)
-        boot = Bootstrap(data_dir=str(tmp_path_factory.mktemp("data")), log_level="WARNING", **(bootstrap or {}))
+        options = {"data_dir": str(tmp_path_factory.mktemp("data")), "log_level": "WARNING", **(bootstrap or {})}
+        boot = Bootstrap(**options)
         app = create_app(boot, seed=settings)
         proxy_server = ServerThread(app)
         proxy_url = proxy_server.__enter__()

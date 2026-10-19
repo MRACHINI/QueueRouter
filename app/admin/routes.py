@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import csv
+import io
 import json
 import logging
 import os
@@ -69,6 +72,11 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
     "upstream_connect_timeout_s": ("Upstream", "Connect timeout (s)", ""),
     "upstream_read_timeout_s": ("Upstream", "Read timeout (s)", "Max silence between upstream bytes."),
     "models_cache_s": ("Upstream", "Models cache (s)", "How long /v1/models is cached."),
+    "request_log_days": (
+        "Usage",
+        "Keep request log (days)",
+        "Per-request metadata rows; 0 = keep none. Daily totals are kept forever.",
+    ),
     "lb_strategy": (
         "Upstreams",
         "Load balancing",
@@ -661,6 +669,53 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         store.audit(session.user.username, "upstream.test", target.name, {"ok": ok})
         return upstreams_page(request, session, test={"name": target.name, "ok": ok, "message": message})
 
+    # -- requests log and usage ----------------------------------------------------------
+
+    @app.get("/admin/requests")
+    async def requests_log(request: Request):
+        session = require(request, "viewer")
+        filters = {k: request.query_params.get(k, "") for k in ("client", "outcome", "model", "upstream")}
+        rows = await asyncio.to_thread(store.list_requests, 300, **filters)
+        options = await asyncio.to_thread(store.request_filter_values)
+        return page(request, "requests.html", session, rows=rows, filters=filters, options=options)
+
+    @app.get("/admin/usage")
+    async def usage(request: Request):
+        session = require(request, "viewer")
+        days = _clamp_int(request.query_params.get("days"), 30, 1, 366)
+        by_model = request.query_params.get("by") == "model"
+        rows = await asyncio.to_thread(store.usage, days, by_model)
+        totals = {
+            key: sum(r[key] or 0 for r in rows) for key in ("requests", "errors", "prompt_tokens", "completion_tokens")
+        }
+        return page(request, "usage.html", session, rows=rows, days=days, by_model=by_model, totals=totals)
+
+    @app.get("/admin/usage.csv")
+    async def usage_csv(request: Request):
+        require(request, "viewer")
+        days = _clamp_int(request.query_params.get("days"), 30, 1, 366)
+        by_model = request.query_params.get("by") == "model"
+        rows = await asyncio.to_thread(store.usage, days, by_model)
+        out = io.StringIO()
+        writer = csv.writer(out)
+        columns = [
+            "day",
+            "client",
+            *(["model"] if by_model else []),
+            "requests",
+            "errors",
+            "prompt_tokens",
+            "completion_tokens",
+        ]
+        writer.writerow(columns)
+        for r in rows:
+            writer.writerow([r[c] for c in columns])
+        return Response(
+            out.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="queuerouter-usage-{days}d.csv"'},
+        )
+
     # -- models and aliases --------------------------------------------------------------
 
     @app.get("/admin/models")
@@ -742,6 +797,13 @@ def _parse_date(value: str) -> float | None:
         return None
     day = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
     return (day + timedelta(days=1)).timestamp()
+
+
+def _clamp_int(raw: str | None, default: int, low: int, high: int) -> int:
+    try:
+        return min(high, max(low, int(raw or default)))
+    except ValueError:
+        return default
 
 
 def _opt(form: dict, name: str, kind: type, minimum: float):
