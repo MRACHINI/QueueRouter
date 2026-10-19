@@ -161,6 +161,10 @@ MIGRATIONS: list[str] = [
         updated_at REAL NOT NULL
     );
     """,
+    # 6: per-alias parameter rules (JSON, see app/params.py)
+    """
+    ALTER TABLE aliases ADD COLUMN params TEXT NOT NULL DEFAULT '';
+    """,
 ]
 
 REQUEST_COLUMNS = (
@@ -249,6 +253,7 @@ class Alias:
     upstream_ids: tuple[int, ...]  # empty = any upstream
     enabled: bool
     notes: str
+    params: str = ""  # parameter rules JSON (app/params.py)
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -773,17 +778,25 @@ class Store:
                 tuple(json.loads(r["upstream_ids"])),
                 bool(r["enabled"]),
                 r["notes"],
+                r["params"],
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
 
     def create_alias(
-        self, name: str, target_model: str, upstream_ids: tuple[int, ...], actor: str, notes: str = ""
+        self,
+        name: str,
+        target_model: str,
+        upstream_ids: tuple[int, ...],
+        actor: str,
+        notes: str = "",
+        params: str = "",
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
-                "INSERT INTO aliases (name, target_model, upstream_ids, notes, created_at) VALUES (?, ?, ?, ?, ?)",
-                (name, target_model, json.dumps(list(upstream_ids)), notes, time.time()),
+                "INSERT INTO aliases (name, target_model, upstream_ids, notes, params, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (name, target_model, json.dumps(list(upstream_ids)), notes, params, time.time()),
             )
         self.audit(actor, "alias.create", name, {"target_model": target_model, "upstreams": list(upstream_ids)})
         return cur.lastrowid
@@ -791,7 +804,7 @@ class Store:
     def update_alias(self, alias_id: int, actor: str, **fields: object) -> None:
         if "upstream_ids" in fields:
             fields["upstream_ids"] = json.dumps(list(fields["upstream_ids"]))
-        self._update("aliases", alias_id, {"target_model", "upstream_ids", "enabled", "notes"}, fields)
+        self._update("aliases", alias_id, {"target_model", "upstream_ids", "enabled", "notes", "params"}, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)
 
     def delete_alias(self, alias_id: int, actor: str) -> None:
