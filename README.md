@@ -55,7 +55,8 @@ from a **web admin UI**.
 - **Admin UI**: dashboard, clients (keys shown once, stored hashed), upstreams, models, usage,
   requests, settings, users with roles (owner / admin / operator / viewer), audit log. Dark mode
   and phone-friendly. Changes apply instantly.
-- **Secure by default**: upstream keys encrypted at rest, hashed client keys, argon2 passwords,
+- **Secure by default**: two-factor sign-in (authenticator apps, recovery codes), upstream keys
+  encrypted at rest, hashed client keys, argon2 passwords,
   CSRF protection, login throttling, strict CSP, optional admin IP allow-list.
 
 ## How it works

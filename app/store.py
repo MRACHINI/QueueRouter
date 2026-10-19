@@ -207,6 +207,12 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX notifications_ts ON notifications (ts);
     """,
+    # 10: two-factor login (TOTP secret encrypted, recovery codes hashed)
+    """
+    ALTER TABLE admin_users ADD COLUMN totp_secret TEXT;
+    ALTER TABLE admin_users ADD COLUMN totp_last INTEGER NOT NULL DEFAULT -1;
+    ALTER TABLE admin_users ADD COLUMN recovery_codes TEXT NOT NULL DEFAULT '[]';
+    """,
 ]
 
 REQUEST_COLUMNS = (
@@ -326,6 +332,7 @@ class AdminUser:
     can_view_content: bool
     enabled: bool
     created_at: float
+    has_2fa: bool = False
 
     def can(self, role: str) -> bool:
         """Whether this user has at least ``role``."""
@@ -334,7 +341,13 @@ class AdminUser:
 
 def _admin(row: sqlite3.Row) -> AdminUser:
     return AdminUser(
-        row["id"], row["username"], row["role"], bool(row["can_view_content"]), bool(row["enabled"]), row["created_at"]
+        row["id"],
+        row["username"],
+        row["role"],
+        bool(row["can_view_content"]),
+        bool(row["enabled"]),
+        row["created_at"],
+        row["totp_secret"] is not None,
     )
 
 
@@ -1051,6 +1064,36 @@ class Store:
         if "password_hash" in fields:
             logged["password"] = "changed"
         self.audit(actor, "user.update", str(user_id), logged)
+
+    def totp_state(self, user_id: int) -> tuple[str | None, int, list[str]]:
+        """(secret or None, last used time step, recovery code hashes)."""
+        row = self.query("SELECT totp_secret, totp_last, recovery_codes FROM admin_users WHERE id = ?", (user_id,))[0]
+        secret = self.decrypt(row["totp_secret"]) if row["totp_secret"] else None
+        return secret, row["totp_last"], json.loads(row["recovery_codes"] or "[]")
+
+    def set_totp(self, user_id: int, secret: str | None, recovery_hashes: list[str], actor: str) -> None:
+        """Turn two-factor login on (secret) or off (None)."""
+        with self.tx() as db:
+            db.execute(
+                "UPDATE admin_users SET totp_secret = ?, totp_last = -1, recovery_codes = ? WHERE id = ?",
+                (self.encrypt(secret) if secret else None, json.dumps(recovery_hashes), user_id),
+            )
+        self.audit(actor, "user.2fa", str(user_id), {"enabled": secret is not None})
+
+    def totp_used(self, user_id: int, counter: int) -> None:
+        with self.tx() as db:
+            db.execute("UPDATE admin_users SET totp_last = MAX(totp_last, ?) WHERE id = ?", (counter, user_id))
+
+    def use_recovery_code(self, user_id: int, code_hash: str) -> bool:
+        """Consume a recovery code; False if it isn't (or no longer) valid."""
+        with self.tx() as db:
+            row = db.execute("SELECT recovery_codes FROM admin_users WHERE id = ?", (user_id,)).fetchone()
+            codes = json.loads(row["recovery_codes"] or "[]") if row else []
+            if code_hash not in codes:
+                return False
+            codes.remove(code_hash)
+            db.execute("UPDATE admin_users SET recovery_codes = ? WHERE id = ?", (json.dumps(codes), user_id))
+        return True
 
     def delete_admin(self, user_id: int, actor: str) -> None:
         with self.tx() as db:

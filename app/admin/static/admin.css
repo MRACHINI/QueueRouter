@@ -238,3 +238,4 @@ tr.unread td { background: color-mix(in srgb, var(--danger) 6%, transparent); }
 .chart .line.s3 { stroke: var(--danger); }
 .legend { font-weight: 400; font-size: 0.85em; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
 .legend::before { content: ""; width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.qr svg { display: block; width: 220px; height: 220px; margin: 8px 0; border-radius: 6px; }
