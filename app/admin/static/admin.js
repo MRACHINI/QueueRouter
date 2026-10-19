@@ -78,6 +78,8 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!option.dataset.concurrency) return;
       form.querySelector('[name="max_concurrency"]').value = option.dataset.concurrency;
       form.querySelector('[name="context_cap"]').value = option.dataset.context;
+      const price = form.querySelector('[name="monthly_price"]');
+      if (price) price.value = option.dataset.price;
     });
   });
   document.querySelectorAll("[data-pool-select]").forEach((select) => {

@@ -10,6 +10,7 @@ class Plan:
     name: str
     max_concurrency: int
     context_cap: int | None
+    monthly_price: float = 0.0  # USD
 
 
 @dataclass(frozen=True)
@@ -25,11 +26,11 @@ class Preset:
 
 # ArliAI plans from arliai.com/pricing (October 2026).
 ARLIAI_PLANS = (
-    Plan("Free", 1, 12_288),
-    Plan("Core", 1, 32_768),
-    Plan("Plus", 1, 131_072),
-    Plan("Pro", 2, 262_144),
-    Plan("Max", 6, 524_288),
+    Plan("Free", 1, 12_288, 0),
+    Plan("Core", 1, 32_768, 15),
+    Plan("Plus", 1, 131_072, 20),
+    Plan("Pro", 2, 262_144, 30),
+    Plan("Max", 6, 524_288, 160),
 )
 
 PRESETS: dict[str, Preset] = {

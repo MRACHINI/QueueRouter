@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -25,6 +26,7 @@ from .. import __version__
 from ..auth import AuthGuard, client_ip
 from ..config import ON_LIMIT, PRIORITIES, TUNABLES, Bootstrap, ClientPolicy
 from ..presets import ARLIAI_PLANS, PRESETS, plan_for
+from ..pricing import PriceCatalog, resolve, summarize_usage
 from ..slots import STRATEGIES
 from ..state import MODES
 from ..store import ROLES, Store
@@ -54,6 +56,7 @@ MESSAGES = {
     "exists": "That name is already taken.",
     "invalid": "Some values were invalid; nothing was changed.",
     "pool_in_use": "That pool is still used by upstreams; move or delete them first.",
+    "refresh_failed": "Couldn't download prices from models.dev right now; the previous list is kept.",
 }
 
 SETTING_CHOICES: dict[str, tuple[str, ...]] = {"lb_strategy": STRATEGIES}
@@ -104,6 +107,8 @@ class AdminContext:
     probe: Callable[[str, str], Awaitable[tuple[bool, str]]]
     upstream_info: Callable[[], list[dict]]
     models_by_upstream: Callable[[], dict[str, list[str]]]
+    prices: PriceCatalog
+    refresh_prices: Callable[[], Awaitable[bool]]
 
 
 class NeedLogin(Exception):
@@ -160,8 +165,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         )
 
     def back(path: str, message: str | None = None, error: str | None = None) -> RedirectResponse:
+        path, _, fragment = path.partition("#")
         query = f"?m={message}" if message else f"?e={error}" if error else ""
-        return RedirectResponse(path + query, status_code=303)
+        return RedirectResponse(path + query + (f"#{fragment}" if fragment else ""), status_code=303)
 
     def require(request: Request, role: str) -> AdminSession:
         session = sessions.current(request)
@@ -552,11 +558,15 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             concurrency = plan.max_concurrency
         if plan and context_cap is None:
             context_cap = plan.context_cap
+        monthly_price = _opt(form, "monthly_price", float, 0)
+        if plan and monthly_price is None:
+            monthly_price = plan.monthly_price
         return {
             "plan": f"ArliAI {plan.name}" if plan else (str(form.get("plan_label", "")).strip() or None),
             "max_concurrency": concurrency,
             "context_cap": context_cap,
             "min_spacing_ms": int_field(form, "min_spacing_ms", 0, 600_000, 0),
+            "monthly_price": monthly_price,
         }
 
     @app.get("/admin/upstreams")
@@ -686,23 +696,35 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         options = await asyncio.to_thread(store.request_filter_values)
         return page(request, "requests.html", session, rows=rows, filters=filters, options=options)
 
+    async def usage_summary(request: Request):
+        days = _clamp_int(request.query_params.get("days"), 30, 1, 366)
+        by_model = request.query_params.get("by") == "model"
+        rows = await asyncio.to_thread(store.usage, days)
+        overrides = await asyncio.to_thread(store.list_model_prices)
+        plan_per_month = sum(p.monthly_price or 0 for p in store.list_pools())
+        rows, totals, _ = summarize_usage(rows, overrides, ctx.prices, by_model, plan_per_month, days)
+        return days, by_model, rows, totals, plan_per_month
+
     @app.get("/admin/usage")
     async def usage(request: Request):
         session = require(request, "viewer")
-        days = _clamp_int(request.query_params.get("days"), 30, 1, 366)
-        by_model = request.query_params.get("by") == "model"
-        rows = await asyncio.to_thread(store.usage, days, by_model)
-        totals = {
-            key: sum(r[key] or 0 for r in rows) for key in ("requests", "errors", "prompt_tokens", "completion_tokens")
-        }
-        return page(request, "usage.html", session, rows=rows, days=days, by_model=by_model, totals=totals)
+        days, by_model, rows, totals, plan_per_month = await usage_summary(request)
+        return page(
+            request,
+            "usage.html",
+            session,
+            rows=rows,
+            days=days,
+            by_model=by_model,
+            totals=totals,
+            plan_per_month=plan_per_month,
+            catalog_loaded=bool(ctx.prices.prices),
+        )
 
     @app.get("/admin/usage.csv")
     async def usage_csv(request: Request):
         require(request, "viewer")
-        days = _clamp_int(request.query_params.get("days"), 30, 1, 366)
-        by_model = request.query_params.get("by") == "model"
-        rows = await asyncio.to_thread(store.usage, days, by_model)
+        days, by_model, rows, _, _ = await usage_summary(request)
         out = io.StringIO()
         writer = csv.writer(out)
         columns = [
@@ -713,10 +735,13 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "errors",
             "prompt_tokens",
             "completion_tokens",
+            "cached_tokens",
+            "cost_usd",
         ]
         writer.writerow(columns)
         for r in rows:
-            writer.writerow([r[c] for c in columns])
+            values = {**r, "cost_usd": f"{r['cost']:.4f}" if r["priced"] else ""}
+            writer.writerow([values[c] for c in columns])
         return Response(
             out.getvalue(),
             media_type="text/csv",
@@ -729,6 +754,13 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def models_page(request: Request):
         session = require(request, "admin")
         upstream_names = {u.id: u.name for u in store.list_upstreams()}
+        models = ctx.models_by_upstream()
+        overrides = store.list_model_prices()
+        priced_models = sorted({m for ids in models.values() for m in ids} | set(store.used_models()) | set(overrides))
+        pricing = [
+            {"model": m, "price": resolve(m, overrides, ctx.prices), "override": overrides.get(m)}
+            for m in priced_models
+        ]
         return page(
             request,
             "models.html",
@@ -736,8 +768,41 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             aliases=store.list_aliases(),
             upstreams=store.list_upstreams(),
             upstream_names=upstream_names,
-            models=ctx.models_by_upstream(),
+            models=models,
+            pricing=pricing,
+            references=ctx.prices.references(),
+            catalog_size=len(ctx.prices.prices),
+            catalog_age_h=round((time.time() - ctx.prices.fetched_at) / 3600, 1) if ctx.prices.fetched_at else None,
         )
+
+    @app.post("/admin/prices")
+    async def prices_update(request: Request):
+        session, form = await require_post(request, "admin")
+        model = str(form.get("model", "")).strip()
+        try:
+            if not model or len(model) > 200:
+                raise ValueError("model")
+            reference = str(form.get("reference", "")).strip() or None
+            if reference and reference not in ctx.prices.prices:
+                raise ValueError("reference")
+            store.set_model_price(
+                model,
+                session.user.username,
+                reference,
+                _opt(form, "input", float, 0),
+                _opt(form, "output", float, 0),
+                _opt(form, "cached_input", float, 0),
+            )
+        except ValueError:
+            return back("/admin/models#pricing", error="invalid")
+        return back("/admin/models#pricing", "saved")
+
+    @app.post("/admin/prices/refresh")
+    async def prices_refresh(request: Request):
+        session, _ = await require_post(request, "admin")
+        ok = await ctx.refresh_prices()
+        store.audit(session.user.username, "prices.refresh", "models.dev", {"ok": ok})
+        return back("/admin/models#pricing", "saved" if ok else None, None if ok else "refresh_failed")
 
     def alias_fields(form: dict) -> dict:
         target = str(form.get("target_model", "")).strip()

@@ -63,6 +63,52 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
   <div class="align-end"><button type="submit">Add alias</button></div>
 </form>
 
+<h2 id="pricing">Reference prices</h2>
+<p class="muted small">What your tokens would cost at official API prices (USD per million tokens), used for the
+cost and savings figures on the Usage page. Prices come from <a href="https://models.dev" rel="noopener">models.dev</a>:
+the model creator's own price when they sell it, otherwise the median across providers. Override per model with
+another models.dev reference or your own prices.
+{% if catalog_size %}Catalog: {{ "{:,}".format(catalog_size) }} priced models, updated {{ catalog_age_h }} h ago.
+{% else %}<strong>The price catalog hasn't been downloaded yet.</strong>{% endif %}</p>
+<form method="post" action="/admin/prices/refresh" class="row">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" class="secondary">Refresh prices now</button>
+</form>
+<datalist id="price-refs">{% for r in references %}<option value="{{ r }}">{% endfor %}</datalist>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Model</th><th>Input</th><th>Cached input</th><th>Output</th><th>Source</th><th>Override</th></tr></thead>
+  <tbody>
+  {% for p in pricing %}
+  {% set o = p.override %}
+  <tr>
+    <td data-label="Model" class="mono small wrap-any">{{ p.model }}</td>
+    <td data-label="Input">{{ "$%.3f" | format(p.price.input) if p.price else "—" }}</td>
+    <td data-label="Cached input">{{ "$%.4f" | format(p.price.cached_input) if p.price else "—" }}</td>
+    <td data-label="Output">{{ "$%.3f" | format(p.price.output) if p.price else "—" }}</td>
+    <td data-label="Source" class="small">{{ p.price.source if p.price else "no match — set one" }}
+      {% if p.price and p.price.reference %}<div class="muted mono">{{ p.price.reference }}</div>{% endif %}</td>
+    <td data-label="">
+      <form method="post" action="/admin/prices" class="row wrap">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="model" value="{{ p.model }}">
+        <input name="reference" list="price-refs" value="{{ o.reference if o and o.reference else '' }}" placeholder="models.dev reference" aria-label="Reference" class="grow">
+        <input type="number" step="any" min="0" name="input" value="{{ o.input if o and o.input is not none else '' }}" placeholder="in $" aria-label="Input price" class="price">
+        <input type="number" step="any" min="0" name="cached_input" value="{{ o.cached_input if o and o.cached_input is not none else '' }}" placeholder="cached $" aria-label="Cached input price" class="price">
+        <input type="number" step="any" min="0" name="output" value="{{ o.output if o and o.output is not none else '' }}" placeholder="out $" aria-label="Output price" class="price">
+        <button type="submit" class="secondary">Save</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">No models seen yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="small muted">Empty override = automatic. Manual prices win over a reference; clear all fields to go back
+to automatic. Prices apply to past usage too.</p>
+
 <h2>Models per upstream</h2>
 {% for name, ids in models.items() %}
 <details class="card">

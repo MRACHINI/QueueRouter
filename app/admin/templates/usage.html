@@ -1,4 +1,7 @@
 {% extends "base.html" %}
+{% macro usd(v) -%}
+{%- if v >= 100 -%}${{ "{:,.0f}".format(v) }}{%- elif v >= 1 -%}${{ "%.2f" | format(v) }}{%- else -%}${{ "%.4f" | format(v) }}{%- endif -%}
+{%- endmacro %}
 {% block title %}Usage{% endblock %}
 {% block content %}
 <div class="row between wrap">
@@ -17,16 +20,43 @@
 </div>
 
 <section class="tiles">
-  <div class="tile"><div class="tile-label">Requests</div><div class="tile-value">{{ "{:,}".format(totals.requests) }}</div></div>
-  <div class="tile"><div class="tile-label">Errors</div><div class="tile-value">{{ "{:,}".format(totals.errors) }}</div></div>
-  <div class="tile"><div class="tile-label">Tokens in</div><div class="tile-value">{{ "{:,}".format(totals.prompt_tokens) }}</div></div>
-  <div class="tile"><div class="tile-label">Tokens out</div><div class="tile-value">{{ "{:,}".format(totals.completion_tokens) }}</div></div>
+  <div class="tile"><div class="tile-label">Requests</div><div class="tile-value">{{ "{:,}".format(totals.requests) }}</div>
+    <div class="small muted">errors {{ "{:,}".format(totals.errors) }}</div></div>
+  <div class="tile"><div class="tile-label">Tokens in</div><div class="tile-value">{{ "{:,}".format(totals.prompt_tokens) }}</div>
+    <div class="small muted">≈ {{ usd(totals.cost_in) }}{% if totals.cached_tokens %} · {{ "{:,}".format(totals.cached_tokens) }} cached{% endif %}</div></div>
+  <div class="tile"><div class="tile-label">Tokens out</div><div class="tile-value">{{ "{:,}".format(totals.completion_tokens) }}</div>
+    <div class="small muted">≈ {{ usd(totals.cost_out) }}</div></div>
+  <div class="tile"><div class="tile-label">At official prices</div><div class="tile-value">{{ usd(totals.cost) }}</div>
+    <div class="small muted">what this would have cost</div></div>
+  <div class="tile">
+    {% if plan_per_month %}
+    {% if totals.savings >= 0 %}
+    <div class="tile-label">Saved</div>
+    <div class="tile-value good">{{ usd(totals.savings) }}</div>
+    {% else %}
+    <div class="tile-label">Plan costs more by</div>
+    <div class="tile-value">{{ usd(-totals.savings) }}</div>
+    {% endif %}
+    <div class="small muted">plan: {{ usd(totals.plan_cost) }} for {{ days }} day{{ "s" if days > 1 }}</div>
+    {% else %}
+    <div class="tile-label">Saved</div>
+    <div class="tile-value">—</div>
+    <div class="small muted">set the plan price on <a href="/admin/upstreams">Upstreams</a></div>
+    {% endif %}
+  </div>
 </section>
+{% if not catalog_loaded %}
+<p class="notice err small">Prices haven't been downloaded yet, so costs show $0. Check <a href="/admin/models#pricing">Models → Reference prices</a>.</p>
+{% elif totals.unpriced_tokens %}
+<p class="small muted">{{ "{:,}".format(totals.unpriced_tokens) }} tokens are from models without a price and aren't
+included — <a href="/admin/models#pricing">set a price</a>.</p>
+{% endif %}
+<p class="small muted">Estimates at the official per-token API prices (models.dev), not what you pay ArliAI.</p>
 
 <h2>Per day (UTC)</h2>
 <div class="table-wrap">
 <table class="cards">
-  <thead><tr><th>Day</th><th>Client</th>{% if by_model %}<th>Model</th>{% endif %}<th>Requests</th><th>Errors</th><th>Tokens in</th><th>Tokens out</th></tr></thead>
+  <thead><tr><th>Day</th><th>Client</th>{% if by_model %}<th>Model</th>{% endif %}<th>Requests</th><th>Errors</th><th>Tokens in</th><th>Tokens out</th><th>Cost</th></tr></thead>
   <tbody>
   {% for r in rows %}
   <tr>
@@ -37,9 +67,10 @@
     <td data-label="Errors">{{ "{:,}".format(r.errors) }}</td>
     <td data-label="Tokens in">{{ "{:,}".format(r.prompt_tokens) }}</td>
     <td data-label="Tokens out">{{ "{:,}".format(r.completion_tokens) }}</td>
+    <td data-label="Cost">{{ usd(r.cost) }}{% if not r.priced %}<span class="muted" title="some tokens have no price">*</span>{% endif %}</td>
   </tr>
   {% else %}
-  <tr><td colspan="7" class="muted">No usage recorded in this period.</td></tr>
+  <tr><td colspan="8" class="muted">No usage recorded in this period.</td></tr>
   {% endfor %}
   </tbody>
 </table>

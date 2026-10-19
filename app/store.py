@@ -147,6 +147,20 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (day, client, model, upstream)
     );
     """,
+    # 5: cost tracking - cached prompt tokens, plan prices, per-model price overrides
+    """
+    ALTER TABLE requests ADD COLUMN cached_tokens INTEGER;
+    ALTER TABLE usage_daily ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE limit_pools ADD COLUMN monthly_price REAL;
+    CREATE TABLE model_prices (
+        model TEXT PRIMARY KEY,
+        reference TEXT,
+        input REAL,
+        output REAL,
+        cached_input REAL,
+        updated_at REAL NOT NULL
+    );
+    """,
 ]
 
 REQUEST_COLUMNS = (
@@ -169,6 +183,7 @@ REQUEST_COLUMNS = (
     "retries",
     "prompt_tokens",
     "completion_tokens",
+    "cached_tokens",
     "finish_reason",
     "ip",
 )
@@ -193,6 +208,7 @@ class Pool:
     max_concurrency: int
     context_cap: int | None
     min_spacing_ms: int
+    monthly_price: float | None = None  # plan fee, for "savings vs official prices"
 
 
 @dataclass(frozen=True)
@@ -481,7 +497,15 @@ class Store:
 
     def list_pools(self) -> list[Pool]:
         return [
-            Pool(r["id"], r["name"], r["plan"], r["max_concurrency"], r["context_cap"], r["min_spacing_ms"])
+            Pool(
+                r["id"],
+                r["name"],
+                r["plan"],
+                r["max_concurrency"],
+                r["context_cap"],
+                r["min_spacing_ms"],
+                r["monthly_price"],
+            )
             for r in self.query("SELECT * FROM limit_pools ORDER BY id")
         ]
 
@@ -514,18 +538,19 @@ class Store:
         plan: str | None = None,
         context_cap: int | None = None,
         min_spacing_ms: int = 0,
+        monthly_price: float | None = None,
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
-                "INSERT INTO limit_pools (name, plan, max_concurrency, context_cap, min_spacing_ms, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (name, plan, max_concurrency, context_cap, min_spacing_ms, time.time()),
+                "INSERT INTO limit_pools (name, plan, max_concurrency, context_cap, min_spacing_ms, monthly_price, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (name, plan, max_concurrency, context_cap, min_spacing_ms, monthly_price, time.time()),
             )
         self.audit(actor, "pool.create", name, {"max_concurrency": max_concurrency, "plan": plan})
         return cur.lastrowid
 
     def update_pool(self, pool_id: int, actor: str, **fields: object) -> None:
-        allowed = {"name", "plan", "max_concurrency", "context_cap", "min_spacing_ms"}
+        allowed = {"name", "plan", "max_concurrency", "context_cap", "min_spacing_ms", "monthly_price"}
         self._update("limit_pools", pool_id, allowed, fields)
         self.audit(actor, "pool.update", str(pool_id), fields)
 
@@ -641,10 +666,11 @@ class Store:
                 day = time.strftime("%Y-%m-%d", time.gmtime(row["ts"]))
                 db.execute(
                     "INSERT INTO usage_daily (day, client, model, upstream, requests, errors, prompt_tokens, "
-                    "completion_tokens) VALUES (?, ?, ?, ?, 1, ?, ?, ?) "
+                    "completion_tokens, cached_tokens) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?) "
                     "ON CONFLICT(day, client, model, upstream) DO UPDATE SET requests = requests + 1, "
                     "errors = errors + excluded.errors, prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
-                    "completion_tokens = completion_tokens + excluded.completion_tokens",
+                    "completion_tokens = completion_tokens + excluded.completion_tokens, "
+                    "cached_tokens = cached_tokens + excluded.cached_tokens",
                     (
                         day,
                         row.get("client") or "-",
@@ -653,6 +679,7 @@ class Store:
                         0 if row.get("outcome") == "done" else 1,
                         row.get("prompt_tokens") or 0,
                         row.get("completion_tokens") or 0,
+                        row.get("cached_tokens") or 0,
                     ),
                 )
 
@@ -676,14 +703,50 @@ class Store:
             for column in ("client", "outcome", "model", "upstream")
         }
 
-    def usage(self, days: int = 30, group_by_model: bool = False) -> list[sqlite3.Row]:
+    def usage(self, days: int = 30) -> list[sqlite3.Row]:
+        """Usage per day, client and model (cost is computed per model, then grouped)."""
         since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86_400))
-        model = ", model" if group_by_model else ""
         return self.query(
-            f"SELECT day, client{model}, SUM(requests) AS requests, SUM(errors) AS errors, "  # noqa: S608
-            f"SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens "
-            f"FROM usage_daily WHERE day >= ? GROUP BY day, client{model} ORDER BY day DESC, client{model}",
+            "SELECT day, client, model, SUM(requests) AS requests, SUM(errors) AS errors, "
+            "SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, "
+            "SUM(cached_tokens) AS cached_tokens FROM usage_daily WHERE day >= ? "
+            "GROUP BY day, client, model ORDER BY day DESC, client, model",
             (since,),
+        )
+
+    def used_models(self) -> list[str]:
+        return [r[0] for r in self.query("SELECT DISTINCT model FROM usage_daily WHERE model != '-' ORDER BY model")]
+
+    # -- model prices (manual overrides) ----------------------------------------------------
+
+    def list_model_prices(self) -> dict[str, sqlite3.Row]:
+        return {r["model"]: r for r in self.query("SELECT * FROM model_prices")}
+
+    def set_model_price(
+        self,
+        model: str,
+        actor: str,
+        reference: str | None,
+        input_price: float | None,
+        output_price: float | None,
+        cached_price: float | None,
+    ) -> None:
+        with self.tx() as db:
+            if reference is None and input_price is None and output_price is None and cached_price is None:
+                db.execute("DELETE FROM model_prices WHERE model = ?", (model,))
+            else:
+                db.execute(
+                    "INSERT INTO model_prices (model, reference, input, output, cached_input, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(model) DO UPDATE SET reference = excluded.reference, "
+                    "input = excluded.input, output = excluded.output, cached_input = excluded.cached_input, "
+                    "updated_at = excluded.updated_at",
+                    (model, reference, input_price, output_price, cached_price, time.time()),
+                )
+        self.audit(
+            actor,
+            "price.update",
+            model,
+            {"reference": reference, "input": input_price, "output": output_price, "cached": cached_price},
         )
 
     def recent_activity(self, since: float) -> list[sqlite3.Row]:

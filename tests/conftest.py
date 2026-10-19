@@ -67,7 +67,7 @@ def make_stack(tmp_path_factory):
             retry_base_delay_s=0.05,
             retry_max_delay_s=0.2,
         )
-        settings = dataclasses.replace(settings, **overrides)
+        settings = dataclasses.replace(settings, **{"price_catalog_enabled": False, **overrides})  # offline
         options = {"data_dir": str(tmp_path_factory.mktemp("data")), "log_level": "WARNING", **(bootstrap or {})}
         boot = Bootstrap(**options)
         app = create_app(boot, seed=settings)

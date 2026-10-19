@@ -68,7 +68,11 @@ def create_mock(limit: int = 2) -> FastAPI:
                 "choices": [
                     {"index": 0, "message": {"role": "assistant", "content": f"hi {tag}"}, "finish_reason": "stop"}
                 ],
-                "usage": {"prompt_tokens": 10, "completion_tokens": chunks},
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": chunks,
+                    "prompt_tokens_details": {"cached_tokens": body.get("mock_cached", 0)},
+                },
             }
 
         async def gen():
@@ -92,7 +96,11 @@ def create_mock(limit: int = 2) -> FastAPI:
                     "id": "x",
                     "object": "chat.completion.chunk",
                     "choices": [],
-                    "usage": {"prompt_tokens": 10, "completion_tokens": chunks},
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": chunks,
+                        "prompt_tokens_details": {"cached_tokens": body.get("mock_cached", 0)},
+                    },
                 }
                 yield f"data: {json.dumps(usage)}\n\n"
                 yield "data: [DONE]\n\n"
