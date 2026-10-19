@@ -163,3 +163,70 @@ async def test_admin_ip_allow_list(make_stack):
         assert (await c.get("/admin/login")).status_code == 404
         r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "m", "messages": []})
         assert r.status_code == 200  # the API itself is unaffected
+
+
+def key_of(html: str) -> str:
+    match = re.search(r'<code id="new-key">([^<]+)</code>', html)
+    assert match, "no key on page"
+    return match.group(1)
+
+
+async def test_client_lifecycle_applies_live(admin_stack):
+    """Keys created, changed and revoked in the UI work on the API immediately."""
+    api = f"{admin_stack.url}/v1/chat/completions"
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    async with httpx.AsyncClient(base_url=admin_stack.url) as c:
+        await login(c, admin_stack.url)
+        csrf = csrf_of((await c.get("/admin/clients")).text)
+
+        bad = await c.post("/admin/clients", data={"csrf": csrf, "name": "no spaces!", "priority": "high"})
+        assert "e=invalid" in bad.headers["location"]
+
+        created = await c.post(
+            "/admin/clients",
+            data={"csrf": csrf, "name": "n8n", "priority": "low", "notes": "workflows", "expires": ""},
+        )
+        key = key_of(created.text)
+        assert "opencode.json" in created.text and key.startswith("qr-")
+        r = await c.post(api, json=body, headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 200
+
+        dup = await c.post("/admin/clients", data={"csrf": csrf, "name": "n8n", "priority": "low"})
+        assert "e=exists" in dup.headers["location"]
+
+        listing = await c.get("/admin/clients")
+        assert "<strong>n8n</strong>" in listing.text and key not in listing.text and key[:6] in listing.text
+        client = next(x for x in admin_stack.app.state.store.list_clients() if x.name == "n8n")
+
+        await c.post(f"/admin/clients/{client.id}", data={"csrf": csrf, "priority": "high", "notes": ""})
+        r = await c.post(api, json=body, headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 401  # "enabled" unchecked -> disabled
+
+        await c.post(f"/admin/clients/{client.id}", data={"csrf": csrf, "priority": "high", "enabled": "on"})
+        regenerated = await c.post(f"/admin/clients/{client.id}/regenerate", data={"csrf": csrf})
+        new_key = key_of(regenerated.text)
+        assert (await c.post(api, json=body, headers={"Authorization": f"Bearer {key}"})).status_code == 401
+        assert (await c.post(api, json=body, headers={"Authorization": f"Bearer {new_key}"})).status_code == 200
+
+        expired = await c.post(
+            f"/admin/clients/{client.id}",
+            data={"csrf": csrf, "priority": "high", "enabled": "on", "expires": "2020-01-01"},
+        )
+        assert "m=saved" in expired.headers["location"]
+        assert (await c.post(api, json=body, headers={"Authorization": f"Bearer {new_key}"})).status_code == 401
+        assert "2020-01-01" in (await c.get("/admin/clients")).text
+
+        await c.post(f"/admin/clients/{client.id}/delete", data={"csrf": csrf})
+        assert "<strong>n8n</strong>" not in (await c.get("/admin/clients")).text
+
+
+async def test_clients_page_needs_admin_role(admin_stack):
+    async with httpx.AsyncClient(base_url=admin_stack.url) as owner:
+        await login(owner, admin_stack.url)
+        csrf = csrf_of((await owner.get("/admin/users")).text)
+        await owner.post(
+            "/admin/users", data={"csrf": csrf, "username": "op", "role": "operator", "password": "operator password"}
+        )
+    async with httpx.AsyncClient(base_url=admin_stack.url) as op:
+        await login(op, admin_stack.url, "op", "operator password")
+        assert (await op.get("/admin/clients")).status_code == 403
