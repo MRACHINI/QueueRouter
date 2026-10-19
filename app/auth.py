@@ -2,35 +2,37 @@
 
 from __future__ import annotations
 
-import hmac
 import ipaddress
 import time
 from collections import deque
+from collections.abc import Iterable
 
 from fastapi import Request
 
-from .config import ClientKey, Settings
+from .config import ClientKey, Network
+from .store import hash_key
 
 
-def client_ip(request: Request, settings: Settings) -> str:
+def client_ip(request: Request, trusted_proxies: Iterable[Network]) -> str:
     """Peer address, or the right-most untrusted X-Forwarded-For hop when behind our proxy."""
+    trusted = tuple(trusted_proxies)
     peer = request.client.host if request.client else "unknown"
     forwarded = request.headers.get("x-forwarded-for")
-    if not forwarded or not _is_trusted(peer, settings):
+    if not forwarded or not ip_in(peer, trusted):
         return peer
     hops = [h.strip() for h in forwarded.split(",") if h.strip()]
     for hop in reversed(hops):
-        if not _is_trusted(hop, settings):
+        if not ip_in(hop, trusted):
             return hop
     return hops[0] if hops else peer
 
 
-def _is_trusted(ip: str, settings: Settings) -> bool:
+def ip_in(ip: str, networks: Iterable[Network]) -> bool:
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    return any(addr in net for net in settings.trusted_proxies)
+    return any(addr in net for net in networks)
 
 
 def presented_key(request: Request) -> str | None:
@@ -43,18 +45,17 @@ def presented_key(request: Request) -> str | None:
 ANONYMOUS = ClientKey("anonymous", "", "normal")
 
 
-def find_client(key: str | None, clients: tuple[ClientKey, ...], allow_no_auth: bool) -> ClientKey | None:
-    """The client owning ``key``; ANONYMOUS when auth is disabled; None if not authorised."""
+def find_client(key: str | None, clients: dict[str, ClientKey], allow_no_auth: bool) -> ClientKey | None:
+    """The client owning ``key``; ANONYMOUS when auth is disabled; None if not authorised.
+
+    Keys are looked up by SHA-256 hash, so the stored value never equals the secret and the
+    lookup time doesn't depend on how much of a guessed key is correct.
+    """
     if allow_no_auth and not clients:
         return ANONYMOUS
     if not key:
         return None
-    # Compare against every key so timing doesn't reveal which one matched.
-    found = None
-    for client in clients:
-        if hmac.compare_digest(key.encode(), client.key.encode()):
-            found = client
-    return found
+    return clients.get(hash_key(key))
 
 
 class AuthGuard:

@@ -19,9 +19,10 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from . import __version__
 from .auth import AuthGuard, client_ip, find_client, presented_key
-from .config import PRIORITIES, ClientKey, Settings
+from .config import PRIORITIES, Bootstrap, ClientKey, Settings
 from .sessions import session_key
 from .slots import LANE_NAMES, LANES, SlotQueue
+from .state import load_snapshot, open_store
 from .stats import Stats
 from .upstream import (
     UpstreamFailed,
@@ -101,71 +102,94 @@ class Admission:
     hints: dict[str, str]
 
 
-def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
-    settings.validate()
-    logging.basicConfig(level=settings.log_level, format="%(message)s")
+def create_app(
+    bootstrap: Bootstrap, seed: Settings | None = None, transport: httpx.AsyncBaseTransport | None = None
+) -> FastAPI:
+    """Build the app. ``seed`` is imported into the database only on the very first start."""
+    logging.basicConfig(level=bootstrap.log_level, format="%(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # our own request log covers upstream calls
 
-    clients = settings.clients
+    store = open_store(bootstrap, seed)
+    snapshot = load_snapshot(store)
+    initial = snapshot.settings
     queue = SlotQueue(
-        settings.max_concurrency,
-        settings.min_spacing_ms,
-        aging_s=settings.aging_s,
-        session_window_s=settings.session_window_s,
-        session_aware=settings.session_aware,
-        fair_share=settings.fair_share,
+        initial.max_concurrency,
+        initial.min_spacing_ms,
+        aging_s=initial.aging_s,
+        session_window_s=initial.session_window_s,
+        session_aware=initial.session_aware,
+        fair_share=initial.fair_share,
     )
     stats = Stats()
-    guard = AuthGuard(settings.auth_fail_limit, settings.auth_block_s)
+    guard = AuthGuard(initial.auth_fail_limit, initial.auth_block_s)
     models_cache: dict = {"at": 0.0, "status": 0, "body": b"", "headers": {}}
-    max_body = int(settings.max_body_mb * 1024 * 1024)
+
+    def cfg() -> Settings:
+        return snapshot.settings
+
+    def reload() -> None:
+        """Re-read configuration from the database and apply it live."""
+        nonlocal snapshot
+        snapshot = load_snapshot(store)
+        s = snapshot.settings
+        queue.reconfigure(
+            s.max_concurrency, s.min_spacing_ms, s.aging_s, s.session_window_s, s.session_aware, s.fair_share
+        )
+        guard.limit, guard.block_s = s.auth_fail_limit, s.auth_block_s
+        models_cache["at"] = 0.0
+        log.info(json.dumps({"event": "config_reloaded", **startup_summary()}))
+
+    def startup_summary() -> dict:
+        s = snapshot.settings
+        return {
+            "upstream": snapshot.upstream.upstream.name if snapshot.upstream else None,
+            "max_concurrency": s.max_concurrency,
+            "clients": {c.name: c.priority for c in snapshot.clients.values()} or "none",
+            "scheduling": {
+                "aging_s": s.aging_s,
+                "session_aware": s.session_aware,
+                "session_window_s": s.session_window_s,
+                "fair_share": s.fair_share,
+            },
+        }
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.client = httpx.AsyncClient(
-            transport=transport,
-            timeout=httpx.Timeout(
-                connect=settings.upstream_connect_timeout_s,
-                read=settings.upstream_read_timeout_s,
-                write=30,
-                pool=None,
-            ),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            transport=transport, limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
         )
-        startup = {
-            "event": "startup",
-            "version": __version__,
-            "upstream": settings.upstream_url,
-            "max_concurrency": settings.max_concurrency,
-            "clients": {c.name: c.priority for c in clients} or "no auth",
-            "scheduling": {
-                "aging_s": settings.aging_s,
-                "session_aware": settings.session_aware,
-                "session_window_s": settings.session_window_s,
-                "fair_share": settings.fair_share,
-            },
-        }
-        log.info(json.dumps(startup))
+        log.info(json.dumps({"event": "startup", "version": __version__, **startup_summary()}))
+        if snapshot.upstream is None:
+            log.warning(json.dumps({"event": "no_upstream", "message": "add an upstream in the admin UI"}))
         yield
         await app.state.client.aclose()
+        store.close()
 
     app = FastAPI(
         title="QueueRouter", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
+    app.state.store = store
+    app.state.reload = reload
+    app.state.bootstrap = bootstrap
 
     # -- helpers ---------------------------------------------------------------------------
 
     def authenticate(request: Request) -> tuple[ClientKey | None, JSONResponse | None]:
         """The calling client, or an error response to return instead."""
-        ip = client_ip(request, settings)
+        ip = client_ip(request, bootstrap.trusted_proxies)
         if remaining := guard.is_blocked(ip):
             retry_after = {"Retry-After": str(int(remaining) + 1)}
             return None, error_response("too many failed authentication attempts", 429, "auth_blocked", **retry_after)
-        client = find_client(presented_key(request), clients, settings.allow_no_auth)
+        client = find_client(presented_key(request), snapshot.clients, cfg().allow_no_auth)
         if client is None:
             guard.fail(ip)
             return None, error_response("invalid or missing API key", 401, "invalid_api_key")
         return client, None
+
+    def not_configured() -> JSONResponse | None:
+        if snapshot.upstream is None:
+            return error_response("no upstream configured yet: add one in the admin UI", 503, "not_configured")
+        return None
 
     def request_lane(request: Request, client: ClientKey) -> int:
         """Client's priority, optionally lowered (never raised) by X-QueueRouter-Priority."""
@@ -191,11 +215,19 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
         }
 
     def build_upstream_request(request: Request, path: str, body: bytes | None) -> httpx.Request:
-        url = f"{settings.upstream_url}/{path}"
+        s = cfg()
+        url = f"{s.upstream_url}/{path}"
         if request.url.query:
             url += f"?{request.url.query}"
+        timeout = httpx.Timeout(
+            connect=s.upstream_connect_timeout_s, read=s.upstream_read_timeout_s, write=30, pool=None
+        )
         return app.state.client.build_request(
-            request.method, url, content=body, headers=upstream_headers(request.headers, settings.upstream_api_key)
+            request.method,
+            url,
+            content=body,
+            headers=upstream_headers(request.headers, s.upstream_api_key),
+            timeout=timeout,
         )
 
     # -- routes ----------------------------------------------------------------------------
@@ -234,8 +266,10 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
         _, denied = authenticate(request)
         if denied:
             return denied
+        if unavailable := not_configured():
+            return unavailable
         now = time.monotonic()
-        if models_cache["status"] != 200 or now - models_cache["at"] > settings.models_cache_s:
+        if models_cache["status"] != 200 or now - models_cache["at"] > cfg().models_cache_s:
             try:
                 resp = await app.state.client.send(build_upstream_request(request, "models", None))
             except httpx.HTTPError as exc:
@@ -251,6 +285,8 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
         _, denied = authenticate(request)
         if denied:
             return denied
+        if unavailable := not_configured():
+            return unavailable
         try:
             resp = await app.state.client.send(build_upstream_request(request, path, None))
         except httpx.HTTPError as exc:
@@ -262,15 +298,18 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
         client, denied = authenticate(request)
         if denied:
             return denied
+        if unavailable := not_configured():
+            return unavailable
 
+        max_body = int(cfg().max_body_mb * 1024 * 1024)
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > max_body:
-            return error_response(f"request body exceeds {settings.max_body_mb} MB", 413, "request_too_large")
+            return error_response(f"request body exceeds {cfg().max_body_mb} MB", 413, "request_too_large")
         chunks, size = [], 0
         async for chunk in request.stream():  # bounded read, even without Content-Length
             size += len(chunk)
             if size > max_body:
-                return error_response(f"request body exceeds {settings.max_body_mb} MB", 413, "request_too_large")
+                return error_response(f"request body exceeds {cfg().max_body_mb} MB", 413, "request_too_large")
             chunks.append(chunk)
         body = b"".join(chunks)
 
@@ -283,7 +322,7 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
         lane = request_lane(request, client)
         session = session_key(request.headers, client.name, payload)
         position = queue.predict_position(client.name, lane, session)
-        rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, settings))
+        rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies))
         rlog.fields.update(
             client=client.name, priority=LANE_NAMES[lane], session=session and session[:8], position=position
         )
@@ -331,7 +370,7 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
         outcome, status, waits = "error", 500, []
         upstream_started = None
         try:
-            timeout = settings.max_queue_wait_s or None
+            timeout = cfg().max_queue_wait_s or None
             if not await queue.wait(ticket, timeout):
                 outcome, status = "timeout", 504
                 return error_response("timed out waiting in queue", 504, "queue_timeout")
@@ -343,9 +382,9 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
             async for event in send_with_retries(
                 app.state.client,
                 upstream_request,
-                settings.max_retries,
-                settings.retry_base_delay_s,
-                settings.retry_max_delay_s,
+                cfg().max_retries,
+                cfg().retry_base_delay_s,
+                cfg().retry_max_delay_s,
             ):
                 if isinstance(event, Wait):
                     waits.append(event)
@@ -388,14 +427,14 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
         upstream_started = None
         response = None
         sniffer = UsageSniffer()
-        keepalive = settings.keepalive_interval_s
+        keepalive = cfg().keepalive_interval_s
         try:
             if not ticket.granted:
                 position = queue.position(ticket)
                 note = f": queued id={adm.request_id} position={position} est_wait_ms={estimate_wait_ms(position)}\n\n"
                 yield note.encode()
             while not await queue.wait(ticket, keepalive):
-                if settings.max_queue_wait_s and ticket.wait_s >= settings.max_queue_wait_s:
+                if cfg().max_queue_wait_s and ticket.wait_s >= cfg().max_queue_wait_s:
                     outcome, status = "timeout", 504
                     yield sse_error("timed out waiting in queue", 504, "queue_timeout")
                     return
@@ -408,9 +447,9 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
                 async for event in send_with_retries(
                     app.state.client,
                     upstream_request,
-                    settings.max_retries,
-                    settings.retry_base_delay_s,
-                    settings.retry_max_delay_s,
+                    cfg().max_retries,
+                    cfg().retry_base_delay_s,
+                    cfg().retry_max_delay_s,
                 ):
                     if isinstance(event, Wait):
                         waits.append(event)
@@ -471,4 +510,4 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
 
 def build_app() -> FastAPI:
     """Entry point for uvicorn (``--factory``)."""
-    return create_app(Settings.from_env())
+    return create_app(Bootstrap.from_env(), seed=Settings.from_env())

@@ -1,14 +1,14 @@
 import pytest
 
-from app.config import ClientKey, Settings, parse_access_keys
+from app.config import Bootstrap, ParsedKey, Settings, parse_access_keys
 from app.sessions import session_key
 
 
 def test_parse_access_keys_formats():
     assert parse_access_keys(("k1", "chat:k2", "batch:k3:low")) == (
-        ClientKey("client1", "k1", "normal"),
-        ClientKey("chat", "k2", "normal"),
-        ClientKey("batch", "k3", "low"),
+        ParsedKey("client1", "k1", "normal"),
+        ParsedKey("chat", "k2", "normal"),
+        ParsedKey("batch", "k3", "low"),
     )
 
 
@@ -31,9 +31,15 @@ def test_from_env_scheduling_settings():
             "FAIR_SHARE": "no",
         }
     )
-    s.validate()
-    assert s.clients == (ClientKey("opencode", "abc", "high"),)
+    assert s.access_keys == ("opencode:abc:high",)
     assert (s.aging_s, s.session_aware, s.fair_share) == (30, False, False)
+
+
+def test_bootstrap_from_env():
+    b = Bootstrap.from_env({"DATA_DIR": "/tmp/qr", "ADMIN_ALLOWED_IPS": "10.0.0.0/8", "PUBLIC_URL": "https://x/"})
+    assert b.data_dir == "/tmp/qr" and b.public_url == "https://x" and b.secret_key is None
+    assert [str(n) for n in b.admin_allowed_ips] == ["10.0.0.0/8"]
+    assert len(b.trusted_proxies) == 4
 
 
 def chat_body(system="sys", first_user="task", *more):

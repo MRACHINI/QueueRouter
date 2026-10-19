@@ -5,7 +5,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin queuerouter
+RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin queuerouter \
+    && mkdir /data && chown 10001:10001 /data && chmod 700 /data
+
+# Database, secret key and backups. Mount a volume here.
+ENV DATA_DIR=/data
+VOLUME /data
 
 WORKDIR /srv
 COPY requirements.txt .

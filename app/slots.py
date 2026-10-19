@@ -74,6 +74,25 @@ class SlotQueue:
         self._last_start = 0.0
         self._spacing_lock = asyncio.Lock()
 
+    def reconfigure(
+        self,
+        max_concurrency: int,
+        min_spacing_ms: int,
+        aging_s: float,
+        session_window_s: float,
+        session_aware: bool,
+        fair_share: bool,
+    ) -> None:
+        """Apply new settings live. Raising the limit starts waiters at once; lowering it lets
+        running requests finish and simply grants nothing until below the new limit."""
+        self.max_concurrency = max_concurrency
+        self.min_spacing_s = min_spacing_ms / 1000
+        self.aging_s = aging_s
+        self.session_window_s = session_window_s
+        self.session_aware = session_aware
+        self.fair_share = fair_share
+        self._dispatch()
+
     # -- ordering ------------------------------------------------------------------------
 
     def _session_active(self, session: str | None, now: float) -> bool:

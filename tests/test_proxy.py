@@ -347,3 +347,11 @@ async def test_stats_per_client(make_stack):
     assert s["per_client"]["chat"]["outcomes"] == {"done": 1}
     assert s["per_client"]["batch"]["outcomes"] == {"done": 2}
     assert s["queued_by_lane"] == {"high": 0, "normal": 0, "low": 0}
+
+
+async def test_not_configured_without_upstream(make_stack):
+    stack = make_stack(upstream_api_key="")
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(f"{stack.url}/v1/chat/completions", headers=stack.headers, json=chat())
+        assert r.status_code == 503 and r.json()["error"]["type"] == "not_configured"
+        assert (await c.get(f"{stack.url}/health")).status_code == 200
