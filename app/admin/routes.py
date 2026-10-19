@@ -95,6 +95,7 @@ class AdminContext:
     live_state: Callable[[], dict]
     probe: Callable[[str, str], Awaitable[tuple[bool, str]]]
     upstream_info: Callable[[], list[dict]]
+    models_by_upstream: Callable[[], dict[str, list[str]]]
 
 
 class NeedLogin(Exception):
@@ -660,6 +661,67 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         store.audit(session.user.username, "upstream.test", target.name, {"ok": ok})
         return upstreams_page(request, session, test={"name": target.name, "ok": ok, "message": message})
 
+    # -- models and aliases --------------------------------------------------------------
+
+    @app.get("/admin/models")
+    async def models_page(request: Request):
+        session = require(request, "admin")
+        upstream_names = {u.id: u.name for u in store.list_upstreams()}
+        return page(
+            request,
+            "models.html",
+            session,
+            aliases=store.list_aliases(),
+            upstreams=store.list_upstreams(),
+            upstream_names=upstream_names,
+            models=ctx.models_by_upstream(),
+        )
+
+    def alias_fields(form: dict) -> dict:
+        target = str(form.get("target_model", "")).strip()
+        if not target or len(target) > 200:
+            raise ValueError("target_model")
+        known = {u.id for u in store.list_upstreams()}
+        upstream_ids = tuple(int(v) for k, v in form.items() if k.startswith("upstream_") and int(v) in known)
+        return {"target_model": target, "upstream_ids": upstream_ids, "notes": str(form.get("notes", ""))[:300]}
+
+    @app.post("/admin/aliases")
+    async def aliases_create(request: Request):
+        session, form = await require_post(request, "admin")
+        name = str(form.get("name", "")).strip()
+        try:
+            if not ALIAS_NAME.fullmatch(name):
+                raise ValueError("name")
+            fields = alias_fields(form)
+            store.create_alias(
+                name, fields["target_model"], fields["upstream_ids"], session.user.username, notes=fields["notes"]
+            )
+        except ValueError:
+            return back("/admin/models", error="invalid")
+        except sqlite3.IntegrityError:
+            return back("/admin/models", error="exists")
+        ctx.reload()
+        return back("/admin/models", "created")
+
+    @app.post("/admin/aliases/{alias_id}")
+    async def aliases_update(alias_id: int, request: Request):
+        session, form = await require_post(request, "admin")
+        try:
+            store.update_alias(
+                alias_id, session.user.username, enabled=form.get("enabled") == "on", **alias_fields(form)
+            )
+        except (ValueError, KeyError):
+            return back("/admin/models", error="invalid")
+        ctx.reload()
+        return back("/admin/models", "saved")
+
+    @app.post("/admin/aliases/{alias_id}/delete")
+    async def aliases_delete(alias_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        store.delete_alias(alias_id, session.user.username)
+        ctx.reload()
+        return back("/admin/models", "deleted")
+
     # -- audit ---------------------------------------------------------------------------
 
     @app.get("/admin/audit")
@@ -669,6 +731,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 
 
 CLIENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+ALIAS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 URL = re.compile(r"https?://[^\s/?#]+(/[^\s?#]*)?")
 
 

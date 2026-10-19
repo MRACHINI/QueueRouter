@@ -20,6 +20,7 @@
       {% if user.can("admin") %}
       <a href="/admin/clients" {% if path.startswith("/admin/clients") %}aria-current="page"{% endif %}>Clients</a>
       <a href="/admin/upstreams" {% if path.startswith("/admin/upstreams") %}aria-current="page"{% endif %}>Upstreams</a>
+      <a href="/admin/models" {% if path == "/admin/models" %}aria-current="page"{% endif %}>Models</a>
       <a href="/admin/settings" {% if path == "/admin/settings" %}aria-current="page"{% endif %}>Settings</a>
       <a href="/admin/audit" {% if path == "/admin/audit" %}aria-current="page"{% endif %}>Audit</a>
       {% endif %}

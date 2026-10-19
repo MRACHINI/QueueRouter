@@ -84,6 +84,7 @@ class RequestLog:
             "prompt_tokens": None,
             "completion_tokens": None,
             "finish_reason": None,
+            "target_model": None,
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -320,10 +321,11 @@ def create_app(
             return error_response(message, 503, snapshot.mode, **{"Retry-After": "300"})
         return None
 
-    def policy_refusal(client: ClientKey, model: str | None) -> JSONResponse | None:
-        """Admission checks from the client's policy (the only place QueueRouter itself says no)."""
+    def policy_refusal(client: ClientKey, model: str | None, target: str | None = None) -> JSONResponse | None:
+        """Admission checks from the client's policy (the only place QueueRouter itself says no).
+        For an alias, allowing either the alias or its target model is enough."""
         policy = client.policy
-        if policy.allowed_models and model not in policy.allowed_models:
+        if policy.allowed_models and model not in policy.allowed_models and target not in policy.allowed_models:
             return error_response(f"model '{model}' is not allowed for this key", 403, "model_not_allowed")
         if policy.max_queued is not None and queue.client_queued(client.name) >= policy.max_queued:
             return error_response(
@@ -335,10 +337,11 @@ def create_app(
             )
         return None
 
-    def candidates_for(model: str | None) -> tuple[Candidate, ...]:
+    def candidates_for(model: str | None, only: tuple[int, ...] = ()) -> tuple[Candidate, ...]:
         """Usable upstreams for ``model``: those that list it, or all of them if none does
-        (the upstream then decides; lists may be stale or incomplete)."""
-        usable = [t for t in snapshot.upstreams.values() if t.usable]
+        (the upstream then decides; lists may be stale or incomplete). ``only`` restricts the
+        choice (an alias pinned to some upstreams)."""
+        usable = [t for t in snapshot.upstreams.values() if t.usable and (not only or t.id in only)]
         if model:
             listing = [t for t in usable if (ids := catalogs.ids(t.id)) is not None and model in ids]
             unknown = [t for t in usable if catalogs.ids(t.id) is None]
@@ -415,7 +418,10 @@ def create_app(
         sample = ", ".join(m["id"] for m in models[:5])
         return True, f"OK — {len(models)} models" + (f" (e.g. {sample})" if sample else "")
 
-    mount_admin(app, AdminContext(store, bootstrap, reload, live_state, probe, upstream_info))
+    def models_by_upstream() -> dict[str, list[str]]:
+        return {t.upstream.name: sorted(catalogs.ids(t.id) or []) for t in snapshot.upstreams.values()}
+
+    mount_admin(app, AdminContext(store, bootstrap, reload, live_state, probe, upstream_info, models_by_upstream))
 
     # -- the attempt loop ----------------------------------------------------------------
 
@@ -592,8 +598,16 @@ def create_app(
                 merged.setdefault(model["id"], model)
         if not merged and all(catalogs.ids(t.id) is None for t in targets):
             return error_response("no upstream returned a model list", 502, "upstream_error")
+        for alias in snapshot.aliases.values():
+            merged[alias.name] = alias_entry(alias, merged.get(alias.target_model))
         allowed = client.policy.allowed_models
-        data = [m for m in merged.values() if not allowed or m["id"] in allowed]
+        data = [
+            m
+            for m in merged.values()
+            if not allowed
+            or m["id"] in allowed
+            or (m["id"] in snapshot.aliases and snapshot.aliases[m["id"]].target_model in allowed)
+        ]
         return {"object": "list", "data": data}
 
     @app.get("/v1/{path:path}")
@@ -641,8 +655,17 @@ def create_app(
         except ValueError:
             payload = {}
         model = payload.get("model") if isinstance(payload, dict) else None
-        if refusal := policy_refusal(client, model if isinstance(model, str) else None):
+        model = model if isinstance(model, str) else None
+        alias = snapshot.aliases.get(model) if model else None
+        target_model = alias.target_model if alias else model
+        if refusal := policy_refusal(client, model, target_model):
             return refusal
+        candidates = candidates_for(target_model, alias.upstream_ids if alias else ())
+        if not candidates:
+            return error_response(f"no usable upstream for '{model}' right now", 503, "no_upstream")
+        if alias:  # the upstream gets the real model name
+            payload["model"] = alias.target_model
+            body = json.dumps(payload).encode()
 
         request_id = f"qr-{uuid.uuid4().hex[:12]}"
         lane = request_lane(request, client)
@@ -654,7 +677,8 @@ def create_app(
             priority=LANE_NAMES[lane],
             session=session and session[:8],
             position=position,
-            model=model if isinstance(model, str) else None,
+            model=model,
+            target_model=target_model if alias else None,
             stream=isinstance(payload, dict) and payload.get("stream") is True,
         )
         hints = {
@@ -669,7 +693,7 @@ def create_app(
             client.name,
             lane,
             session,
-            candidates_for(rlog.fields["model"]),
+            candidates,
             "POST",
             path,
             request.url.query,
@@ -836,6 +860,19 @@ def create_app(
             limiter.record_tokens(adm.client, (sniffer.prompt_tokens or 0) + (sniffer.completion_tokens or 0))
 
     return app
+
+
+CONTEXT_FIELDS = ("context_length", "max_model_len", "max_context_length", "max_output_tokens", "max_tokens")
+
+
+def alias_entry(alias, target: dict | None) -> dict:
+    """A /v1/models entry for an alias, with the target's context-size fields so apps size prompts right."""
+    entry = {"id": alias.name, "object": "model", "created": 0, "owned_by": "queuerouter"}
+    for key in CONTEXT_FIELDS:
+        if target and key in target:
+            entry[key] = target[key]
+    entry["queuerouter"] = {"type": "alias", "target": alias.target_model}
+    return entry
 
 
 def _granted_at(rlog: RequestLog) -> float | None:

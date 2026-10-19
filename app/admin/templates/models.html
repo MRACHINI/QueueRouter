@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Models{% endblock %}
+{% block content %}
+<h1>Models &amp; aliases</h1>
+<p class="muted">An <strong>alias</strong> is a stable model name for your apps (e.g. <code>smart</code>, <code>code</code>).
+QueueRouter rewrites it to the real model before forwarding, so you can switch models here without touching any
+app. Aliases show up in <code>/v1/models</code> with their target's context size.</p>
+
+<h2>Aliases</h2>
+<datalist id="model-ids">
+  {% for name, ids in models.items() %}{% for m in ids %}<option value="{{ m }}">{{ name }}</option>{% endfor %}{% endfor %}
+</datalist>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Alias</th><th>Settings</th><th></th></tr></thead>
+  <tbody>
+  {% for a in aliases %}
+  <tr>
+    <td data-label="Alias"><strong><code>{{ a.name }}</code></strong>{% if not a.enabled %} <span class="badge">disabled</span>{% endif %}
+      <div class="small muted">→ <code>{{ a.target_model }}</code>
+        {% if a.upstream_ids %} on {% for uid in a.upstream_ids %}{{ upstream_names.get(uid, uid) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %} on any upstream{% endif %}</div>
+      {% if a.notes %}<div class="small muted">{{ a.notes }}</div>{% endif %}</td>
+    <td data-label="">
+      <form method="post" action="/admin/aliases/{{ a.id }}" class="row wrap">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input name="target_model" value="{{ a.target_model }}" list="model-ids" required aria-label="Target model" class="grow">
+        {% for u in upstreams %}
+        <label class="check"><input type="checkbox" name="upstream_{{ u.id }}" value="{{ u.id }}" {% if u.id in a.upstream_ids %}checked{% endif %}> {{ u.name }}</label>
+        {% endfor %}
+        <input name="notes" value="{{ a.notes }}" placeholder="notes" aria-label="Notes">
+        <label class="check"><input type="checkbox" name="enabled" {% if a.enabled %}checked{% endif %}> enabled</label>
+        <button type="submit" class="secondary">Save</button>
+      </form>
+    </td>
+    <td data-label="">
+      <form method="post" action="/admin/aliases/{{ a.id }}/delete" data-confirm="Delete alias {{ a.name }}? Apps using it will get errors.">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="3" class="muted">No aliases yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Add alias</h2>
+<form method="post" action="/admin/aliases" class="card grid">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Alias <input name="name" required placeholder="smart" pattern="[A-Za-z0-9][A-Za-z0-9._:/\-]{0,127}" autocomplete="off"></label>
+  <label>Target model <input name="target_model" required list="model-ids" placeholder="pick or type a model id" autocomplete="off"></label>
+  <fieldset class="span-all plain">
+    <legend class="small muted">Only on these upstreams (none = any)</legend>
+    <div class="row wrap">
+    {% for u in upstreams %}
+      <label class="check"><input type="checkbox" name="upstream_{{ u.id }}" value="{{ u.id }}"> {{ u.name }}</label>
+    {% endfor %}
+    </div>
+  </fieldset>
+  <label>Notes <input name="notes" maxlength="300" placeholder="optional"></label>
+  <div class="align-end"><button type="submit">Add alias</button></div>
+</form>
+
+<h2>Models per upstream</h2>
+{% for name, ids in models.items() %}
+<details class="card">
+  <summary><strong>{{ name }}</strong> <span class="muted small">{{ ids | length }} models</span></summary>
+  {% if ids %}<ul class="mono small columns">{% for m in ids %}<li>{{ m }}</li>{% endfor %}</ul>
+  {% else %}<p class="small muted">Model list not loaded yet (or the upstream doesn't provide one).</p>{% endif %}
+</details>
+{% else %}
+<p class="muted">No upstreams yet.</p>
+{% endfor %}
+{% endblock %}

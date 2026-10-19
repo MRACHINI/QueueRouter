@@ -96,6 +96,18 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE clients ADD COLUMN policy TEXT NOT NULL DEFAULT '{}';
     """,
+    # 3: model aliases
+    """
+    CREATE TABLE aliases (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        target_model TEXT NOT NULL,
+        upstream_ids TEXT NOT NULL DEFAULT '[]',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        notes TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL
+    );
+    """,
 ]
 
 
@@ -148,6 +160,16 @@ class Client:
     @property
     def expired(self) -> bool:
         return self.expires_at is not None and self.expires_at <= time.time()
+
+
+@dataclass(frozen=True)
+class Alias:
+    id: int
+    name: str
+    target_model: str
+    upstream_ids: tuple[int, ...]  # empty = any upstream
+    enabled: bool
+    notes: str
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -491,6 +513,43 @@ class Store:
         with self.tx() as db:
             db.execute("DELETE FROM clients WHERE id = ?", (client_id,))
         self.audit(actor, "client.delete", str(client_id))
+
+    # -- aliases -------------------------------------------------------------------------
+
+    def list_aliases(self) -> list[Alias]:
+        return [
+            Alias(
+                r["id"],
+                r["name"],
+                r["target_model"],
+                tuple(json.loads(r["upstream_ids"])),
+                bool(r["enabled"]),
+                r["notes"],
+            )
+            for r in self.query("SELECT * FROM aliases ORDER BY name")
+        ]
+
+    def create_alias(
+        self, name: str, target_model: str, upstream_ids: tuple[int, ...], actor: str, notes: str = ""
+    ) -> int:
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT INTO aliases (name, target_model, upstream_ids, notes, created_at) VALUES (?, ?, ?, ?, ?)",
+                (name, target_model, json.dumps(list(upstream_ids)), notes, time.time()),
+            )
+        self.audit(actor, "alias.create", name, {"target_model": target_model, "upstreams": list(upstream_ids)})
+        return cur.lastrowid
+
+    def update_alias(self, alias_id: int, actor: str, **fields: object) -> None:
+        if "upstream_ids" in fields:
+            fields["upstream_ids"] = json.dumps(list(fields["upstream_ids"]))
+        self._update("aliases", alias_id, {"target_model", "upstream_ids", "enabled", "notes"}, fields)
+        self.audit(actor, "alias.update", str(alias_id), fields)
+
+    def delete_alias(self, alias_id: int, actor: str) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM aliases WHERE id = ?", (alias_id,))
+        self.audit(actor, "alias.delete", str(alias_id))
 
     # -- admin users and sessions --------------------------------------------------------
 
