@@ -25,6 +25,19 @@ from a **web admin UI**.
   and context cap.
 - **Model aliases** (`smart`, `code`, …) that you can repoint without touching any app; listed in
   `/v1/models` with the target's context size.
+- **Fallback chains**: an alias can list backup models, used when the first is unavailable,
+  keeps failing, can't fit the prompt, or (opt-in) refuses — detected from content-policy errors,
+  `finish_reason: content_filter` or a reply opening with a refusal. The request is resent
+  unchanged.
+- **Sticky routing**: with several upstreams, a conversation returns to the upstream that served
+  it, so its prompt cache stays warm.
+- **Parameter rules** per alias and client: defaults, overrides, clamps (e.g. cap `max_tokens`),
+  and stripping parameters an upstream rejects.
+- **Context-length pre-check**: prompts that clearly can't fit are refused immediately (or sent
+  to a bigger-context fallback) instead of waiting in the queue.
+- **Agent guard rails**: per-run budgets (tokens / requests / minutes per `X-Run-Id` or
+  conversation), loop detection, and request tags for filtering.
+- **Playground** in the admin UI: chat as any client through the real pipeline.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.
@@ -196,15 +209,21 @@ Everything else is configured in the admin UI.
 
 **Request headers** (optional, never forwarded upstream): `X-QueueRouter-Priority:
 low|normal|high` (can only lower your key's priority), `X-Session-Id` (group requests into a
-session).
+conversation), `X-Run-Id` (one agent task, for run budgets and loop detection),
+`X-QueueRouter-Run-Budget-Tokens` (lower your run's token budget), `X-QueueRouter-Tags`
+(comma-separated labels).
 
 **Response headers**: `X-Request-Id`, `X-QueueRouter-Queue-Depth`, `X-QueueRouter-Position`
 (0 = started immediately), `X-QueueRouter-Est-Wait-Ms`, `X-QueueRouter-Slots`; non-streaming
 responses also `X-Queue-Wait-Ms`.
 
 QueueRouter only refuses requests for reasons you configured: bad key (401), model not allowed
-(403), a client's queue/rate limit in `reject` mode (429), draining/maintenance (503), body too
-large (413).
+(403), a client's queue/rate limit in `reject` mode, run budget or loop rejection (429),
+draining/maintenance (503), body too large (413), and prompts that clearly exceed the model's
+context (400 `context_length_exceeded`).
+
+Responses also carry `X-QueueRouter-Model` (the model that actually answered, e.g. after a
+fallback); streams announce a fallback with an SSE comment.
 
 ## Development
 
