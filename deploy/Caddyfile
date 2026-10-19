@@ -1,0 +1,7 @@
+{$DOMAIN} {
+	# No response compression: it would buffer SSE streams and keep-alives.
+	reverse_proxy queuerouter:8000 {
+		# Flush every byte immediately so streaming and queue keep-alives reach clients.
+		flush_interval -1
+	}
+}

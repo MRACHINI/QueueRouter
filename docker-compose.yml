@@ -1,0 +1,32 @@
+# Default deployment: behind an existing Traefik (v2 or v3) using Docker labels.
+# No Traefik? Use docker-compose.caddy.yml instead.
+services:
+  queuerouter:
+    image: ghcr.io/mrachini/queuerouter:${QUEUEROUTER_TAG:-latest}
+    env_file: .env
+    expose: ["8000"]          # no host port: reachable only through Traefik
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    stop_grace_period: 60s    # let in-flight streams finish on shutdown
+    deploy:
+      replicas: 1             # never scale: the queue lives in memory
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+    networks: [traefik]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik}
+      - traefik.http.routers.queuerouter.rule=Host(`${DOMAIN:?set DOMAIN in .env}`)
+      - traefik.http.routers.queuerouter.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.queuerouter.tls=true
+      - traefik.http.routers.queuerouter.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.services.queuerouter.loadbalancer.server.port=8000
+      # Don't add compress/buffering middlewares to this router: they break streaming.
+
+networks:
+  traefik:
+    name: ${TRAEFIK_NETWORK:-traefik}
+    external: true

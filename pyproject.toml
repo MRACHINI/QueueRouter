@@ -1,0 +1,19 @@
+[project]
+name = "queuerouter"
+dynamic = ["version"]
+description = "OpenAI-compatible LLM gateway that queues requests instead of exceeding upstream concurrency limits"
+requires-python = ">=3.12"
+license = "MIT"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC"]
+ignore = ["B008", "ASYNC109"]

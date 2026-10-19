@@ -1,0 +1,179 @@
+# QueueRouter
+
+An OpenAI-compatible proxy that sits in front of [ArliAI](https://www.arliai.com) (or any
+OpenAI-compatible API) and **never sends more parallel requests than your plan allows**.
+Extra requests are **queued and delayed, not rejected** — your apps see a slower response
+instead of a `429 Too Many Requests`.
+
+Built for agentic tools like **opencode**, which fire several requests at once (main model,
+title generation, subagents) — more than ArliAI Pro's 2 parallel requests.
+
+> Status: **Phase 0 (MVP)** — single upstream, configured with environment variables.
+> The full roadmap (web admin UI, priorities, multiple upstreams, aliases, fallbacks, async
+> jobs…) is in [DESIGN.md](DESIGN.md).
+
+## How it works
+
+```
+opencode ───┐                                     ┌─► ArliAI (at most 2 in flight)
+scripts ────┼─► Traefik (HTTPS) ─► QueueRouter ───┤
+other apps ─┘                      (FIFO queue)   └─ everything else waits its turn
+```
+
+- **True queuing**: requests wait in strict FIFO order with the connection held open.
+- **Slots held until the last byte**: a streaming response keeps its slot until it finishes.
+- **Streaming keep-alives**: while queued, streaming clients receive SSE comments
+  (`: queued position=3 waited=42s`) so nothing times out.
+- **Safety-net retries**: if ArliAI still answers 429/5xx (e.g. another app uses the same
+  account), QueueRouter keeps the slot, backs off (honouring `Retry-After`) and retries —
+  the error never reaches your app unless retries run out.
+- **Cancellation**: if a client disconnects while queued it leaves the queue; mid-stream, the
+  upstream request is aborted and the slot freed immediately.
+- **Your ArliAI key stays on the server**; apps use their own access keys.
+
+## Deploy on a server
+
+Requirements: a Linux server with Docker and a domain name pointing at it.
+
+### Behind Traefik (default — Docker labels)
+
+Assumes Traefik already runs on the server with a Docker provider, an HTTPS entrypoint and a
+certificate resolver, attached to an external Docker network.
+
+```bash
+mkdir queuerouter && cd queuerouter
+curl -fsSLO https://raw.githubusercontent.com/MRACHINI/QueueRouter/main/docker-compose.yml
+curl -fsSL -o .env https://raw.githubusercontent.com/MRACHINI/QueueRouter/main/.env.example
+openssl rand -hex 32        # use the output as an access key in ACCESS_KEYS
+nano .env                   # DOMAIN, ARLIAI_API_KEY, ACCESS_KEYS,
+                            # TRAEFIK_NETWORK / TRAEFIK_ENTRYPOINT / TRAEFIK_CERTRESOLVER
+docker compose up -d
+```
+
+The labels route `Host(DOMAIN)` on your HTTPS entrypoint to the container's port 8000.
+Traefik streams SSE without buffering by default — just don't attach `compress` or
+`buffering` middlewares to this router. Its default timeouts don't cut long responses.
+
+### Standalone with Caddy (no existing reverse proxy)
+
+Caddy is a small web server that gets and renews Let's Encrypt certificates automatically;
+the included [Caddyfile](deploy/Caddyfile) just forwards `DOMAIN` to QueueRouter. Needs ports
+80/443 free.
+
+```bash
+curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/MRACHINI/QueueRouter/main/docker-compose.caddy.yml
+mkdir deploy && curl -fsSL -o deploy/Caddyfile https://raw.githubusercontent.com/MRACHINI/QueueRouter/main/deploy/Caddyfile
+# .env as above (the TRAEFIK_* lines are ignored)
+docker compose up -d
+```
+
+### Check and update
+
+```bash
+curl https://YOUR_DOMAIN/health
+```
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+To pin a version, set `QUEUEROUTER_TAG=0.1.0` in `.env`.
+
+Other reverse proxies work too: route to `queuerouter:8000`, **disable response buffering**
+and allow long responses (Nginx: `proxy_buffering off; proxy_read_timeout 1h;`).
+
+## Use with opencode
+
+`opencode.json` (project or `~/.config/opencode/opencode.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "queuerouter": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "ArliAI via QueueRouter",
+      "options": {
+        "baseURL": "https://YOUR_DOMAIN/v1",
+        "apiKey": "{env:QUEUEROUTER_KEY}",
+        "timeout": false
+      },
+      "models": {
+        "ARLIAI_MODEL_ID": {
+          "name": "ArliAI model",
+          "limit": { "context": 262144, "output": 16384 }
+        }
+      }
+    }
+  },
+  "model": "queuerouter/ARLIAI_MODEL_ID",
+  "small_model": "queuerouter/ARLIAI_MODEL_ID"
+}
+```
+
+Then set `QUEUEROUTER_KEY` to one of your `ACCESS_KEYS`.
+
+- `timeout: false` — a queued request may wait longer than opencode's 5-minute default.
+- `limit.context` — the smaller of the model's own context and your plan's cap
+  (ArliAI Pro: 262,144). opencode doesn't read it from the API, so set it here.
+- List available model ids with:
+  `curl -H "Authorization: Bearer $QUEUEROUTER_KEY" https://YOUR_DOMAIN/v1/models`
+
+Any other OpenAI-compatible client works the same way: base URL `https://YOUR_DOMAIN/v1`,
+API key = one of your access keys.
+
+## Configuration
+
+All settings are environment variables in `.env` (see [.env.example](.env.example)):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ARLIAI_API_KEY` | — (required) | your real ArliAI key |
+| `ACCESS_KEYS` | — (required) | comma-separated keys your apps use |
+| `DOMAIN` | — (required for Caddy) | public hostname |
+| `UPSTREAM_URL` | `https://api.arliai.com/v1` | any OpenAI-compatible API |
+| `MAX_CONCURRENCY` | `2` | parallel requests your plan allows |
+| `MIN_SPACING_MS` | `0` | minimum gap between request starts |
+| `MAX_QUEUE_WAIT_S` | `0` (forever) | give up after waiting this long (504) |
+| `KEEPALIVE_INTERVAL_S` | `15` | keep-alive interval for queued streams |
+| `MAX_RETRIES` | `8` | upstream retries (`-1` forever, `0` none) |
+| `RETRY_BASE_DELAY_S` / `RETRY_MAX_DELAY_S` | `2` / `60` | backoff |
+| `UPSTREAM_CONNECT_TIMEOUT_S` | `15` | |
+| `UPSTREAM_READ_TIMEOUT_S` | `600` | max silence between upstream bytes |
+| `MAX_BODY_MB` | `20` | request size limit |
+| `AUTH_FAIL_LIMIT` / `AUTH_BLOCK_S` | `10` / `300` | block an IP after repeated bad keys |
+| `TRUSTED_PROXIES` | Docker/private ranges | where `X-Forwarded-For` is trusted |
+| `LOG_LEVEL` | `INFO` | |
+
+## Endpoints
+
+| Path | Notes |
+|---|---|
+| `POST /v1/chat/completions`, `POST /v1/*` | queued |
+| `GET /v1/models` | passthrough, cached 5 min, doesn't use a slot |
+| `GET /v1/*` | passthrough, doesn't use a slot |
+| `GET /stats` | queue state and latency stats (access key required) |
+| `GET /health` | liveness |
+
+Responses carry `X-Request-Id`; non-streaming responses also `X-Queue-Wait-Ms`.
+Each request is logged as one JSON line (`docker compose logs -f queuerouter`) — metadata only,
+never prompt or response content.
+
+## Development
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt     # Windows: .venv\Scripts\pip
+.venv/bin/pytest                                  # starts a mock ArliAI that enforces 2 slots
+.venv/bin/ruff check . && .venv/bin/ruff format --check .
+```
+
+Run locally from source: copy `.env.example` to `.env`, then
+`docker compose -f docker-compose.dev.yml up --build` → `http://127.0.0.1:8000/v1`.
+
+Pushing to `main` publishes `ghcr.io/mrachini/queuerouter:main`; tagging `vX.Y.Z` publishes
+`X.Y.Z`, `X.Y`, `X` and `latest`.
+
+## License
+
+MIT

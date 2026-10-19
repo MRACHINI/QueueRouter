@@ -1,0 +1,36 @@
+services:
+  queuerouter:
+    image: ghcr.io/mrachini/queuerouter:${QUEUEROUTER_TAG:-latest}
+    env_file: .env
+    expose: ["8000"]          # reachable only through Caddy
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    stop_grace_period: 60s    # let in-flight streams finish on shutdown
+    deploy:
+      replicas: 1             # never scale: the queue lives in memory
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      queuerouter:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:
