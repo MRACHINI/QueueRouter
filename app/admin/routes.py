@@ -25,6 +25,7 @@ from fastapi.templating import Jinja2Templates
 from .. import __version__
 from ..auth import AuthGuard, client_ip
 from ..config import ON_LIMIT, PRIORITIES, TUNABLES, Bootstrap, ClientPolicy
+from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
 from ..params import parse_rules
 from ..presets import ARLIAI_PLANS, PRESETS, plan_for
 from ..pricing import PriceCatalog, resolve, summarize_usage
@@ -772,6 +773,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "models.html",
             session,
             aliases=store.list_aliases(),
+            triggers=TRIGGERS,
+            default_triggers=DEFAULT_TRIGGERS,
             upstreams=store.list_upstreams(),
             upstream_names=upstream_names,
             models=models,
@@ -817,11 +820,17 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         known = {u.id for u in store.list_upstreams()}
         upstream_ids = tuple(int(v) for k, v in form.items() if k.startswith("upstream_") and int(v) in known)
         params = _rules_text(form)
+        fallbacks = tuple(m.strip() for m in str(form.get("fallbacks", "")).replace("\n", ",").split(",") if m.strip())
+        if any(len(m) > 200 for m in fallbacks) or len(fallbacks) > 10:
+            raise ValueError("fallbacks")
+        fallback_on = tuple(t for t in TRIGGERS if form.get(f"on_{t}") == "on")
         return {
             "target_model": target,
             "upstream_ids": upstream_ids,
             "notes": str(form.get("notes", ""))[:300],
             "params": params,
+            "fallbacks": fallbacks,
+            "fallback_on": fallback_on,
         }
 
     @app.post("/admin/aliases")
@@ -839,6 +848,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 session.user.username,
                 notes=fields["notes"],
                 params=fields["params"],
+                fallbacks=fields["fallbacks"],
+                fallback_on=fields["fallback_on"],
             )
         except RulesError:
             return back("/admin/models", error="rules_invalid")

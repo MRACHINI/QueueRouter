@@ -46,10 +46,20 @@ def create_mock(limit: int = 2) -> FastAPI:
         if key and state["fails"].get(key, 0) < body.get("mock_fail", 0):
             state["fails"][key] = state["fails"].get(key, 0) + 1
             return JSONResponse({"error": {"message": "temporarily unavailable"}}, status_code=503)
+        # Per-model behaviour (for fallback chains): fail, block by policy, or refuse in text.
+        model = body.get("model")
+        state.setdefault("models", []).append(model)
+        if model in body.get("mock_fail_models", []):
+            return JSONResponse({"error": {"message": "model overloaded"}}, status_code=503)
+        if model in body.get("mock_policy_models", []):
+            return JSONResponse({"error": {"message": "Request blocked by content policy"}}, status_code=400)
+        refuse = model in body.get("mock_refuse_models", [])
 
         delay = body.get("mock_delay", 0.05)
         chunks = body.get("mock_chunks", 5)
         tag = body.get("mock_tag")
+        words = ["I can't ", "help with ", "that request."] if refuse else [f"t{i} " for i in range(chunks)]
+        chunks = len(words)
         state["active"] += 1
         state["peak"] = max(state["peak"], state["active"])
         state["log"].append(("start", tag))
@@ -66,7 +76,11 @@ def create_mock(limit: int = 2) -> FastAPI:
                 "object": "chat.completion",
                 "model": body.get("model"),
                 "choices": [
-                    {"index": 0, "message": {"role": "assistant", "content": f"hi {tag}"}, "finish_reason": "stop"}
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "".join(words) if refuse else f"hi {tag}"},
+                        "finish_reason": "stop",
+                    }
                 ],
                 "usage": {
                     "prompt_tokens": 10,
@@ -86,7 +100,7 @@ def create_mock(limit: int = 2) -> FastAPI:
                         "choices": [
                             {
                                 "index": 0,
-                                "delta": {"content": f"t{i} "},
+                                "delta": {"content": words[i]},
                                 "finish_reason": body.get("mock_finish", "stop") if i == chunks - 1 else None,
                             }
                         ],
