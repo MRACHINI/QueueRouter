@@ -9,6 +9,8 @@ import httpx
 
 from .upstream import upstream_headers
 
+FAILED_RETRY_S = 10  # retry a model list we never managed to fetch this often
+
 
 @dataclass
 class _Entry:
@@ -45,8 +47,12 @@ class Catalogs:
         return entry.models if entry and entry.ok else []
 
     def stale(self, upstream_id: int, max_age_s: float) -> bool:
+        """Due for a refresh. A list we never got is retried soon, not after ``max_age_s``."""
         entry = self._entries.get(upstream_id)
-        return entry is None or time.monotonic() - entry.fetched_at > max_age_s
+        if entry is None:
+            return True
+        age = time.monotonic() - entry.fetched_at
+        return age > (max_age_s if entry.ok else min(max_age_s, FAILED_RETRY_S))
 
     def describe(self, upstream_id: int) -> dict:
         entry = self._entries.get(upstream_id)

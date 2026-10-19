@@ -411,7 +411,14 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     def show_new_key(request: Request, session: AdminSession, name: str, key: str, regenerated: bool):
         base = bootstrap.public_url or f"{request.url.scheme}://{request.url.netloc}"
         return page(
-            request, "client_key.html", session, name=name, key=key, regenerated=regenerated, base_url=f"{base}/v1"
+            request,
+            "client_key.html",
+            session,
+            name=name,
+            key=key,
+            regenerated=regenerated,
+            base_url=f"{base}/v1",
+            site_url=base,
         )
 
     @app.get("/admin/clients")
