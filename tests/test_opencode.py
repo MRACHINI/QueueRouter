@@ -76,3 +76,19 @@ async def test_wellknown_behind_trusted_proxy(make_stack):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         manifest = (await c.get("/.well-known/opencode", headers=forwarded)).json()
     assert manifest["remote_config"]["url"] == "https://qr.example.com/v1/opencode-config"
+
+
+async def test_admin_download_of_client_config(make_stack):
+    stack = make_stack(bootstrap={**OWNER, "public_url": "https://qr.example.com"})
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        assert "opencode.json" in (await c.get("/admin/clients")).text
+        client = stack.app.state.store.list_clients()[0]
+        r = await c.get(f"/admin/clients/{client.id}/opencode.json")
+        assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
+        provider = r.json()["provider"]["queuerouter"]
+        assert provider["options"]["apiKey"] == f"{{env:{KEY_ENV}}}"  # the key itself is never exported
+        assert provider["options"]["baseURL"] == "https://qr.example.com/v1"
+        assert "mock-model" in provider["models"]
+        missing = await c.get("/admin/clients/9999/opencode.json")
+        assert missing.status_code == 303 and "client_unavailable" in missing.headers["location"]

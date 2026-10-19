@@ -35,6 +35,7 @@ shown once when created. Changes apply immediately.</p>
     </td>
     <td data-label="">
       <div class="row wrap">
+        <a class="button secondary" href="/admin/clients/{{ c.id }}/opencode.json" download title="opencode config with this client's models and limits">opencode.json</a>
         <form method="post" action="/admin/clients/{{ c.id }}/regenerate" data-confirm="Issue a new key for {{ c.name }}? The old key stops working immediately.">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <button type="submit" class="secondary">New key</button>
