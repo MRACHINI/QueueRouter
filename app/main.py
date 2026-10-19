@@ -228,9 +228,24 @@ def create_app(
             return False
         return limiter.wait_s(ticket.client, policy) <= 0  # on_limit=delay: wait in the queue
 
+    affinity: dict[str, tuple[int, float]] = {}  # session -> (upstream id, last used, monotonic)
+
     def on_grant(ticket) -> None:
         circuits.begin(ticket.target.upstream_id)
         limiter.record_request(ticket.client)
+        if ticket.session is not None:
+            affinity[ticket.session] = (ticket.target.upstream_id, time.monotonic())
+            if len(affinity) > 20_000:  # bound memory: drop the stalest half
+                for session, _ in sorted(affinity.items(), key=lambda kv: kv[1][1])[:10_000]:
+                    affinity.pop(session, None)
+
+    def sticky_upstream(session: str | None) -> int | None:
+        if not session or not cfg().sticky_routing:
+            return None
+        entry = affinity.get(session)
+        if entry is None or time.monotonic() - entry[1] > cfg().affinity_ttl_s:
+            return None
+        return entry[0]
 
     queue = SlotQueue(available=available, on_grant=on_grant, eligible=eligible)
 
@@ -563,8 +578,17 @@ def create_app(
         try:
             while True:
                 pool = tuple(c for c in adm.candidates if c.upstream_id not in excluded) or adm.candidates
+                preferred = sticky_upstream(adm.session)
                 ticket = queue.enqueue(
-                    adm.request_id, adm.client, adm.lane, adm.session, pool, first_enqueued, first_seq
+                    adm.request_id,
+                    adm.client,
+                    adm.lane,
+                    adm.session,
+                    pool,
+                    first_enqueued,
+                    first_seq,
+                    preferred=preferred if preferred not in excluded else None,
+                    prefer_wait_s=cfg().affinity_wait_s,
                 )
                 verdict = False
                 if first_enqueued is None:

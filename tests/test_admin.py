@@ -230,3 +230,11 @@ async def test_clients_page_needs_admin_role(admin_stack):
     async with httpx.AsyncClient(base_url=admin_stack.url) as op:
         await login(op, admin_stack.url, "op", "operator password")
         assert (await op.get("/admin/clients")).status_code == 403
+
+
+def test_every_switch_is_on_the_settings_page():
+    """Saving Settings treats an absent checkbox as "off"; every bool must be shown there."""
+    from app.admin.routes import SETTING_HELP
+    from app.config import TUNABLES
+
+    assert {n for n, kind in TUNABLES.items() if kind is bool} <= set(SETTING_HELP)

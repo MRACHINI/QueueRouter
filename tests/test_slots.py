@@ -258,3 +258,31 @@ async def test_failover_requeue_keeps_place():
     again = q.enqueue("early-again", enqueued_at=early.enqueued_at, seq=early.seq)
     q.cancel(holder)
     assert again.granted and not late.granted
+
+
+# -- sticky routing --------------------------------------------------------------------------
+
+
+async def test_sticky_upstream_preferred_when_free():
+    q = two_pools()
+    t = q.enqueue("x", candidates=(A, B), preferred=2)
+    assert t.target.upstream_id == 2  # least-busy alone would pick A (lower order)
+
+
+async def test_sticky_waits_briefly_for_busy_upstream():
+    q = two_pools()
+    holder = q.enqueue("holder", candidates=(B,))
+    t = q.enqueue("x", candidates=(A, B), preferred=2, prefer_wait_s=10)
+    assert not t.granted  # A is free, but we wait for B (warm cache)
+    q.cancel(holder)
+    assert t.granted and t.target.upstream_id == 2
+
+
+async def test_sticky_gives_up_after_wait_or_when_down():
+    q = two_pools()
+    q.enqueue("holder", candidates=(B,))
+    t = q.enqueue("x", candidates=(A, B), preferred=2, prefer_wait_s=0)
+    assert t.target.upstream_id == 1  # no patience: use the free one
+    down = two_pools(available=lambda uid: uid != 2)
+    t2 = down.enqueue("y", candidates=(A, B), preferred=2, prefer_wait_s=10)
+    assert t2.target.upstream_id == 1  # preferred upstream is down: don't wait

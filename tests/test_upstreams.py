@@ -177,3 +177,24 @@ async def test_control_headers_not_forwarded(make_stack):
     seen = stack.mock["last_headers"]
     assert "x-queuerouter-priority" not in seen and "x-session-id" not in seen
     assert seen.get("x-custom") == "kept"
+
+
+async def test_sticky_routing_returns_to_same_upstream(make_stack, make_mock):
+    stack = make_stack(limit=1, bootstrap=OWNER)
+    second_url, second = make_mock(limit=1)
+    api = "/v1/chat/completions"
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await add_upstream(c, "second", second_url)
+        # occupy upstream 1 so the conversation starts on upstream 2
+        blocker = asyncio.create_task(c.post(api, headers=stack.headers, json=chat("blocker", mock_delay=0.1)))
+        await asyncio.sleep(0.2)
+        convo = {"model": "mock-model", "messages": [{"role": "user", "content": "same conversation"}]}
+        assert (await c.post(api, headers=stack.headers, json={**convo, "mock_tag": "turn1"})).status_code == 200
+        await blocker
+        # both free now: least-busy alone would pick upstream 1, sticky routing picks 2 again
+        for turn in (2, 3):
+            r = await c.post(api, headers=stack.headers, json={**convo, "mock_tag": f"turn{turn}"})
+            assert r.status_code == 200
+    second_tags = [tag for event, tag in second["log"] if event == "start"]
+    assert second_tags == ["turn1", "turn2", "turn3"]

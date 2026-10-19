@@ -59,6 +59,8 @@ class Ticket:
     released: bool = False
     seq: int = field(default_factory=lambda: next(_ids))
     target: Candidate | None = None
+    preferred: int | None = None  # sticky upstream for this session
+    prefer_until: float = 0.0  # wait for the preferred upstream until then (monotonic)
 
     @property
     def granted(self) -> bool:
@@ -254,6 +256,8 @@ class SlotQueue:
         candidates: tuple[Candidate, ...] = DEFAULT_CANDIDATES,
         enqueued_at: float | None = None,
         seq: int | None = None,
+        preferred: int | None = None,
+        prefer_wait_s: float = 0.0,
     ) -> Ticket:
         """Create a ticket; it is granted immediately if it is first in line and a slot is free.
 
@@ -265,6 +269,9 @@ class SlotQueue:
             ticket.enqueued_at = enqueued_at
         if seq is not None:
             ticket.seq = seq
+        if preferred is not None and any(c.upstream_id == preferred for c in candidates):
+            ticket.preferred = preferred
+            ticket.prefer_until = time.monotonic() + prefer_wait_s
         self._waiters.append(ticket)
         self._dispatch()
         return ticket
@@ -369,6 +376,12 @@ class SlotQueue:
             options = [c for c in ticket.candidates if self._free(c.pool_id) > 0 and self.available(c.upstream_id)]
             if not options:
                 continue
+            if ticket.preferred is not None:
+                sticky = [c for c in options if c.upstream_id == ticket.preferred]
+                if sticky:
+                    options = sticky  # same upstream as last time: its prompt cache is warm
+                elif self.available(ticket.preferred) and time.monotonic() < ticket.prefer_until:
+                    continue  # it's only busy: wait a little for it (re-checked every second)
             self._waiters.remove(ticket)
             self._grant(ticket, self._pick(options))
             if not any(self._free(pid) > 0 for pid in self._pools):

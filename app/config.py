@@ -169,6 +169,9 @@ TUNABLES: dict[str, type] = {
     "request_log_days": int,
     "price_catalog_enabled": bool,
     "context_check": bool,
+    "sticky_routing": bool,
+    "affinity_ttl_s": float,
+    "affinity_wait_s": float,
     "lb_strategy": str,
     "circuit_threshold": int,
     "circuit_cooldown_s": float,
@@ -212,6 +215,9 @@ class Settings:
     request_log_days: int = 30  # per-request rows kept this long (0 = don't keep rows; daily totals always)
     price_catalog_enabled: bool = True  # fetch official prices from models.dev daily (for cost estimates)
     context_check: bool = True  # refuse prompts that clearly exceed the model's context before queuing
+    sticky_routing: bool = True  # send a conversation back to the upstream that served it (warm cache)
+    affinity_ttl_s: float = 1800  # forget a conversation's upstream after this long
+    affinity_wait_s: float = 5  # how long to wait for that upstream when it's busy
 
     # Several upstreams
     lb_strategy: str = "least-busy"  # least-busy | weighted | ordered (failover)
