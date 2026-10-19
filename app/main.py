@@ -24,7 +24,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from . import __version__
+from . import __version__, anthropic_api, responses_api
 from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
 from .alerts import Alerts
@@ -377,6 +377,7 @@ def create_app(
                 if cfg().request_log_days > 0:
                     await asyncio.to_thread(store.prune_requests, cfg().request_log_days)
                 await asyncio.to_thread(store.prune_notifications)
+                await asyncio.to_thread(store.prune_responses, responses_api.STORE_DAYS)
                 try:
                     await asyncio.to_thread(auto_backup, store, bootstrap.data_dir, cfg().backup_keep_days)
                 except Exception as exc:  # e.g. disk full: say so, keep serving
@@ -966,6 +967,155 @@ def create_app(
             return error_response(f"upstream unreachable: {type(exc).__name__}", 502, "upstream_error")
         return Response(resp.content, resp.status_code, headers=response_headers(resp.headers))
 
+    async def read_body(request: Request) -> bytes | JSONResponse:
+        """The request body, or a 413 when it's larger than allowed (also without Content-Length)."""
+        max_body = int(cfg().max_body_mb * 1024 * 1024)
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > max_body:
+            return error_response(f"request body exceeds {cfg().max_body_mb} MB", 413, "request_too_large")
+        chunks, size = [], 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > max_body:
+                return error_response(f"request body exceeds {cfg().max_body_mb} MB", 413, "request_too_large")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    # -- API adapters: Anthropic Messages and OpenAI Responses over chat completions ---------
+
+    def adapter_headers(request: Request, tag: str) -> dict[str, str]:
+        headers = {k: v for k, v in request.headers.items() if not k.lower().startswith("anthropic-")}
+        tags = headers.get("x-queuerouter-tags", "")
+        headers["x-queuerouter-tags"] = f"{tags},{tag}" if tags else tag
+        return headers
+
+    def kept_headers(response: Response) -> dict[str, str]:
+        return {
+            k: v
+            for k, v in response.headers.items()
+            if k.lower().startswith("x-queuerouter-") or k.lower() in ("x-request-id", "x-queue-wait-ms", "retry-after")
+        }
+
+    def anthropic_denied(response: Response) -> JSONResponse:
+        return JSONResponse(
+            anthropic_api.from_openai_error(response.status_code, response.body),
+            status_code=response.status_code,
+            headers=kept_headers(response),
+        )
+
+    @app.post("/v1/messages")
+    async def anthropic_messages(request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return anthropic_denied(denied)
+        body = await read_body(request)
+        if isinstance(body, Response):
+            return anthropic_denied(body)
+        try:
+            payload = json.loads(body)
+            chat = anthropic_api.to_chat(payload)
+        except ValueError as exc:
+            message = str(exc) if isinstance(exc, anthropic_api.Unsupported) else "the body must be JSON"
+            return JSONResponse(anthropic_api.error(400, message), status_code=400)
+        model = str(payload.get("model") or "")
+        response = await serve(
+            request,
+            client,
+            "chat/completions",
+            json.dumps(chat).encode(),
+            adapter_headers(request, "api:anthropic"),
+            "",
+        )
+        if isinstance(response, StreamingResponse):
+            return StreamingResponse(
+                anthropic_api.stream(response.body_iterator, model),
+                media_type="text/event-stream",
+                headers={**kept_headers(response), "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        if response.status_code >= 400:
+            return anthropic_denied(response)
+        try:
+            message = anthropic_api.from_chat(json.loads(response.body), model)
+        except (ValueError, AttributeError):
+            return JSONResponse(anthropic_api.error(502, "the upstream answer was not valid JSON"), status_code=502)
+        return JSONResponse(message, headers=kept_headers(response))
+
+    @app.post("/v1/messages/count_tokens")
+    async def anthropic_count_tokens(request: Request):
+        """An estimate (about 4 characters per token); good enough for clients deciding to compact."""
+        client, denied = authenticate(request)
+        if denied:
+            return anthropic_denied(denied)
+        body = await read_body(request)
+        if isinstance(body, Response):
+            return anthropic_denied(body)
+        try:
+            payload = json.loads(body)
+            material = json.dumps([payload.get("system"), payload.get("messages"), payload.get("tools")])
+        except (ValueError, AttributeError):
+            return JSONResponse(anthropic_api.error(400, "the body must be JSON"), status_code=400)
+        return {"input_tokens": max(1, len(material) // 4)}
+
+    @app.post("/v1/responses")
+    async def openai_responses(request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        body = await read_body(request)
+        if isinstance(body, Response):
+            return body
+        try:
+            payload = json.loads(body)
+            history: list[dict] = []
+            previous = payload.get("previous_response_id") if isinstance(payload, dict) else None
+            if previous:
+                found = await asyncio.to_thread(store.load_response, str(previous), client.name)
+                if found is None:
+                    return error_response(
+                        f"previous response '{previous}' not found (expired, not stored, or from another key)",
+                        400,
+                        "previous_response_not_found",
+                    )
+                history = found
+            chat, turn = responses_api.to_chat(payload, history)
+        except ValueError as exc:
+            message = str(exc) if isinstance(exc, responses_api.Unsupported) else "the body must be JSON"
+            return error_response(message, 400, "invalid_request_error")
+        model = str(payload.get("model") or "")
+        response_id = responses_api.new_id("resp")
+
+        def remember(final: dict) -> None:
+            if payload.get("store", True) is False or final.get("status") == "failed":
+                return
+            conversation = [*history, *turn, responses_api.assistant_message(final["output"])]
+            try:
+                store.save_response(response_id, client.name, conversation)
+            except Exception as exc:  # the answer itself still goes out
+                log.error(json.dumps({"event": "response_store_failed", "error": repr(exc)[:200]}))
+
+        response = await serve(
+            request,
+            client,
+            "chat/completions",
+            json.dumps(chat).encode(),
+            adapter_headers(request, "api:responses"),
+            "",
+        )
+        if isinstance(response, StreamingResponse):
+            return StreamingResponse(
+                responses_api.stream(response.body_iterator, payload, response_id, model, remember),
+                media_type="text/event-stream",
+                headers={**kept_headers(response), "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        if response.status_code >= 400:
+            return response
+        try:
+            final = responses_api.from_chat(json.loads(response.body), payload, response_id, model)
+        except (ValueError, AttributeError):
+            return error_response("the upstream answer was not valid JSON", 502, "upstream_error")
+        remember(final)
+        return JSONResponse(final, headers=kept_headers(response))
+
     @app.post("/v1/{path:path}")
     async def queued_post(path: str, request: Request):
         client, denied = authenticate(request)
@@ -974,20 +1124,18 @@ def create_app(
         if unavailable := not_configured() or mode_refusal():
             return unavailable
 
-        max_body = int(cfg().max_body_mb * 1024 * 1024)
-        declared = request.headers.get("content-length")
-        if declared and declared.isdigit() and int(declared) > max_body:
-            return error_response(f"request body exceeds {cfg().max_body_mb} MB", 413, "request_too_large")
-        chunks, size = [], 0
-        async for chunk in request.stream():  # bounded read, even without Content-Length
-            size += len(chunk)
-            if size > max_body:
-                return error_response(f"request body exceeds {cfg().max_body_mb} MB", 413, "request_too_large")
-            chunks.append(chunk)
-        return await serve(request, client, path, b"".join(chunks))
+        body = await read_body(request)
+        if isinstance(body, Response):
+            return body
+        return await serve(request, client, path, body)
 
     async def serve(
-        request: Request, client: ClientKey, path: str, body: bytes, headers: dict[str, str] | None = None
+        request: Request,
+        client: ClientKey,
+        path: str,
+        body: bytes,
+        headers: dict[str, str] | None = None,
+        query: str | None = None,
     ) -> Response:
         """Everything after authentication: policies, aliases/fallbacks, queueing, forwarding.
         Used by the API and by the admin Playground (which passes its own clean ``headers``)."""
@@ -1108,7 +1256,7 @@ def create_app(
             candidates,
             "POST",
             path,
-            request.url.query,
+            request.url.query if query is None else query,
             request_headers,
             body,
             rlog,
