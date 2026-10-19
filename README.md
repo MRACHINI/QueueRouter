@@ -284,7 +284,7 @@ Tests run in a throwaway container (they start mock upstreams that enforce their
 limit and return 429 beyond it):
 
 ```bash
-docker run --rm -v "$PWD":/src -w /src python:3.12-slim sh -c \
+docker run --rm -v "$PWD":/src -w /src python:3.14-slim sh -c \
   "pip install -q -r requirements-dev.txt && ruff check . && ruff format --check . && pytest -q -p no:cacheprovider"
 ```
 
