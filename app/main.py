@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import signal
 import sys
 import time
 import uuid
@@ -28,6 +29,7 @@ from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
 from .alerts import Alerts
 from .auth import AuthGuard, client_ip, find_client, ip_in, presented_key
+from .backup import auto_backup
 from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
@@ -375,6 +377,11 @@ def create_app(
                 if cfg().request_log_days > 0:
                     await asyncio.to_thread(store.prune_requests, cfg().request_log_days)
                 await asyncio.to_thread(store.prune_notifications)
+                try:
+                    await asyncio.to_thread(auto_backup, store, bootstrap.data_dir, cfg().backup_keep_days)
+                except Exception as exc:  # e.g. disk full: say so, keep serving
+                    log.error(json.dumps({"event": "auto_backup_failed", "error": repr(exc)[:200]}))
+                    alerts.fire("backup_failed", "", "Automatic backup failed", repr(exc)[:300])
             if time.monotonic() - last_health < HEALTH_INTERVAL_S:
                 continue
             last_health = time.monotonic()
@@ -423,6 +430,7 @@ def create_app(
     app.state.circuits = circuits
     app.state.prices = prices
     app.state.alerts = alerts
+    app.state.restart = lambda: os.kill(os.getpid(), signal.SIGTERM)  # Docker's restart policy starts us again
 
     # -- helpers ---------------------------------------------------------------------------
 
@@ -602,6 +610,7 @@ def create_app(
             playground,
             client_opencode_config,
             alerts,
+            lambda: app.state.restart(),
         ),
     )
 

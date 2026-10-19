@@ -426,6 +426,9 @@ class Store:
     @classmethod
     def open(cls, data_dir: str, secret_key: str | None) -> Store:
         check_data_dir(data_dir)
+        from .backup import apply_staged_restore  # imported here: backup imports this module
+
+        apply_staged_restore(data_dir)
         store = cls(os.path.join(data_dir, "queuerouter.db"), load_fernet(data_dir, secret_key))
         store.migrate()
         return store
@@ -433,6 +436,15 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+    def backup_to(self, dest: str) -> None:
+        """A consistent copy of the live database (SQLite online backup)."""
+        target = sqlite3.connect(dest)
+        try:
+            with self._lock:
+                self._db.backup(target)
+        finally:
+            target.close()
 
     # -- plumbing ------------------------------------------------------------------------
 

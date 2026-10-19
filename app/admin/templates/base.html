@@ -27,6 +27,7 @@
       <a href="/admin/models" {% if path == "/admin/models" %}aria-current="page"{% endif %}>Models</a>
       <a href="/admin/settings" {% if path == "/admin/settings" %}aria-current="page"{% endif %}>Settings</a>
       <a href="/admin/audit" {% if path == "/admin/audit" %}aria-current="page"{% endif %}>Audit</a>
+      {% if user.can("owner") %}<a href="/admin/backup" {% if path == "/admin/backup" %}aria-current="page"{% endif %}>Backup</a>{% endif %}
       {% endif %}
       {% if user.can("owner") %}
       <a href="/admin/users" {% if path == "/admin/users" %}aria-current="page"{% endif %}>Users</a>

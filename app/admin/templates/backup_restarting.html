@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Restoring{% endblock %}
+{% block main_class %}narrow{% endblock %}
+{% block content %}
+<h1>Restoring…</h1>
+<p>The backup checked out ({{ summary.clients }} clients, {{ summary.upstreams }} upstreams{% if summary.replaces_key %},
+with its encryption key{% endif %}). QueueRouter is restarting to load it; the current data was saved in
+<code>/data/backups</code>.</p>
+<p class="muted">This takes a few seconds. Then <a href="/admin/login">sign in again</a>.</p>
+{% endblock %}

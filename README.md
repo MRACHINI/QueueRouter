@@ -41,6 +41,9 @@ from a **web admin UI**.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.
+- **Backup and restore** (owner): download a zip (database + optional encryption key), daily
+  automatic copies in `/data/backups`, and restore from an upload or a listed copy — checked first,
+  then QueueRouter restarts itself to load it (the previous data is kept).
 - **Charts**: live running/queued chart on the dashboard (last 30 minutes); tokens, requests and
   cost per day on the Usage page (server-rendered SVG, no scripts from elsewhere).
 - **Usage tracking**: request log (metadata only, never content) and daily usage per client and
