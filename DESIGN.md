@@ -1002,6 +1002,19 @@ the slot.
 - `small_model` — point it at a smaller/faster ArliAI model if available; it still goes through
   the queue.
 
+**Status**: shipped as v0.1.0 and verified with opencode + ArliAI Pro (no 429s, queue absorbed
+bursts of side requests).
+
+### v0.2 — Scheduling for agents (pulled forward from 1a/1b)
+
+Motivated by v0.1 logs: opencode's side requests (titles, subagents) queued behind each other.
+Still env-configured, no UI/DB.
+- Named access keys with priority: `ACCESS_KEYS=name:key:priority`.
+- Priority lanes + aging (§6), `X-QueueRouter-Priority` (lower only).
+- Session-aware ordering ("finish what you started") with derived session keys (§11d).
+- Fair share between clients (round-robin per client; per-session fair share comes later).
+- Queue hints: response headers + `GET /v1/queue` (§11d); per-client and per-lane `/stats`.
+
 ### Phase 1a — Gateway core (usable end-to-end)
 Dispatcher (lanes, aging, priority header), multi-upstream load balancing, circuit breakers,
 retries, streaming keep-alive, client keys + policies (allow-list, rate limits, timeouts, caps),

@@ -1,24 +1,27 @@
-"""QueueRouter Phase 0: an OpenAI-compatible proxy that queues instead of exceeding the
-upstream's concurrency limit."""
+"""QueueRouter: an OpenAI-compatible proxy that queues instead of exceeding the upstream's
+concurrency limit."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from . import __version__
-from .auth import AuthGuard, client_ip, key_is_valid, presented_key
-from .config import Settings
-from .slots import SlotQueue
+from .auth import AuthGuard, client_ip, find_client, presented_key
+from .config import PRIORITIES, ClientKey, Settings
+from .sessions import session_key
+from .slots import LANE_NAMES, LANES, SlotQueue
 from .stats import Stats
 from .upstream import (
     UpstreamFailed,
@@ -55,10 +58,14 @@ class RequestLog:
             "method": method,
             "path": path,
             "ip": ip,
+            "client": None,
+            "priority": None,
+            "session": None,
             "model": None,
             "stream": False,
             "status": None,
             "outcome": None,
+            "position": 0,
             "queue_ms": None,
             "upstream_ms": None,
             "retries": 0,
@@ -71,9 +78,27 @@ class RequestLog:
         self.fields["total_ms"] = round((time.monotonic() - self.started) * 1000)
         f = self.fields
         stats.record(
-            f["outcome"], f["queue_ms"], f["upstream_ms"], f["retries"], f["prompt_tokens"], f["completion_tokens"]
+            f["outcome"],
+            f["queue_ms"],
+            f["upstream_ms"],
+            f["retries"],
+            f["prompt_tokens"],
+            f["completion_tokens"],
+            client=f["client"] or "default",
         )
         log.info(json.dumps(f))
+
+
+@dataclass
+class Admission:
+    """Everything the queue needs to know about one request."""
+
+    request_id: str
+    client: str
+    lane: int
+    session: str | None
+    rlog: RequestLog
+    hints: dict[str, str]
 
 
 def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
@@ -81,7 +106,15 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
     logging.basicConfig(level=settings.log_level, format="%(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # our own request log covers upstream calls
 
-    queue = SlotQueue(settings.max_concurrency, settings.min_spacing_ms)
+    clients = settings.clients
+    queue = SlotQueue(
+        settings.max_concurrency,
+        settings.min_spacing_ms,
+        aging_s=settings.aging_s,
+        session_window_s=settings.session_window_s,
+        session_aware=settings.session_aware,
+        fair_share=settings.fair_share,
+    )
     stats = Stats()
     guard = AuthGuard(settings.auth_fail_limit, settings.auth_block_s)
     models_cache: dict = {"at": 0.0, "status": 0, "body": b"", "headers": {}}
@@ -99,17 +132,20 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
             ),
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
-        log.info(
-            json.dumps(
-                {
-                    "event": "startup",
-                    "version": __version__,
-                    "upstream": settings.upstream_url,
-                    "max_concurrency": settings.max_concurrency,
-                    "auth": "keys" if settings.access_keys else "none",
-                }
-            )
-        )
+        startup = {
+            "event": "startup",
+            "version": __version__,
+            "upstream": settings.upstream_url,
+            "max_concurrency": settings.max_concurrency,
+            "clients": {c.name: c.priority for c in clients} or "no auth",
+            "scheduling": {
+                "aging_s": settings.aging_s,
+                "session_aware": settings.session_aware,
+                "session_window_s": settings.session_window_s,
+                "fair_share": settings.fair_share,
+            },
+        }
+        log.info(json.dumps(startup))
         yield
         await app.state.client.aclose()
 
@@ -119,19 +155,40 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
 
     # -- helpers ---------------------------------------------------------------------------
 
-    def authenticate(request: Request) -> JSONResponse | None:
+    def authenticate(request: Request) -> tuple[ClientKey | None, JSONResponse | None]:
+        """The calling client, or an error response to return instead."""
         ip = client_ip(request, settings)
         if remaining := guard.is_blocked(ip):
-            return error_response(
-                "too many failed authentication attempts",
-                429,
-                "auth_blocked",
-                **{"Retry-After": str(int(remaining) + 1)},
-            )
-        if not key_is_valid(presented_key(request), settings):
+            retry_after = {"Retry-After": str(int(remaining) + 1)}
+            return None, error_response("too many failed authentication attempts", 429, "auth_blocked", **retry_after)
+        client = find_client(presented_key(request), clients, settings.allow_no_auth)
+        if client is None:
             guard.fail(ip)
-            return error_response("invalid or missing API key", 401, "invalid_api_key")
-        return None
+            return None, error_response("invalid or missing API key", 401, "invalid_api_key")
+        return client, None
+
+    def request_lane(request: Request, client: ClientKey) -> int:
+        """Client's priority, optionally lowered (never raised) by X-QueueRouter-Priority."""
+        lane = LANES[client.priority]
+        wanted = request.headers.get("x-queuerouter-priority", "").strip().lower()
+        if wanted in PRIORITIES:
+            lane = max(lane, LANES[wanted])
+        return lane
+
+    def estimate_wait_ms(position: int) -> int:
+        """Rough wait before a request at ``position`` starts, from recent upstream durations."""
+        if position <= 0:
+            return 0
+        return round(math.ceil(position / queue.max_concurrency) * stats.avg_upstream_ms())
+
+    def queue_state() -> dict:
+        return {
+            "active": queue.active,
+            "queued": queue.queued,
+            "max_concurrency": queue.max_concurrency,
+            "oldest_wait_s": round(queue.oldest_wait_s(), 1),
+            **queue.snapshot(),
+        }
 
     def build_upstream_request(request: Request, path: str, body: bytes | None) -> httpx.Request:
         url = f"{settings.upstream_url}/{path}"
@@ -149,20 +206,33 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
 
     @app.get("/stats")
     async def get_stats(request: Request):
-        if denied := authenticate(request):
+        _, denied = authenticate(request)
+        if denied:
             return denied
+        return {"version": __version__, **queue_state(), **stats.snapshot()}
+
+    @app.get("/v1/queue")
+    async def get_queue(request: Request):
+        """Queue hints for orchestrators deciding how many requests to send at once."""
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        state = queue_state()
+        mine = state["clients"].get(client.name, {"queued": 0, "active": 0})
+        position = queue.predict_position(client.name, LANES[client.priority], None)
         return {
-            "version": __version__,
-            "active": queue.active,
-            "queued": queue.queued,
-            "max_concurrency": queue.max_concurrency,
-            "oldest_wait_s": round(queue.oldest_wait_s(), 1),
-            **stats.snapshot(),
+            "active": state["active"],
+            "queued": state["queued"],
+            "max_concurrency": state["max_concurrency"],
+            "queued_by_lane": state["queued_by_lane"],
+            "client": {"name": client.name, "priority": client.priority, **mine},
+            "estimated_wait_ms": estimate_wait_ms(position),
         }
 
     @app.get("/v1/models")
     async def models(request: Request):
-        if denied := authenticate(request):
+        _, denied = authenticate(request)
+        if denied:
             return denied
         now = time.monotonic()
         if models_cache["status"] != 200 or now - models_cache["at"] > settings.models_cache_s:
@@ -178,7 +248,8 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
     @app.get("/v1/{path:path}")
     async def passthrough_get(path: str, request: Request):
         """Non-generation GETs don't use a slot."""
-        if denied := authenticate(request):
+        _, denied = authenticate(request)
+        if denied:
             return denied
         try:
             resp = await app.state.client.send(build_upstream_request(request, path, None))
@@ -188,7 +259,8 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
 
     @app.post("/v1/{path:path}")
     async def queued_post(path: str, request: Request):
-        if denied := authenticate(request):
+        client, denied = authenticate(request)
+        if denied:
             return denied
 
         declared = request.headers.get("content-length")
@@ -202,28 +274,43 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
             chunks.append(chunk)
         body = b"".join(chunks)
 
-        request_id = f"qr-{uuid.uuid4().hex[:12]}"
-        rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, settings))
         try:
             payload = json.loads(body) if body else {}
         except ValueError:
             payload = {}
+
+        request_id = f"qr-{uuid.uuid4().hex[:12]}"
+        lane = request_lane(request, client)
+        session = session_key(request.headers, client.name, payload)
+        position = queue.predict_position(client.name, lane, session)
+        rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, settings))
+        rlog.fields.update(
+            client=client.name, priority=LANE_NAMES[lane], session=session and session[:8], position=position
+        )
         if isinstance(payload, dict):
             rlog.fields["model"] = payload.get("model")
             rlog.fields["stream"] = payload.get("stream") is True
 
+        hints = {
+            "X-Request-Id": request_id,
+            "X-QueueRouter-Queue-Depth": str(queue.queued),
+            "X-QueueRouter-Position": str(position),
+            "X-QueueRouter-Est-Wait-Ms": str(estimate_wait_ms(position)),
+            "X-QueueRouter-Slots": f"{queue.active}/{queue.max_concurrency}",
+        }
+        admission = Admission(request_id, client.name, lane, session, rlog, hints)
         upstream_request = build_upstream_request(request, path, body)
         if rlog.fields["stream"]:
             return StreamingResponse(
-                stream_flow(upstream_request, request_id, rlog),
+                stream_flow(upstream_request, admission),
                 media_type="text/event-stream",
-                headers={"X-Request-Id": request_id, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                headers={**hints, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        return await run_until_disconnect(request, nonstream_flow(upstream_request, request_id, rlog), rlog)
+        return await run_until_disconnect(request, nonstream_flow(upstream_request, admission))
 
     # -- non-streaming -------------------------------------------------------------------
 
-    async def run_until_disconnect(request: Request, work, rlog: RequestLog) -> Response:
+    async def run_until_disconnect(request: Request, work) -> Response:
         """Run ``work`` but cancel it (freeing its slot) if the client goes away."""
         task = asyncio.ensure_future(work)
         while True:
@@ -238,8 +325,9 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
                     pass
                 return Response(status_code=499)
 
-    async def nonstream_flow(upstream_request: httpx.Request, request_id: str, rlog: RequestLog) -> Response:
-        ticket = queue.enqueue(request_id)
+    async def nonstream_flow(upstream_request: httpx.Request, adm: Admission) -> Response:
+        rlog = adm.rlog
+        ticket = queue.enqueue(adm.request_id, adm.client, adm.lane, adm.session)
         outcome, status, waits = "error", 500, []
         upstream_started = None
         try:
@@ -274,7 +362,8 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
             prompt, completion = usage_from_body(content) if status < 400 else (None, None)
             rlog.fields.update(prompt_tokens=prompt, completion_tokens=completion)
             headers = response_headers(response.headers)
-            headers.update({"X-Request-Id": request_id, "X-Queue-Wait-Ms": str(rlog.fields["queue_ms"])})
+            headers.update(adm.hints)
+            headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])
             return Response(content, status, headers=headers)
         except UpstreamFailed as exc:
             status = exc.status
@@ -292,8 +381,9 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
 
     # -- streaming -----------------------------------------------------------------------
 
-    async def stream_flow(upstream_request: httpx.Request, request_id: str, rlog: RequestLog) -> AsyncIterator[bytes]:
-        ticket = queue.enqueue(request_id)
+    async def stream_flow(upstream_request: httpx.Request, adm: Admission) -> AsyncIterator[bytes]:
+        rlog = adm.rlog
+        ticket = queue.enqueue(adm.request_id, adm.client, adm.lane, adm.session)
         outcome, status, waits = "error", 200, []
         upstream_started = None
         response = None
@@ -301,7 +391,9 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
         keepalive = settings.keepalive_interval_s
         try:
             if not ticket.granted:
-                yield f": queued id={request_id} position={queue.position(ticket)}\n\n".encode()
+                position = queue.position(ticket)
+                note = f": queued id={adm.request_id} position={position} est_wait_ms={estimate_wait_ms(position)}\n\n"
+                yield note.encode()
             while not await queue.wait(ticket, keepalive):
                 if settings.max_queue_wait_s and ticket.wait_s >= settings.max_queue_wait_s:
                     outcome, status = "timeout", 504

@@ -9,7 +9,7 @@ from collections import deque
 
 from fastapi import Request
 
-from .config import Settings
+from .config import ClientKey, Settings
 
 
 def client_ip(request: Request, settings: Settings) -> str:
@@ -40,16 +40,21 @@ def presented_key(request: Request) -> str | None:
     return request.headers.get("x-api-key")
 
 
-def key_is_valid(key: str | None, settings: Settings) -> bool:
-    if settings.allow_no_auth and not settings.access_keys:
-        return True
+ANONYMOUS = ClientKey("anonymous", "", "normal")
+
+
+def find_client(key: str | None, clients: tuple[ClientKey, ...], allow_no_auth: bool) -> ClientKey | None:
+    """The client owning ``key``; ANONYMOUS when auth is disabled; None if not authorised."""
+    if allow_no_auth and not clients:
+        return ANONYMOUS
     if not key:
-        return False
+        return None
     # Compare against every key so timing doesn't reveal which one matched.
-    matched = False
-    for valid in settings.access_keys:
-        matched |= hmac.compare_digest(key.encode(), valid.encode())
-    return matched
+    found = None
+    for client in clients:
+        if hmac.compare_digest(key.encode(), client.key.encode()):
+            found = client
+    return found
 
 
 class AuthGuard:
