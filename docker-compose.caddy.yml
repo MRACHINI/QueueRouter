@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
+    volumes:
+      - qr_data:/data         # database, secret key, backups: back this up
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
     stop_grace_period: 60s    # let in-flight streams finish on shutdown
@@ -32,5 +34,6 @@ services:
         condition: service_healthy
 
 volumes:
+  qr_data:
   caddy_data:
   caddy_config:

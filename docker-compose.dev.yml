@@ -7,5 +7,10 @@ services:
     ports: ["127.0.0.1:8000:8000"]
     read_only: true
     tmpfs: [/tmp]
+    volumes:
+      - qr_data:/data         # database, secret key, backups: back this up
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
+
+volumes:
+  qr_data:

@@ -10,7 +10,7 @@ import time
 import pytest
 import uvicorn
 
-from app.config import Settings
+from app.config import Bootstrap, Settings
 from app.main import create_app
 from tests.mock_upstream import create_mock
 
@@ -42,11 +42,15 @@ class Stack:
     url: str
     mock: dict
     headers: dict
+    app: object = None
 
 
 @pytest.fixture
-def make_stack():
-    """Factory: make_stack(limit=2, **settings_overrides) -> Stack."""
+def make_stack(tmp_path_factory):
+    """Factory: make_stack(limit=2, **settings_overrides) -> Stack.
+
+    Each stack gets a fresh data directory; the settings are imported as on a first start.
+    """
     servers: list[ServerThread] = []
 
     def factory(limit: int = 2, **overrides) -> Stack:
@@ -62,13 +66,14 @@ def make_stack():
             keepalive_interval_s=0.2,
             retry_base_delay_s=0.05,
             retry_max_delay_s=0.2,
-            log_level="WARNING",
         )
         settings = dataclasses.replace(settings, **overrides)
-        proxy_server = ServerThread(create_app(settings))
+        bootstrap = Bootstrap(data_dir=str(tmp_path_factory.mktemp("data")), log_level="WARNING")
+        app = create_app(bootstrap, seed=settings)
+        proxy_server = ServerThread(app)
         proxy_url = proxy_server.__enter__()
         servers.append(proxy_server)
-        return Stack(proxy_url, mock_app.state.mock, {"Authorization": f"Bearer {ACCESS_KEY}"})
+        return Stack(proxy_url, mock_app.state.mock, {"Authorization": f"Bearer {ACCESS_KEY}"}, app)
 
     yield factory
     for server in reversed(servers):

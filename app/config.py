@@ -1,25 +1,43 @@
-"""Settings, read from environment variables (see .env.example).
+"""Configuration.
 
-These move into the database / web UI in Phase 1a.
+Two layers:
+- ``Bootstrap``: the few settings that must exist before the database opens (data dir,
+  secret key, proxies, logging, first admin). Always from environment variables.
+- ``Settings``: runtime knobs. Stored in the database and edited in the admin UI; on the very
+  first start they are imported once from the environment (see ``Settings.from_env``).
 """
+
+from __future__ import annotations
 
 import ipaddress
 import os
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 PRIORITIES = ("high", "normal", "low")
+DEFAULT_TRUSTED_PROXIES = "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16,127.0.0.1/32"
+
+Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
 @dataclass(frozen=True)
 class ClientKey:
+    """An authenticated caller. The key itself is only ever stored hashed."""
+
     name: str
-    key: str
+    key_hash: str
     priority: str = "normal"
 
 
-def parse_access_keys(entries: tuple[str, ...]) -> tuple[ClientKey, ...]:
+class ParsedKey(NamedTuple):
+    name: str
+    key: str
+    priority: str
+
+
+def parse_access_keys(entries: tuple[str, ...]) -> tuple[ParsedKey, ...]:
     """Parse ACCESS_KEYS entries: ``key``, ``name:key`` or ``name:key:priority``."""
-    clients = []
+    parsed = []
     for i, entry in enumerate(entries, 1):
         parts = [p.strip() for p in entry.split(":")]
         if len(parts) == 1:
@@ -34,11 +52,11 @@ def parse_access_keys(entries: tuple[str, ...]) -> tuple[ClientKey, ...]:
             raise ValueError(f"ACCESS_KEYS entry #{i} has an empty name or key")
         if priority not in PRIORITIES:
             raise ValueError(f"ACCESS_KEYS entry #{i}: priority must be one of {', '.join(PRIORITIES)}")
-        clients.append(ClientKey(name, key, priority))
-    names = [c.name for c in clients]
+        parsed.append(ParsedKey(name, key, priority))
+    names = [p.name for p in parsed]
     if len(set(names)) != len(names):
         raise ValueError("ACCESS_KEYS client names must be unique")
-    return tuple(clients)
+    return tuple(parsed)
 
 
 def _int(env: dict[str, str], name: str, default: int) -> int:
@@ -55,6 +73,58 @@ def _bool(env: dict[str, str], name: str, default: bool) -> bool:
 
 def _list(env: dict[str, str], name: str, default: str = "") -> list[str]:
     return [p.strip() for p in env.get(name, default).split(",") if p.strip()]
+
+
+def _networks(env: dict[str, str], name: str, default: str) -> tuple[Network, ...]:
+    return tuple(ipaddress.ip_network(p, strict=False) for p in _list(env, name, default))
+
+
+@dataclass(frozen=True)
+class Bootstrap:
+    data_dir: str = "/data"
+    secret_key: str | None = None  # None = generated into <data_dir>/secret.key
+    trusted_proxies: tuple[Network, ...] = field(default_factory=tuple)
+    log_level: str = "INFO"
+    admin_username: str | None = None
+    admin_password: str | None = None
+    admin_allowed_ips: tuple[Network, ...] = field(default_factory=tuple)  # empty = any
+    public_url: str | None = None
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> Bootstrap:
+        env = dict(os.environ if env is None else env)
+        return cls(
+            data_dir=env.get("DATA_DIR", cls.data_dir),
+            secret_key=env.get("SECRET_KEY") or None,
+            trusted_proxies=_networks(env, "TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES),
+            log_level=env.get("LOG_LEVEL", cls.log_level).upper(),
+            admin_username=env.get("ADMIN_USERNAME") or None,
+            admin_password=env.get("ADMIN_PASSWORD") or None,
+            admin_allowed_ips=_networks(env, "ADMIN_ALLOWED_IPS", ""),
+            public_url=(env.get("PUBLIC_URL") or "").rstrip("/") or None,
+        )
+
+
+# Runtime knobs kept in the database "settings" table (name -> type). Upstream URL/key and
+# concurrency live in the upstreams / limit_pools tables instead.
+TUNABLES: dict[str, type] = {
+    "max_queue_wait_s": float,
+    "keepalive_interval_s": float,
+    "aging_s": float,
+    "session_aware": bool,
+    "session_window_s": float,
+    "fair_share": bool,
+    "max_retries": int,
+    "retry_base_delay_s": float,
+    "retry_max_delay_s": float,
+    "upstream_connect_timeout_s": float,
+    "upstream_read_timeout_s": float,
+    "allow_no_auth": bool,
+    "max_body_mb": float,
+    "auth_fail_limit": int,
+    "auth_block_s": float,
+    "models_cache_s": float,
+}
 
 
 @dataclass(frozen=True)
@@ -84,18 +154,16 @@ class Settings:
     upstream_read_timeout_s: float = 600
 
     # Client access
-    access_keys: tuple[str, ...] = ()
+    access_keys: tuple[str, ...] = ()  # only used for the first-start import
     allow_no_auth: bool = False
-    trusted_proxies: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = field(default_factory=tuple)
     max_body_mb: float = 20
     auth_fail_limit: int = 10  # failures per minute per IP before blocking
     auth_block_s: float = 300
 
     models_cache_s: float = 300
-    log_level: str = "INFO"
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
+    def from_env(cls, env: dict[str, str] | None = None) -> Settings:
         env = dict(os.environ if env is None else env)
         return cls(
             upstream_url=env.get("UPSTREAM_URL", cls.upstream_url).rstrip("/"),
@@ -115,27 +183,11 @@ class Settings:
             upstream_read_timeout_s=_float(env, "UPSTREAM_READ_TIMEOUT_S", cls.upstream_read_timeout_s),
             access_keys=tuple(_list(env, "ACCESS_KEYS")),
             allow_no_auth=_bool(env, "ALLOW_NO_AUTH", False),
-            trusted_proxies=tuple(
-                ipaddress.ip_network(p, strict=False)
-                for p in _list(env, "TRUSTED_PROXIES", "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16,127.0.0.1/32")
-            ),
             max_body_mb=_float(env, "MAX_BODY_MB", cls.max_body_mb),
             auth_fail_limit=_int(env, "AUTH_FAIL_LIMIT", cls.auth_fail_limit),
             auth_block_s=_float(env, "AUTH_BLOCK_S", cls.auth_block_s),
             models_cache_s=_float(env, "MODELS_CACHE_S", cls.models_cache_s),
-            log_level=env.get("LOG_LEVEL", cls.log_level).upper(),
         )
 
-    def validate(self) -> None:
-        """Refuse to start with an unsafe or unusable configuration."""
-        if not self.upstream_api_key:
-            raise ValueError("ARLIAI_API_KEY is required")
-        if self.max_concurrency < 1:
-            raise ValueError("MAX_CONCURRENCY must be >= 1")
-        if not self.access_keys and not self.allow_no_auth:
-            raise ValueError("ACCESS_KEYS is required (or set ALLOW_NO_AUTH=true on a private network)")
-        parse_access_keys(self.access_keys)
-
-    @property
-    def clients(self) -> tuple[ClientKey, ...]:
-        return parse_access_keys(self.access_keys)
+    def tunables(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in TUNABLES}

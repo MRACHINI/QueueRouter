@@ -1,0 +1,463 @@
+"""SQLite persistence: configuration edited in the admin UI, users, audit log.
+
+Small synchronous operations behind a lock; every call is well under a millisecond, so they
+run directly on the event loop. Secrets are encrypted with Fernet; client keys are stored only
+as SHA-256 hashes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import secrets
+import shutil
+import sqlite3
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+
+from cryptography.fernet import Fernet, InvalidToken
+
+from .config import PRIORITIES, TUNABLES, Settings, parse_access_keys
+
+log = logging.getLogger("queuerouter")
+
+MIGRATIONS: list[str] = [
+    # 1: initial schema
+    """
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE limit_pools (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        plan TEXT,
+        max_concurrency INTEGER NOT NULL CHECK (max_concurrency >= 1),
+        context_cap INTEGER,
+        min_spacing_ms INTEGER NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL
+    );
+    CREATE TABLE upstreams (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        preset TEXT,
+        base_url TEXT NOT NULL,
+        api_key_enc TEXT NOT NULL,
+        pool_id INTEGER NOT NULL REFERENCES limit_pools(id),
+        weight INTEGER NOT NULL DEFAULT 1,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        paused INTEGER NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL
+    );
+    CREATE TABLE clients (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        key_hash TEXT NOT NULL UNIQUE,
+        key_prefix TEXT NOT NULL,
+        priority TEXT NOT NULL DEFAULT 'normal',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        expires_at REAL,
+        notes TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL
+    );
+    CREATE TABLE admin_users (
+        id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL,
+        can_view_content INTEGER NOT NULL DEFAULT 0,
+        totp_secret_enc TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at REAL NOT NULL
+    );
+    CREATE TABLE admin_sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+        csrf TEXT NOT NULL,
+        ip TEXT,
+        created_at REAL NOT NULL,
+        last_seen REAL NOT NULL,
+        expires_at REAL NOT NULL
+    );
+    CREATE TABLE audit_log (
+        id INTEGER PRIMARY KEY,
+        ts REAL NOT NULL,
+        actor TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target TEXT NOT NULL DEFAULT '',
+        detail TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX audit_log_ts ON audit_log(ts);
+    """,
+]
+
+
+_UPSERT = "INSERT INTO {table} (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+
+
+def hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def new_client_key() -> str:
+    return "qr-" + secrets.token_urlsafe(32)
+
+
+@dataclass(frozen=True)
+class Pool:
+    id: int
+    name: str
+    plan: str | None
+    max_concurrency: int
+    context_cap: int | None
+    min_spacing_ms: int
+
+
+@dataclass(frozen=True)
+class Upstream:
+    id: int
+    name: str
+    preset: str | None
+    base_url: str
+    pool_id: int
+    weight: int
+    enabled: bool
+    paused: bool
+
+
+@dataclass(frozen=True)
+class Client:
+    id: int
+    name: str
+    key_hash: str
+    key_prefix: str
+    priority: str
+    enabled: bool
+    expires_at: float | None
+    notes: str
+    created_at: float
+
+    @property
+    def expired(self) -> bool:
+        return self.expires_at is not None and self.expires_at <= time.time()
+
+
+def load_fernet(data_dir: str, secret_key: str | None) -> Fernet:
+    """Fernet from SECRET_KEY, or from <data_dir>/secret.key (created on first start)."""
+    if secret_key:
+        return Fernet(secret_key.encode())
+    path = os.path.join(data_dir, "secret.key")
+    if not os.path.exists(path):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(Fernet.generate_key())
+        log.info(json.dumps({"event": "secret_key_created", "path": path}))
+    with open(path, "rb") as f:
+        return Fernet(f.read().strip())
+
+
+class Store:
+    def __init__(self, path: str, fernet: Fernet) -> None:
+        self.path = path
+        self.fernet = fernet
+        self._lock = threading.RLock()
+        self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA foreign_keys=ON")
+        self._db.execute("PRAGMA busy_timeout=5000")
+
+    @classmethod
+    def open(cls, data_dir: str, secret_key: str | None) -> Store:
+        os.makedirs(data_dir, exist_ok=True)
+        store = cls(os.path.join(data_dir, "queuerouter.db"), load_fernet(data_dir, secret_key))
+        store.migrate()
+        return store
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+    # -- plumbing ------------------------------------------------------------------------
+
+    @contextmanager
+    def tx(self) -> Iterator[sqlite3.Connection]:
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._db
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+            self._db.execute("COMMIT")
+
+    def query(self, sql: str, params: tuple | dict = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._db.execute(sql, params).fetchall()
+
+    def encrypt(self, value: str) -> str:
+        return self.fernet.encrypt(value.encode()).decode()
+
+    def decrypt(self, token: str) -> str:
+        try:
+            return self.fernet.decrypt(token.encode()).decode()
+        except InvalidToken as exc:
+            raise RuntimeError("cannot decrypt a stored secret: SECRET_KEY / secret.key changed?") from exc
+
+    def schema_version(self) -> int:
+        with self._lock:
+            return self._db.execute("PRAGMA user_version").fetchone()[0]
+
+    def migrate(self) -> None:
+        current = self.schema_version()
+        if current > len(MIGRATIONS):
+            raise RuntimeError(f"database schema v{current} is newer than this QueueRouter (v{len(MIGRATIONS)})")
+        if current == len(MIGRATIONS):
+            return
+        if current > 0 and os.path.exists(self.path):
+            backup_dir = os.path.join(os.path.dirname(self.path), "backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            backup = os.path.join(backup_dir, f"queuerouter-v{current}-{int(time.time())}.db")
+            with self._lock:
+                self._db.execute("PRAGMA wal_checkpoint(FULL)")
+            shutil.copy2(self.path, backup)
+            log.info(json.dumps({"event": "db_backup", "path": backup}))
+        for version in range(current + 1, len(MIGRATIONS) + 1):
+            with self._lock:
+                self._db.executescript(f"BEGIN;\n{MIGRATIONS[version - 1]}\nPRAGMA user_version={version};\nCOMMIT;")
+            log.info(json.dumps({"event": "db_migrated", "version": version}))
+
+    def audit(self, actor: str, action: str, target: str = "", detail: object = "") -> None:
+        text = detail if isinstance(detail, str) else json.dumps(detail, default=str)
+        with self.tx() as db:
+            db.execute(
+                "INSERT INTO audit_log (ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)",
+                (time.time(), actor, action, target, text),
+            )
+
+    # -- meta / first start --------------------------------------------------------------
+
+    def get_meta(self, key: str) -> str | None:
+        rows = self.query("SELECT value FROM meta WHERE key = ?", (key,))
+        return rows[0]["value"] if rows else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self.tx() as db:
+            db.execute(_UPSERT.format(table="meta"), (key, value))
+
+    @property
+    def initialized(self) -> bool:
+        return self.get_meta("initialized") is not None
+
+    def import_settings(self, seed: Settings, source: str = "environment") -> dict:
+        """One-time import of env configuration on first start. Returns a summary."""
+        summary = {"settings": 0, "upstream": None, "clients": []}
+        parsed = parse_access_keys(seed.access_keys)
+        with self.tx() as db:
+            for name, value in seed.tunables().items():
+                db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (name, json.dumps(value)))
+                summary["settings"] += 1
+            if seed.upstream_api_key:
+                now = time.time()
+                is_arliai = "arliai.com" in seed.upstream_url
+                cur = db.execute(
+                    "INSERT INTO limit_pools (name, plan, max_concurrency, context_cap, min_spacing_ms, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        "arliai-main" if is_arliai else "main",
+                        None,
+                        seed.max_concurrency,
+                        None,
+                        seed.min_spacing_ms,
+                        now,
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO upstreams (name, preset, base_url, api_key_enc, pool_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        "arliai" if is_arliai else "upstream",
+                        "arliai" if is_arliai else "custom",
+                        seed.upstream_url,
+                        self.encrypt(seed.upstream_api_key),
+                        cur.lastrowid,
+                        now,
+                    ),
+                )
+                summary["upstream"] = seed.upstream_url
+            for p in parsed:
+                db.execute(
+                    "INSERT INTO clients (name, key_hash, key_prefix, priority, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (p.name, hash_key(p.key), p.key[:6], p.priority, time.time()),
+                )
+                summary["clients"].append(p.name)
+            db.execute("INSERT INTO meta (key, value) VALUES ('initialized', ?)", (str(time.time()),))
+            db.execute("INSERT INTO meta (key, value) VALUES ('imported_from', ?)", (source,))
+        self.audit("system", "import", source, summary)
+        return summary
+
+    # -- settings ------------------------------------------------------------------------
+
+    def get_tunables(self) -> dict[str, object]:
+        values = {}
+        for row in self.query("SELECT key, value FROM settings"):
+            if row["key"] in TUNABLES:
+                values[row["key"]] = TUNABLES[row["key"]](json.loads(row["value"]))
+        return values
+
+    def set_tunables(self, values: dict[str, object], actor: str) -> None:
+        unknown = set(values) - set(TUNABLES)
+        if unknown:
+            raise ValueError(f"unknown settings: {', '.join(sorted(unknown))}")
+        with self.tx() as db:
+            for name, value in values.items():
+                db.execute(_UPSERT.format(table="settings"), (name, json.dumps(TUNABLES[name](value))))
+        self.audit(actor, "settings.update", "", values)
+
+    # -- pools and upstreams -------------------------------------------------------------
+
+    def list_pools(self) -> list[Pool]:
+        return [
+            Pool(r["id"], r["name"], r["plan"], r["max_concurrency"], r["context_cap"], r["min_spacing_ms"])
+            for r in self.query("SELECT * FROM limit_pools ORDER BY id")
+        ]
+
+    def list_upstreams(self) -> list[Upstream]:
+        return [
+            Upstream(
+                r["id"],
+                r["name"],
+                r["preset"],
+                r["base_url"],
+                r["pool_id"],
+                r["weight"],
+                bool(r["enabled"]),
+                bool(r["paused"]),
+            )
+            for r in self.query("SELECT * FROM upstreams ORDER BY id")
+        ]
+
+    def upstream_key(self, upstream_id: int) -> str:
+        rows = self.query("SELECT api_key_enc FROM upstreams WHERE id = ?", (upstream_id,))
+        if not rows:
+            raise KeyError(upstream_id)
+        return self.decrypt(rows[0]["api_key_enc"])
+
+    def create_pool(
+        self,
+        name: str,
+        max_concurrency: int,
+        actor: str,
+        plan: str | None = None,
+        context_cap: int | None = None,
+        min_spacing_ms: int = 0,
+    ) -> int:
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT INTO limit_pools (name, plan, max_concurrency, context_cap, min_spacing_ms, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (name, plan, max_concurrency, context_cap, min_spacing_ms, time.time()),
+            )
+        self.audit(actor, "pool.create", name, {"max_concurrency": max_concurrency, "plan": plan})
+        return cur.lastrowid
+
+    def update_pool(self, pool_id: int, actor: str, **fields: object) -> None:
+        allowed = {"name", "plan", "max_concurrency", "context_cap", "min_spacing_ms"}
+        self._update("limit_pools", pool_id, allowed, fields)
+        self.audit(actor, "pool.update", str(pool_id), fields)
+
+    def create_upstream(
+        self,
+        name: str,
+        base_url: str,
+        api_key: str,
+        pool_id: int,
+        actor: str,
+        preset: str | None = None,
+        weight: int = 1,
+    ) -> int:
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT INTO upstreams (name, preset, base_url, api_key_enc, pool_id, weight, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (name, preset, base_url.rstrip("/"), self.encrypt(api_key), pool_id, weight, time.time()),
+            )
+        self.audit(actor, "upstream.create", name, {"base_url": base_url, "pool_id": pool_id})
+        return cur.lastrowid
+
+    def update_upstream(self, upstream_id: int, actor: str, **fields: object) -> None:
+        if "api_key" in fields:
+            fields["api_key_enc"] = self.encrypt(str(fields.pop("api_key")))
+        allowed = {"name", "preset", "base_url", "api_key_enc", "pool_id", "weight", "enabled", "paused"}
+        self._update("upstreams", upstream_id, allowed, fields)
+        self.audit(actor, "upstream.update", str(upstream_id), {k: v for k, v in fields.items() if k != "api_key_enc"})
+
+    # -- clients -------------------------------------------------------------------------
+
+    def list_clients(self) -> list[Client]:
+        return [
+            Client(
+                r["id"],
+                r["name"],
+                r["key_hash"],
+                r["key_prefix"],
+                r["priority"],
+                bool(r["enabled"]),
+                r["expires_at"],
+                r["notes"],
+                r["created_at"],
+            )
+            for r in self.query("SELECT * FROM clients ORDER BY name")
+        ]
+
+    def create_client(
+        self, name: str, actor: str, priority: str = "normal", notes: str = "", expires_at: float | None = None
+    ) -> str:
+        """Create a client and return its new key (shown once, stored only hashed)."""
+        if priority not in PRIORITIES:
+            raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
+        key = new_client_key()
+        with self.tx() as db:
+            db.execute(
+                "INSERT INTO clients (name, key_hash, key_prefix, priority, notes, expires_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (name, hash_key(key), key[:6], priority, notes, expires_at, time.time()),
+            )
+        self.audit(actor, "client.create", name, {"priority": priority})
+        return key
+
+    def update_client(self, client_id: int, actor: str, **fields: object) -> None:
+        if "priority" in fields and fields["priority"] not in PRIORITIES:
+            raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
+        self._update("clients", client_id, {"name", "priority", "enabled", "expires_at", "notes"}, fields)
+        self.audit(actor, "client.update", str(client_id), fields)
+
+    def regenerate_client_key(self, client_id: int, actor: str) -> str:
+        key = new_client_key()
+        fields = {"key_hash": hash_key(key), "key_prefix": key[:6]}
+        self._update("clients", client_id, set(fields), fields)
+        self.audit(actor, "client.regenerate_key", str(client_id))
+        return key
+
+    def delete_client(self, client_id: int, actor: str) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM clients WHERE id = ?", (client_id,))
+        self.audit(actor, "client.delete", str(client_id))
+
+    # -- helpers -------------------------------------------------------------------------
+
+    def _update(self, table: str, row_id: int, allowed: set[str], fields: dict[str, object]) -> None:
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"cannot update {', '.join(sorted(bad))}")
+        if not fields:
+            return
+        columns = ", ".join(f"{name} = ?" for name in fields)
+        values = [int(v) if isinstance(v, bool) else v for v in fields.values()]
+        with self.tx() as db:
+            cur = db.execute(f"UPDATE {table} SET {columns} WHERE id = ?", (*values, row_id))  # noqa: S608
+            if cur.rowcount == 0:
+                raise KeyError(row_id)

@@ -8,6 +8,8 @@ services:
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
+    volumes:
+      - qr_data:/data         # database, secret key, backups: back this up
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
     stop_grace_period: 60s    # let in-flight streams finish on shutdown
@@ -30,3 +32,6 @@ networks:
   traefik:
     name: ${TRAEFIK_NETWORK:-traefik}
     external: true
+
+volumes:
+  qr_data:

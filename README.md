@@ -11,6 +11,11 @@ title generation, subagents) — more than ArliAI Pro's 2 parallel requests.
 > Status: **v0.2** — single upstream, configured with environment variables.
 > The full roadmap (web admin UI, multiple upstreams, aliases, fallbacks, async jobs…) is in
 > [DESIGN.md](DESIGN.md).
+>
+> **`main` is mid-way through Phase 1a**: configuration now lives in a database under `/data`
+> (mount a volume there). On the first start the environment variables are imported once; after
+> that the database is the source of truth and will be edited in the upcoming admin UI.
+> Stay on `:latest` / `:0.2` until v0.3 is tagged.
 
 ## How it works
 
