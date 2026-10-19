@@ -2,3 +2,4 @@
 !app/
 !requirements.txt
 **/__pycache__
+!docker/

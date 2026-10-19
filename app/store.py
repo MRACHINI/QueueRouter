@@ -295,7 +295,9 @@ def check_data_dir(data_dir: str) -> None:
     )
     raise DataDirError(
         f"{', '.join(problems)} is not writable by this container (running as {uid}:{gid}; "
-        f"{data_dir} is owned by {owner}). Fix it on the Docker host with one of:\n"
+        f"{data_dir} is owned by {owner}). Fix it with one of:\n"
+        "  - let the container fix it: remove `user:` from the service and add\n"
+        "    cap_add: [CHOWN, SETUID, SETGID]  (set PUID/PGID to choose the owner)\n"
         f"  - named volume:  docker run --rm -v <volume>:{data_dir} alpine chown -R {uid}:{gid} {data_dir}\n"
         f"  - bind mount:    sudo chown -R {uid}:{gid} /path/on/host\n"
         f"{run_as_owner}"
