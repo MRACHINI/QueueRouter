@@ -16,7 +16,7 @@ import signal
 import sys
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -25,6 +25,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from . import __version__, anthropic_api, responses_api
+from . import jobs as jobs_mod
 from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
 from .alerts import Alerts
@@ -364,6 +365,11 @@ def create_app(
             if queue.queued:
                 queue.poke()
             await flush_usage()
+            if snapshot.mode == "running":
+                try:
+                    await job_runner.tick(cfg().max_jobs_in_flight, max(0, queue.queued - len(job_runner.running)))
+                except Exception as exc:  # jobs must never stop the loop
+                    log.error(json.dumps({"event": "job_tick_failed", "error": repr(exc)[:200]}))
             try:
                 alerts.check(queue.queued, queue.oldest_wait_s())
                 await alerts.check_slow()
@@ -378,6 +384,7 @@ def create_app(
                     await asyncio.to_thread(store.prune_requests, cfg().request_log_days)
                 await asyncio.to_thread(store.prune_notifications)
                 await asyncio.to_thread(store.prune_responses, responses_api.STORE_DAYS)
+                await asyncio.to_thread(store.prune_jobs, cfg().job_retention_days)
                 try:
                     await asyncio.to_thread(auto_backup, store, bootstrap.data_dir, cfg().backup_keep_days)
                 except Exception as exc:  # e.g. disk full: say so, keep serving
@@ -412,9 +419,12 @@ def create_app(
                 asyncio.ensure_future(refresh_catalog(target))
         restore_rate_windows()
         alerts.started(__version__)
+        if requeued := job_runner.start():
+            log.info(json.dumps({"event": "jobs_resumed", "jobs": requeued}))
         task = asyncio.ensure_future(background())
         yield
         task.cancel()
+        await job_runner.stop()
         await flush_usage()
         with contextlib.suppress(Exception):
             await asyncio.wait_for(alerts.drain(), 15)
@@ -504,10 +514,10 @@ def create_app(
         order = {uid: i for i, uid in enumerate(snapshot.upstreams)}
         return tuple(Candidate(t.id, t.pool.id, t.upstream.weight, order[t.id]) for t in usable)
 
-    def request_lane(request: Request, client: ClientKey) -> int:
+    def request_lane(headers: Mapping[str, str], client: ClientKey) -> int:
         """Client's priority, optionally lowered (never raised) by X-QueueRouter-Priority."""
         lane = LANES[client.priority]
-        wanted = request.headers.get("x-queuerouter-priority", "").strip().lower()
+        wanted = headers.get("x-queuerouter-priority", "").strip().lower()
         if wanted in PRIORITIES:
             lane = max(lane, LANES[wanted])
         return lane
@@ -947,6 +957,262 @@ def create_app(
         ]
         return {"object": "list", "data": data}
 
+    async def _never_disconnects() -> dict:
+        await asyncio.Event().wait()
+        return {"type": "http.disconnect"}
+
+    async def execute_job(row, request_body: dict) -> tuple[int, bytes]:
+        """Run a stored job through the normal pipeline (non-streaming), as its client."""
+        client = next((c for c in snapshot.clients.values() if c.name == row["client"]), None)
+        if client is None:
+            body = error_body("the client of this job no longer exists or is disabled", 403, "client_unavailable")
+            return 403, json.dumps(body).encode()
+        path = row["endpoint"].removeprefix("/v1/")
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": row["endpoint"],
+            "raw_path": row["endpoint"].encode(),
+            "query_string": b"",
+            "headers": [],
+            "client": ("job", 0),
+            "server": None,
+            "scheme": "http",
+            "root_path": "",
+            "http_version": "1.1",
+        }
+        tags = ",".join(["job", *[t for t in (row["tags"] or "").split(",") if t]])
+        headers = {
+            "content-type": "application/json",
+            "x-queuerouter-priority": row["priority"],
+            "x-queuerouter-tags": tags,
+        }
+        response = await serve(
+            Request(scope, _never_disconnects), client, path, json.dumps(request_body).encode(), headers, ""
+        )
+        if isinstance(response, StreamingResponse):  # shouldn't happen (stream is removed); read it all
+            chunks = [c if isinstance(c, bytes) else c.encode() async for c in response.body_iterator]
+            return response.status_code, b"".join(chunks)
+        return response.status_code, bytes(response.body)
+
+    job_runner = jobs_mod.JobRunner(store, execute_job, lambda: app.state.client, usage_from_body)
+
+    # -- async jobs, files and batches (see app/jobs.py) -------------------------------------
+
+    def job_error(exc: Exception) -> JSONResponse:
+        return error_response(str(exc), 400, "invalid_request_error")
+
+    async def json_body(request: Request) -> dict | JSONResponse:
+        body = await read_body(request)
+        if isinstance(body, Response):
+            return body
+        try:
+            data = json.loads(body or b"{}")
+        except ValueError:
+            return error_response("the body must be JSON", 400, "invalid_request_error")
+        return (
+            data
+            if isinstance(data, dict)
+            else error_response("the body must be an object", 400, "invalid_request_error")
+        )
+
+    async def submit_job(client: ClientKey, body: dict) -> JSONResponse:
+        try:
+            job = jobs_mod.new_job(client.name, body)
+        except jobs_mod.JobError as exc:
+            return job_error(exc)
+        await asyncio.to_thread(store.create_jobs, [job])
+        row = await asyncio.to_thread(store.get_job, job["id"])
+        return JSONResponse(jobs_mod.job_view(store, row, with_result=False), status_code=202)
+
+    @app.post("/v1/jobs")
+    async def jobs_create(request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        body = await json_body(request)
+        return body if isinstance(body, Response) else await submit_job(client, body)
+
+    @app.get("/v1/jobs")
+    async def jobs_list(request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        q = request.query_params
+        rows = await asyncio.to_thread(
+            store.list_jobs,
+            client.name,
+            q.get("status"),
+            q.get("tag"),
+            q.get("batch_id"),
+            min(1000, max(1, int(q.get("limit", "100")) if q.get("limit", "100").isdigit() else 100)),
+        )
+        return {"object": "list", "data": [jobs_mod.job_view(store, r, with_result=False) for r in rows]}
+
+    @app.get("/v1/jobs/{job_id}")
+    async def jobs_get(job_id: str, request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        row = await asyncio.to_thread(store.get_job, job_id, client.name)
+        if row is None:
+            return error_response(f"job '{job_id}' not found", 404, "not_found")
+        return jobs_mod.job_view(store, row)
+
+    @app.delete("/v1/jobs/{job_id}")
+    async def jobs_cancel(job_id: str, request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        row = await asyncio.to_thread(store.get_job, job_id, client.name)
+        if row is None:
+            return error_response(f"job '{job_id}' not found", 404, "not_found")
+        await asyncio.to_thread(store.cancel_jobs, [job_id])
+        if row["batch_id"]:
+            await asyncio.to_thread(jobs_mod.finish_batch_if_done, store, row["batch_id"])
+        return jobs_mod.job_view(store, await asyncio.to_thread(store.get_job, job_id), with_result=False)
+
+    @app.post("/v1/files")
+    async def files_upload(request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        max_bytes = int(cfg().max_body_mb * 1024 * 1024)
+        async with request.form(max_files=1, max_part_size=max_bytes) as form:
+            upload, purpose = form.get("file"), str(form.get("purpose", ""))
+            if purpose != "batch":
+                return error_response("only purpose=batch is supported", 400, "invalid_request_error")
+            if upload is None or isinstance(upload, str):
+                return error_response("'file' is required", 400, "invalid_request_error")
+            data = await upload.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                return error_response(f"file exceeds {cfg().max_body_mb} MB", 413, "request_too_large")
+            try:
+                data.decode("utf-8")
+            except UnicodeDecodeError:
+                return error_response("the file must be UTF-8 JSONL", 400, "invalid_request_error")
+            row = await asyncio.to_thread(
+                store.create_file, jobs_mod.new_id("file"), client.name, purpose, upload.filename or "input.jsonl", data
+            )
+        return jobs_mod.file_view(row)
+
+    async def own_file(request: Request, file_id: str):
+        client, denied = authenticate(request)
+        if denied:
+            return None, denied
+        row = await asyncio.to_thread(store.get_file, file_id, client.name)
+        if row is None:
+            return None, error_response(f"file '{file_id}' not found", 404, "not_found")
+        return row, None
+
+    @app.get("/v1/files/{file_id}")
+    async def files_get(file_id: str, request: Request):
+        row, denied = await own_file(request, file_id)
+        return denied or jobs_mod.file_view(row)
+
+    @app.get("/v1/files/{file_id}/content")
+    async def files_content(file_id: str, request: Request):
+        row, denied = await own_file(request, file_id)
+        if denied:
+            return denied
+        return Response(store.file_content(row), media_type="application/jsonl")
+
+    @app.delete("/v1/files/{file_id}")
+    async def files_delete(file_id: str, request: Request):
+        row, denied = await own_file(request, file_id)
+        if denied:
+            return denied
+        await asyncio.to_thread(store.delete_file, file_id, row["client"])
+        return {"id": file_id, "object": "file", "deleted": True}
+
+    @app.post("/v1/batches")
+    async def batches_create(request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        body = await json_body(request)
+        if isinstance(body, Response):
+            return body
+        endpoint = str(body.get("endpoint", ""))
+        window = str(body.get("completion_window", "24h"))
+        if endpoint not in jobs_mod.BATCH_ENDPOINTS:
+            return error_response(
+                f"endpoint must be one of {', '.join(jobs_mod.BATCH_ENDPOINTS)}", 400, "invalid_request_error"
+            )
+        if window not in jobs_mod.WINDOWS:
+            return error_response("completion_window must be 24h", 400, "invalid_request_error")
+        source = await asyncio.to_thread(store.get_file, str(body.get("input_file_id", "")), client.name)
+        if source is None:
+            return error_response("input_file_id not found", 400, "invalid_request_error")
+        batch_id, now = jobs_mod.new_id("batch"), time.time()
+        try:
+            batch_jobs = jobs_mod.batch_jobs(
+                client.name, batch_id, endpoint, store.file_content(source), now + jobs_mod.WINDOWS[window]
+            )
+        except jobs_mod.JobError as exc:
+            return job_error(exc)
+        await asyncio.to_thread(
+            store.create_batch,
+            {
+                "id": batch_id,
+                "client": client.name,
+                "endpoint": endpoint,
+                "input_file_id": source["id"],
+                "completion_window": window,
+                "created": now,
+                "expires_at": now + jobs_mod.WINDOWS[window],
+                "total": len(batch_jobs),
+                "metadata": body.get("metadata"),
+            },
+        )
+        await asyncio.to_thread(store.create_jobs, batch_jobs)
+        return jobs_mod.batch_view(store, await asyncio.to_thread(store.get_batch, batch_id))
+
+    @app.get("/v1/batches")
+    async def batches_list(request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        limit = request.query_params.get("limit", "20")
+        rows = await asyncio.to_thread(
+            store.list_batches,
+            client.name,
+            min(100, int(limit) if limit.isdigit() else 20),
+            request.query_params.get("after"),
+        )
+        data = [jobs_mod.batch_view(store, r) for r in rows]
+        return {
+            "object": "list",
+            "data": data,
+            "first_id": data[0]["id"] if data else None,
+            "last_id": data[-1]["id"] if data else None,
+            "has_more": len(data) == int(limit if limit.isdigit() else 20),
+        }
+
+    @app.get("/v1/batches/{batch_id}")
+    async def batches_get(batch_id: str, request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        row = await asyncio.to_thread(store.get_batch, batch_id, client.name)
+        if row is None:
+            return error_response(f"batch '{batch_id}' not found", 404, "not_found")
+        return jobs_mod.batch_view(store, row)
+
+    @app.post("/v1/batches/{batch_id}/cancel")
+    async def batches_cancel(batch_id: str, request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        row = await asyncio.to_thread(store.get_batch, batch_id, client.name)
+        if row is None:
+            return error_response(f"batch '{batch_id}' not found", 404, "not_found")
+        if row["status"] == "in_progress":
+            await asyncio.to_thread(store.update_batch, batch_id, status="cancelling", cancelled_at=time.time())
+            await asyncio.to_thread(store.cancel_jobs, None, batch_id)
+            await asyncio.to_thread(jobs_mod.finish_batch_if_done, store, batch_id)
+        return jobs_mod.batch_view(store, await asyncio.to_thread(store.get_batch, batch_id))
+
     @app.get("/v1/{path:path}")
     async def passthrough_get(path: str, request: Request):
         """Non-generation GETs go to the first usable upstream and don't use a slot."""
@@ -1127,6 +1393,16 @@ def create_app(
         body = await read_body(request)
         if isinstance(body, Response):
             return body
+        if request.headers.get("x-queuerouter-async", "").strip().lower() in ("1", "true", "yes"):
+            try:
+                payload = json.loads(body)
+            except ValueError:
+                return error_response("the body must be JSON", 400, "invalid_request_error")
+            wanted = request.headers.get("x-queuerouter-priority", "low").strip().lower()
+            tags = request.headers.get("x-queuerouter-tags", "")
+            return await submit_job(
+                client, {"request": payload, "endpoint": f"/v1/{path}", "priority": wanted, "tags": tags}
+            )
         return await serve(request, client, path, body)
 
     async def serve(
@@ -1203,7 +1479,7 @@ def create_app(
             alias_used = bool(alias)
 
         request_id = f"qr-{uuid.uuid4().hex[:12]}"
-        lane = request_lane(request, client)
+        lane = request_lane(request_headers, client)
         session = session_key(request_headers, client.name, payload)
         tags = parse_tags(client.policy.tags, request_headers.get("x-queuerouter-tags"))
         rkey = run_key(request_headers, client.name, session)

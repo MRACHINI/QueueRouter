@@ -1065,7 +1065,9 @@ notifications as v0.7.0; dashboard live chart and Usage charts as v0.8.0 (pollin
 instead of SSE: same freshness, simpler behind proxies).
 Two-factor sign-in (TOTP + recovery codes) and an NVIDIA provider preset as v0.9.0. Backup/restore (download,
 daily automatic copies, staged restore applied on a self-restart) as v0.10.0. Anthropic Messages and
-OpenAI Responses adapters as v0.11.0 (tested with the official Python SDKs).
+OpenAI Responses adapters as v0.11.0 (tested with the official Python SDKs). Async jobs, the
+`X-QueueRouter-Async` header and the OpenAI Batch API as v0.12.0 (callbacks: HTTPS to public hosts only,
+HMAC-signed when the job gives a `callback_secret`).
 
 ### Phase 3 — Extras
 Prometheus metrics, monthly token quotas, recurring (cron) jobs, OpenTelemetry.

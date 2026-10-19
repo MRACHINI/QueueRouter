@@ -41,6 +41,10 @@ from a **web admin UI**.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.
+- **Async jobs and batches**: `POST /v1/jobs` (or any request with `X-QueueRouter-Async: true`)
+  returns at once and runs later — scheduled (`run_at`), with a `deadline`, only when idle, with a
+  signed HTTPS callback; plus the OpenAI **Batch API** (`/v1/files`, `/v1/batches`) so SDK batch code
+  works unchanged. Jobs run at low priority, one at a time by default, and survive restarts.
 - **Other API shapes**: Anthropic Messages (`/v1/messages`) and OpenAI Responses (`/v1/responses`)
   are translated to chat completions, so tools speaking either API get the same queue, policies,
   aliases and fallbacks. Hosted/server tools (web search, code interpreter…) aren't supported.
@@ -229,6 +233,8 @@ Everything else is configured in the admin UI.
 | Path | Notes |
 |---|---|
 | `POST /v1/chat/completions`, `POST /v1/*` | queued |
+| `POST /v1/jobs`, `GET /v1/jobs[/{id}]`, `DELETE /v1/jobs/{id}` | async jobs: `{"request": {...}, "endpoint", "priority", "run_at", "deadline", "idle_only", "callback_url", "callback_secret", "tags"}` → 202; result on `GET` when done |
+| `/v1/files`, `/v1/batches` | OpenAI-compatible Batch API (JSONL in, output/error files out, `completion_window` 24h) |
 | `POST /v1/messages` | **Anthropic Messages API** (Claude SDKs and tools), translated to chat completions; streaming, tools, images; `/v1/messages/count_tokens` estimates |
 | `POST /v1/responses` | **OpenAI Responses API** (Agents SDK, newer clients); streaming, function tools, structured output, `previous_response_id` (kept encrypted 7 days; `store: false` keeps nothing) |
 | `GET /v1/models` | all upstreams' models + aliases, filtered to the client's allowed models |

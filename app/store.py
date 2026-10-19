@@ -223,7 +223,67 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX stored_responses_created ON stored_responses (created);
     """,
+    # 12: async jobs, and OpenAI-style files + batches (request bodies and results encrypted)
+    """
+    CREATE TABLE jobs (
+        id TEXT PRIMARY KEY,
+        client TEXT NOT NULL,
+        batch_id TEXT,
+        custom_id TEXT,
+        status TEXT NOT NULL,
+        priority TEXT NOT NULL DEFAULT 'low',
+        endpoint TEXT NOT NULL,
+        request TEXT NOT NULL,
+        run_at REAL,
+        deadline REAL,
+        idle_only INTEGER NOT NULL DEFAULT 0,
+        callback_url TEXT,
+        callback_secret TEXT,
+        callback_status TEXT,
+        tags TEXT,
+        created REAL NOT NULL,
+        started REAL,
+        finished REAL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        status_code INTEGER,
+        result TEXT,
+        error TEXT,
+        model TEXT,
+        prompt_tokens INTEGER,
+        completion_tokens INTEGER
+    );
+    CREATE INDEX jobs_due ON jobs (status, run_at);
+    CREATE INDEX jobs_batch ON jobs (batch_id);
+    CREATE INDEX jobs_client ON jobs (client, created);
+    CREATE TABLE files (
+        id TEXT PRIMARY KEY,
+        client TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        bytes INTEGER NOT NULL,
+        created REAL NOT NULL,
+        data TEXT NOT NULL
+    );
+    CREATE TABLE batches (
+        id TEXT PRIMARY KEY,
+        client TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        input_file_id TEXT NOT NULL,
+        completion_window TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created REAL NOT NULL,
+        expires_at REAL,
+        finished_at REAL,
+        cancelled_at REAL,
+        output_file_id TEXT,
+        error_file_id TEXT,
+        total INTEGER NOT NULL,
+        metadata TEXT
+    );
+    """,
 ]
+
+JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
 
 REQUEST_COLUMNS = (
     "id",
@@ -1043,6 +1103,223 @@ class Store:
             (day,),
         )
         return {r["client"]: int(r["n"] or 0) for r in rows}
+
+    # -- async jobs, files, batches ------------------------------------------------------
+
+    def create_jobs(self, jobs: list[dict]) -> None:
+        """Insert jobs (``request`` is a dict, stored encrypted)."""
+        with self.tx() as db:
+            for job in jobs:
+                db.execute(
+                    "INSERT INTO jobs (id, client, batch_id, custom_id, status, priority, endpoint, request, run_at, "
+                    "deadline, idle_only, callback_url, callback_secret, tags, created) "
+                    "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        job["id"],
+                        job["client"],
+                        job.get("batch_id"),
+                        job.get("custom_id"),
+                        job.get("priority", "low"),
+                        job["endpoint"],
+                        self.encrypt(json.dumps(job["request"])),
+                        job.get("run_at"),
+                        job.get("deadline"),
+                        int(bool(job.get("idle_only"))),
+                        job.get("callback_url"),
+                        self.encrypt(job["callback_secret"]) if job.get("callback_secret") else None,
+                        ",".join(job.get("tags") or ()) or None,
+                        job.get("created", time.time()),
+                    ),
+                )
+
+    def get_job(self, job_id: str, client: str | None = None) -> sqlite3.Row | None:
+        sql, params = "SELECT * FROM jobs WHERE id = ?", [job_id]
+        if client is not None:
+            sql += " AND client = ?"
+            params.append(client)
+        rows = self.query(sql, tuple(params))
+        return rows[0] if rows else None
+
+    def job_request(self, row: sqlite3.Row) -> dict:
+        return json.loads(self.decrypt(row["request"]))
+
+    def job_result(self, row: sqlite3.Row) -> object:
+        return json.loads(self.decrypt(row["result"])) if row["result"] else None
+
+    def list_jobs(
+        self,
+        client: str | None = None,
+        status: str | None = None,
+        tag: str | None = None,
+        batch_id: str | None = None,
+        limit: int = 100,
+    ) -> list[sqlite3.Row]:
+        sql, params = "SELECT * FROM jobs WHERE 1=1", []
+        for column, value in (("client", client), ("status", status), ("batch_id", batch_id)):
+            if value:
+                sql += f" AND {column} = ?"
+                params.append(value)
+        if tag:
+            sql += " AND (',' || tags || ',') LIKE ?"
+            params.append(f"%,{tag},%")
+        sql += " ORDER BY created DESC LIMIT ?"
+        params.append(limit)
+        return self.query(sql, tuple(params))
+
+    def due_jobs(self, now: float, limit: int) -> list[sqlite3.Row]:
+        return self.query(
+            "SELECT * FROM jobs WHERE status = 'queued' AND (run_at IS NULL OR run_at <= ?) "
+            "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created LIMIT ?",
+            (now, limit),
+        )
+
+    def claim_job(self, job_id: str) -> bool:
+        """queued -> running; False if someone else (or a cancel) got there first."""
+        with self.tx() as db:
+            cur = db.execute(
+                "UPDATE jobs SET status = 'running', started = ?, attempts = attempts + 1 "
+                "WHERE id = ? AND status = 'queued'",
+                (time.time(), job_id),
+            )
+        return cur.rowcount == 1
+
+    def finish_job(self, job_id: str, status: str, **fields: object) -> None:
+        if "result" in fields and fields["result"] is not None:
+            fields["result"] = self.encrypt(json.dumps(fields["result"]))
+        fields = {"status": status, "finished": time.time(), **fields}
+        columns = ", ".join(f"{name} = ?" for name in fields)
+        with self.tx() as db:
+            db.execute(f"UPDATE jobs SET {columns} WHERE id = ?", (*fields.values(), job_id))  # noqa: S608
+
+    def set_job_fields(self, job_id: str, **fields: object) -> None:
+        columns = ", ".join(f"{name} = ?" for name in fields)
+        with self.tx() as db:
+            db.execute(f"UPDATE jobs SET {columns} WHERE id = ?", (*fields.values(), job_id))  # noqa: S608
+
+    def cancel_jobs(self, job_ids: list[str] | None = None, batch_id: str | None = None) -> int:
+        """Cancel jobs that haven't started (running ones finish)."""
+        with self.tx() as db:
+            if batch_id is not None:
+                cur = db.execute(
+                    "UPDATE jobs SET status = 'cancelled', finished = ? WHERE batch_id = ? AND status = 'queued'",
+                    (time.time(), batch_id),
+                )
+            else:
+                marks = ",".join("?" for _ in job_ids or [])
+                cur = db.execute(
+                    f"UPDATE jobs SET status = 'cancelled', finished = ? WHERE status = 'queued' AND id IN ({marks})",  # noqa: S608
+                    (time.time(), *(job_ids or [])),
+                )
+        return cur.rowcount
+
+    def retry_job(self, job_id: str) -> bool:
+        with self.tx() as db:
+            cur = db.execute(
+                "UPDATE jobs SET status = 'queued', finished = NULL, started = NULL, error = NULL, result = NULL, "
+                "status_code = NULL WHERE id = ? AND status IN ('failed', 'expired', 'cancelled')",
+                (job_id,),
+            )
+        return cur.rowcount == 1
+
+    def requeue_running_jobs(self, max_attempts: int) -> int:
+        """After a restart: jobs that were running start again (or fail after too many tries)."""
+        with self.tx() as db:
+            db.execute(
+                "UPDATE jobs SET status = 'failed', finished = ?, error = 'interrupted by restarts too often' "
+                "WHERE status = 'running' AND attempts >= ?",
+                (time.time(), max_attempts),
+            )
+            cur = db.execute("UPDATE jobs SET status = 'queued', started = NULL WHERE status = 'running'")
+        return cur.rowcount
+
+    def expire_jobs(self, now: float) -> list[str]:
+        """Queued jobs past their deadline -> expired; returns their batch ids."""
+        rows = self.query(
+            "SELECT id, batch_id FROM jobs WHERE status = 'queued' AND deadline IS NOT NULL AND deadline < ?", (now,)
+        )
+        if rows:
+            with self.tx() as db:
+                db.executemany(
+                    "UPDATE jobs SET status = 'expired', finished = ?, error = 'deadline passed before it could run' "
+                    "WHERE id = ? AND status = 'queued'",
+                    [(now, r["id"]) for r in rows],
+                )
+        return sorted({r["batch_id"] for r in rows if r["batch_id"]})
+
+    def job_counts(self, batch_id: str) -> dict[str, int]:
+        rows = self.query("SELECT status, COUNT(*) AS n FROM jobs WHERE batch_id = ? GROUP BY status", (batch_id,))
+        return {r["status"]: r["n"] for r in rows}
+
+    def prune_jobs(self, keep_days: float) -> None:
+        cutoff = time.time() - keep_days * 86_400
+        with self.tx() as db:
+            db.execute(f"DELETE FROM jobs WHERE status IN {JOB_DONE!r} AND finished < ?", (cutoff,))  # noqa: S608
+            db.execute("DELETE FROM batches WHERE finished_at IS NOT NULL AND finished_at < ?", (cutoff,))
+            db.execute(
+                "DELETE FROM files WHERE created < ? AND id NOT IN (SELECT input_file_id FROM batches) "
+                "AND id NOT IN (SELECT output_file_id FROM batches WHERE output_file_id IS NOT NULL) "
+                "AND id NOT IN (SELECT error_file_id FROM batches WHERE error_file_id IS NOT NULL)",
+                (cutoff,),
+            )
+
+    def create_file(self, file_id: str, client: str, purpose: str, filename: str, data: bytes) -> sqlite3.Row:
+        with self.tx() as db:
+            db.execute(
+                "INSERT INTO files (id, client, purpose, filename, bytes, created, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (file_id, client, purpose, filename, len(data), time.time(), self.encrypt(data.decode("utf-8"))),
+            )
+        return self.get_file(file_id, client)
+
+    def get_file(self, file_id: str, client: str) -> sqlite3.Row | None:
+        rows = self.query("SELECT * FROM files WHERE id = ? AND client = ?", (file_id, client))
+        return rows[0] if rows else None
+
+    def file_content(self, row: sqlite3.Row) -> str:
+        return self.decrypt(row["data"])
+
+    def delete_file(self, file_id: str, client: str) -> bool:
+        with self.tx() as db:
+            cur = db.execute("DELETE FROM files WHERE id = ? AND client = ?", (file_id, client))
+        return cur.rowcount == 1
+
+    def create_batch(self, batch: dict) -> None:
+        with self.tx() as db:
+            db.execute(
+                "INSERT INTO batches (id, client, endpoint, input_file_id, completion_window, status, created, "
+                "expires_at, total, metadata) VALUES (?, ?, ?, ?, ?, 'in_progress', ?, ?, ?, ?)",
+                (
+                    batch["id"],
+                    batch["client"],
+                    batch["endpoint"],
+                    batch["input_file_id"],
+                    batch["completion_window"],
+                    batch["created"],
+                    batch["expires_at"],
+                    batch["total"],
+                    json.dumps(batch.get("metadata")) if batch.get("metadata") else None,
+                ),
+            )
+
+    def get_batch(self, batch_id: str, client: str | None = None) -> sqlite3.Row | None:
+        sql, params = "SELECT * FROM batches WHERE id = ?", [batch_id]
+        if client is not None:
+            sql += " AND client = ?"
+            params.append(client)
+        rows = self.query(sql, tuple(params))
+        return rows[0] if rows else None
+
+    def list_batches(self, client: str, limit: int = 20, after: str | None = None) -> list[sqlite3.Row]:
+        if after and (anchor := self.get_batch(after, client)):
+            return self.query(
+                "SELECT * FROM batches WHERE client = ? AND created < ? ORDER BY created DESC LIMIT ?",
+                (client, anchor["created"], limit),
+            )
+        return self.query("SELECT * FROM batches WHERE client = ? ORDER BY created DESC LIMIT ?", (client, limit))
+
+    def update_batch(self, batch_id: str, **fields: object) -> None:
+        columns = ", ".join(f"{name} = ?" for name in fields)
+        with self.tx() as db:
+            db.execute(f"UPDATE batches SET {columns} WHERE id = ?", (*fields.values(), batch_id))  # noqa: S608
 
     # -- Responses API conversations ----------------------------------------------------
 
