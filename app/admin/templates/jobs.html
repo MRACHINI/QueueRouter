@@ -35,6 +35,62 @@ and never shown here.</p>
 </div>
 {% endif %}
 
+<h2 id="schedules">Schedules</h2>
+<p class="small muted">Recurring jobs: each run creates a job (tagged <code>schedule</code>). Times are UTC, in cron
+form: <code>0 2 * * *</code> = every day at 02:00, <code>*/15 * * * *</code> = every 15 minutes,
+<code>0 9 * * mon-fri</code>, <code>@hourly</code>. Apps can manage their own with <code>/v1/schedules</code>.</p>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Schedule</th><th>Client</th><th>When</th><th>Last run</th><th></th></tr></thead>
+  <tbody>
+  {% for s in schedules %}
+  <tr>
+    <td data-label="Schedule"><strong>{{ s.name }}</strong> {% if not s.enabled %}<span class="badge">paused</span>{% endif %}
+      <div class="small muted mono">{{ s.endpoint }}{% if s.idle_only %} · idle only{% endif %}</div></td>
+    <td data-label="Client">{{ s.client }} <span class="badge {{ s.priority }}">{{ s.priority }}</span></td>
+    <td data-label="When"><code>{{ s.cron }}</code>{% if s.next_run %}<div class="small muted">next <time data-ts="{{ s.next_run }}">{{ s.next_run | int }}</time></div>{% endif %}</td>
+    <td data-label="Last run">{% if s.last_run %}<time data-ts="{{ s.last_run }}">{{ s.last_run | int }}</time>
+      <div class="small muted mono">{{ s.last_job_id }}</div>{% else %}—{% endif %}</td>
+    <td data-label="">
+      {% if user.can("operator") %}
+      <div class="row wrap">
+        <form method="post" action="/admin/schedules/{{ s.id }}/run"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="secondary">Run now</button></form>
+        <form method="post" action="/admin/schedules/{{ s.id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="secondary">{{ "Pause" if s.enabled else "Resume" }}</button></form>
+        {% if user.can("admin") %}
+        <form method="post" action="/admin/schedules/{{ s.id }}/delete" data-confirm="Delete schedule {{ s.name }}?">
+          <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="danger">Delete</button></form>
+        {% endif %}
+      </div>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">No schedules.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if user.can("admin") %}
+<details class="card">
+  <summary><strong>Add schedule</strong></summary>
+  <form method="post" action="/admin/schedules" class="grid">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Name <input name="name" required maxlength="100" placeholder="nightly summary"></label>
+    <label>Client <select name="client">{% for c in clients %}<option>{{ c }}</option>{% endfor %}</select></label>
+    <label>Cron (UTC) <input name="cron" required placeholder="0 2 * * *"></label>
+    <label>Priority <select name="priority"><option>low</option><option>normal</option><option>high</option></select></label>
+    <label>Endpoint <input name="endpoint" value="/v1/chat/completions"></label>
+    <label>Tags <input name="tags" placeholder="nightly"></label>
+    <label class="check"><input type="checkbox" name="idle_only"> only when nothing else is waiting</label>
+    <label class="span-all">Request (JSON body)
+      <textarea name="request" rows="4" class="rules" required placeholder='{"model": "smart", "messages": [{"role": "user", "content": "Summarize yesterday"}]}'></textarea></label>
+    <div><button type="submit">Add schedule</button></div>
+  </form>
+</details>
+{% endif %}
+
 <h2>Jobs</h2>
 <form method="get" action="/admin/jobs" class="row wrap">
   <select name="status" aria-label="Status">
