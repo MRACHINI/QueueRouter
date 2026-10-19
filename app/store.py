@@ -213,6 +213,16 @@ MIGRATIONS: list[str] = [
     ALTER TABLE admin_users ADD COLUMN totp_last INTEGER NOT NULL DEFAULT -1;
     ALTER TABLE admin_users ADD COLUMN recovery_codes TEXT NOT NULL DEFAULT '[]';
     """,
+    # 11: Responses API conversations for previous_response_id (encrypted, kept a few days)
+    """
+    CREATE TABLE stored_responses (
+        id TEXT PRIMARY KEY,
+        client TEXT NOT NULL,
+        created REAL NOT NULL,
+        data TEXT NOT NULL
+    );
+    CREATE INDEX stored_responses_created ON stored_responses (created);
+    """,
 ]
 
 REQUEST_COLUMNS = (
@@ -1033,6 +1043,24 @@ class Store:
             (day,),
         )
         return {r["client"]: int(r["n"] or 0) for r in rows}
+
+    # -- Responses API conversations ----------------------------------------------------
+
+    def save_response(self, response_id: str, client: str, messages: list[dict]) -> None:
+        with self.tx() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO stored_responses (id, client, created, data) VALUES (?, ?, ?, ?)",
+                (response_id, client, time.time(), self.encrypt(json.dumps(messages))),
+            )
+
+    def load_response(self, response_id: str, client: str) -> list[dict] | None:
+        """The whole conversation up to that response, or None (unknown, expired or another client's)."""
+        rows = self.query("SELECT data FROM stored_responses WHERE id = ? AND client = ?", (response_id, client))
+        return json.loads(self.decrypt(rows[0]["data"])) if rows else None
+
+    def prune_responses(self, keep_days: float) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM stored_responses WHERE created < ?", (time.time() - keep_days * 86_400,))
 
     # -- admin users and sessions --------------------------------------------------------
 

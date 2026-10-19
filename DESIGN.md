@@ -1064,7 +1064,8 @@ login) shipped as v0.6.0; alerts, webhooks (Discord, Slack, ntfy, signed JSON) a
 notifications as v0.7.0; dashboard live chart and Usage charts as v0.8.0 (polling every 2 s was kept
 instead of SSE: same freshness, simpler behind proxies).
 Two-factor sign-in (TOTP + recovery codes) and an NVIDIA provider preset as v0.9.0. Backup/restore (download,
-daily automatic copies, staged restore applied on a self-restart) as v0.10.0.
+daily automatic copies, staged restore applied on a self-restart) as v0.10.0. Anthropic Messages and
+OpenAI Responses adapters as v0.11.0 (tested with the official Python SDKs).
 
 ### Phase 3 — Extras
 Prometheus metrics, monthly token quotas, recurring (cron) jobs, OpenTelemetry.

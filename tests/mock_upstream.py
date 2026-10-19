@@ -60,6 +60,12 @@ def create_mock(limit: int = 2) -> FastAPI:
         if model in body.get("mock_policy_models", []):
             return JSONResponse({"error": {"message": "Request blocked by content policy"}}, status_code=400)
         refuse = model in body.get("mock_refuse_models", [])
+        messages = body.get("messages") or [{}]
+        if body.get("tools") and messages[-1].get("role") == "user":
+            return _tool_call(body)  # agents: call the first tool
+        if messages[-1].get("role") == "tool":
+            tag = f"tool said {messages[-1].get('content')}"
+            body.setdefault("mock_tag", tag)
 
         delay = body.get("mock_delay", 0.05)
         chunks = body.get("mock_chunks", 5)
@@ -136,3 +142,38 @@ def create_mock(limit: int = 2) -> FastAPI:
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     return app
+
+
+def _tool_call(body: dict):
+    """Answer by calling the first tool with {"q": "x"} (arguments streamed in two pieces)."""
+    name = body["tools"][0]["function"]["name"]
+    usage = {"prompt_tokens": 12, "completion_tokens": 3}
+    if not body.get("stream"):
+        call = {"id": "call_1", "type": "function", "function": {"name": name, "arguments": '{"q": "x"}'}}
+        return {
+            "id": "x",
+            "object": "chat.completion",
+            "model": body.get("model"),
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": None, "tool_calls": [call]},
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": usage,
+        }
+
+    def chunk(delta: dict, finish=None, **extra) -> str:
+        choices = [{"index": 0, "delta": delta, "finish_reason": finish}] if delta is not None else []
+        return f"data: {json.dumps({'id': 'x', 'object': 'chat.completion.chunk', 'choices': choices, **extra})}\n\n"
+
+    def gen():
+        yield chunk({"role": "assistant", "content": "Let me check."})
+        first = {"index": 0, "id": "call_1", "type": "function", "function": {"name": name, "arguments": '{"q": '}}
+        yield chunk({"tool_calls": [first]})
+        yield chunk({"tool_calls": [{"index": 0, "function": {"arguments": '"x"}'}}]}, "tool_calls")
+        yield chunk(None, usage=usage)
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")

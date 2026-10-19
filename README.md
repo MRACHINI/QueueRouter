@@ -41,6 +41,9 @@ from a **web admin UI**.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.
+- **Other API shapes**: Anthropic Messages (`/v1/messages`) and OpenAI Responses (`/v1/responses`)
+  are translated to chat completions, so tools speaking either API get the same queue, policies,
+  aliases and fallbacks. Hosted/server tools (web search, code interpreter…) aren't supported.
 - **Backup and restore** (owner): download a zip (database + optional encryption key), daily
   automatic copies in `/data/backups`, and restore from an upload or a listed copy — checked first,
   then QueueRouter restarts itself to load it (the previous data is kept).
@@ -226,6 +229,8 @@ Everything else is configured in the admin UI.
 | Path | Notes |
 |---|---|
 | `POST /v1/chat/completions`, `POST /v1/*` | queued |
+| `POST /v1/messages` | **Anthropic Messages API** (Claude SDKs and tools), translated to chat completions; streaming, tools, images; `/v1/messages/count_tokens` estimates |
+| `POST /v1/responses` | **OpenAI Responses API** (Agents SDK, newer clients); streaming, function tools, structured output, `previous_response_id` (kept encrypted 7 days; `store: false` keeps nothing) |
 | `GET /v1/models` | all upstreams' models + aliases, filtered to the client's allowed models |
 | `GET /v1/queue` | queue depth, your client's queued/active, estimated wait |
 | `GET /v1/opencode-config` | generated opencode provider config for your key |
