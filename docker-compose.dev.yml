@@ -1,0 +1,11 @@
+# Local development: build from source and expose the port directly (no Caddy).
+#   docker compose -f docker-compose.dev.yml up --build
+services:
+  queuerouter:
+    build: .
+    env_file: .env
+    ports: ["127.0.0.1:8000:8000"]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
