@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Request content{% endblock %}
+{% block content %}
+<h1>Request <code>{{ content.id }}</code></h1>
+<p class="muted">Client <strong>{{ content.client }}</strong> · <time data-ts="{{ content.ts }}">{{ content.ts | int }}</time>
+{% if content.truncated %} · <span class="badge">cut to the size limit</span>{% endif %}.
+This view is recorded in the audit log.</p>
+<h2>Request</h2>
+<pre class="mono wrap-any content-view">{{ request_text }}</pre>
+<h2>Reply</h2>
+<pre class="mono wrap-any content-view">{{ response_text }}</pre>
+<p><a href="/admin/requests">Back to requests</a></p>
+{% endblock %}

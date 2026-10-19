@@ -90,7 +90,10 @@ def create_mock(limit: int = 2) -> FastAPI:
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "".join(words) if refuse else f"hi {tag}"},
+                        "message": {
+                            "role": "assistant",
+                            "content": body.get("mock_content") or ("".join(words) if refuse else f"hi {tag}"),
+                        },
                         "finish_reason": "stop",
                     }
                 ],

@@ -46,6 +46,8 @@ class ClientPolicy:
     run_max_minutes: float | None = None
     loop_threshold: int | None = None  # the same request this many times within 5 min = a loop
     loop_action: str = "warn"  # warn (log it) | reject (429)
+    log_content: bool = False  # keep prompts and replies (encrypted; admins with content permission)
+    log_content_until: float | None = None  # epoch seconds; None = until turned off
 
     @classmethod
     def from_json(cls, text: str | None) -> ClientPolicy:
@@ -61,6 +63,9 @@ class ClientPolicy:
 
     def to_json(self) -> str:
         return json.dumps({k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(self).items()})
+
+    def logs_content(self, now: float) -> bool:
+        return self.log_content and (self.log_content_until is None or self.log_content_until > now)
 
     @property
     def rate_limited(self) -> bool:
@@ -176,6 +181,9 @@ TUNABLES: dict[str, type] = {
     "backup_keep_days": int,
     "max_jobs_in_flight": int,
     "job_retention_days": int,
+    "content_log_days": int,
+    "content_log_max_kb": int,
+    "structured_repair": bool,
     "price_catalog_enabled": bool,
     "context_check": bool,
     "sticky_routing": bool,
@@ -225,6 +233,9 @@ class Settings:
     backup_keep_days: int = 7  # daily automatic database copies in /data/backups (0 = off)
     max_jobs_in_flight: int = 1  # async jobs / batch requests running at once (live requests keep the rest)
     job_retention_days: int = 7  # finished jobs, batches and their files are deleted after this
+    content_log_days: int = 7  # logged prompts/replies (clients with content logging on) kept this long
+    content_log_max_kb: int = 256  # per request and per reply; longer ones are cut
+    structured_repair: bool = True  # fix broken JSON replies (JSON mode, tool-call arguments)
     price_catalog_enabled: bool = True  # fetch official prices from models.dev daily (for cost estimates)
     context_check: bool = True  # refuse prompts that clearly exceed the model's context before queuing
     sticky_routing: bool = True  # send a conversation back to the upstream that served it (warm cache)

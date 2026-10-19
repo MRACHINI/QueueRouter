@@ -100,6 +100,21 @@ shown once when created. Changes apply immediately.</p>
           </form>
           <p class="small muted">Blank = no limit / global default. Rate limits count started requests and finished tokens over rolling windows. A <em>run</em> is one agent task: <code>X-Run-Id</code> if the app sends it, otherwise the conversation.</p>
         </details>
+        <details class="policy">
+          <summary class="small">Content logging{% if p.logs_content(now) %} <span class="badge high">on</span>{% endif %}</summary>
+          <form method="post" action="/admin/clients/{{ c.id }}/logging" class="row wrap">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <label class="check"><input type="checkbox" name="enabled" {% if p.logs_content(now) %}checked{% endif %}> keep this client's prompts and replies</label>
+            <label class="inline-field">for <input type="number" name="hours" min="0.1" step="any" placeholder="always" value=""> hours</label>
+            <button type="submit" class="secondary">Save</button>
+          </form>
+          {% if p.logs_content(now) and p.log_content_until %}<p class="small muted">On until <time data-ts="{{ p.log_content_until }}">{{ p.log_content_until | int }}</time>.</p>{% endif %}
+          <form method="post" action="/admin/clients/{{ c.id }}/purge-content" data-confirm="Delete the logged prompts and replies of {{ c.name }}?">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="secondary">Delete its logged content</button>
+          </form>
+          <p class="small muted">For debugging. Stored encrypted, kept {{ content_days }} days, cut at {{ content_kb }} KB; only admins with the content permission can read it, and each view is audited. The client gets an <code>X-QueueRouter-Logging: on</code> header so logging is never secret.</p>
+        </details>
     </td>
   </tr>
   {% else %}

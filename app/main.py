@@ -24,7 +24,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from . import __version__, anthropic_api, responses_api
+from . import __version__, anthropic_api, content_log, responses_api, structured
 from . import jobs as jobs_mod
 from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
@@ -60,6 +60,7 @@ log = logging.getLogger("queuerouter")
 
 HEALTH_INTERVAL_S = 30
 HISTORY_POINTS, HISTORY_EVERY_S = 360, 5  # dashboard chart: 30 minutes
+CONTENT_CAPTURE_MAX = 16 * 1024 * 1024  # streamed reply bytes kept for content logging (cut later)
 CATALOG_MAX_AGE_S = 3600
 
 
@@ -80,6 +81,7 @@ class RequestLog:
 
     def __init__(self, request_id: str, method: str, path: str, ip: str) -> None:
         self.started = time.monotonic()
+        self.content: tuple[bytes, bytes] | None = None  # (request, reply) when content logging is on
         self.fields: dict = {
             "id": request_id,
             "method": method,
@@ -124,6 +126,8 @@ class RequestLog:
         stats.recent.append(entry)
         if stats.sink:
             stats.sink(entry)
+        if self.content is not None and stats.content_sink:
+            stats.content_sink(f["id"], f["client"] or "default", *self.content)
         log.info(json.dumps(f))
 
 
@@ -148,6 +152,7 @@ class Admission:
     steps: tuple[Step, ...] = ()  # alias fallback chain (first = primary); empty = just this request
     triggers: frozenset[str] = frozenset()
     run: Run | None = None  # agent run this request belongs to (budgets, loop detection)
+    log_request: bytes | None = None  # set when the client has content logging on
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
@@ -320,17 +325,30 @@ def create_app(
         alerts.observe(entry)
 
     stats.sink = sink
+    pending_content: list[tuple[str, float, str, bytes, bytes]] = []
+    stats.content_sink = lambda rid, client, req, resp: pending_content.append((rid, time.time(), client, req, resp))
 
     async def flush_usage() -> None:
-        """Write finished requests to the database off the event loop."""
-        if not pending_usage:
-            return
-        rows = pending_usage[:]
-        pending_usage.clear()
-        try:
-            await asyncio.to_thread(store.record_requests, rows, cfg().request_log_days > 0)
-        except Exception as exc:  # never let logging break serving
-            log.error(json.dumps({"event": "usage_write_failed", "error": repr(exc)[:200], "rows": len(rows)}))
+        """Write finished requests (and logged content) to the database off the event loop."""
+        if pending_usage:
+            rows = pending_usage[:]
+            pending_usage.clear()
+            try:
+                await asyncio.to_thread(store.record_requests, rows, cfg().request_log_days > 0)
+            except Exception as exc:  # never let logging break serving
+                log.error(json.dumps({"event": "usage_write_failed", "error": repr(exc)[:200], "rows": len(rows)}))
+        if pending_content:
+            limit = cfg().content_log_max_kb * 1024
+            contents = []
+            for rid, ts, client, req, resp in pending_content:
+                request_text, cut_req = content_log.clip(req.decode("utf-8", "replace"), limit)
+                reply_text, cut_resp = content_log.clip(content_log.readable_reply(resp), limit)
+                contents.append((rid, ts, client, request_text, reply_text, cut_req or cut_resp))
+            pending_content.clear()
+            try:
+                await asyncio.to_thread(store.save_contents, contents)
+            except Exception as exc:
+                log.error(json.dumps({"event": "content_write_failed", "error": repr(exc)[:200]}))
 
     def restore_rate_windows() -> None:
         """After a restart, rebuild the last 24 h of rate-limit windows from the request log."""
@@ -385,6 +403,7 @@ def create_app(
                 await asyncio.to_thread(store.prune_notifications)
                 await asyncio.to_thread(store.prune_responses, responses_api.STORE_DAYS)
                 await asyncio.to_thread(store.prune_jobs, cfg().job_retention_days)
+                await asyncio.to_thread(store.prune_content, cfg().content_log_days)
                 try:
                     await asyncio.to_thread(auto_backup, store, bootstrap.data_dir, cfg().backup_keep_days)
                 except Exception as exc:  # e.g. disk full: say so, keep serving
@@ -1517,6 +1536,7 @@ def create_app(
             run=rkey[:80] if rkey else None,
             stream=isinstance(payload, dict) and payload.get("stream") is True,
         )
+        keep_content = client.policy.logs_content(time.time())
         hints = {
             "X-Request-Id": request_id,
             "X-QueueRouter-Queue-Depth": str(queue.queued),
@@ -1524,6 +1544,8 @@ def create_app(
             "X-QueueRouter-Est-Wait-Ms": str(estimate_wait_ms(position)),
             "X-QueueRouter-Slots": f"{queue.active}/{queue.max_concurrency}",
         }
+        if keep_content:
+            hints["X-QueueRouter-Logging"] = "on"  # never secret: the client is told
         adm = Admission(
             request_id,
             client.name,
@@ -1542,6 +1564,7 @@ def create_app(
             tuple(steps),
             triggers,
             run,
+            log_request=body if keep_content else None,
         )
         if rlog.fields["stream"]:
             return StreamingResponse(
@@ -1589,6 +1612,11 @@ def create_app(
                             await response.aclose()
                         status = response.status_code
                         outcome = "done" if status < 400 else "error"
+                        if adm.log_request is not None:
+                            rlog.content = (adm.log_request, content)
+                        verdict = None
+                        if status < 400 and cfg().structured_repair:
+                            content, verdict = repair_structured(adm, content)
                         if status < 400:
                             prompt, completion, cached = usage_from_body(content)
                             rlog.fields.update(
@@ -1601,6 +1629,8 @@ def create_app(
                         headers.update(adm.hints)
                         headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])
                         headers["X-QueueRouter-Model"] = rlog.fields["target_model"] or rlog.fields["model"] or ""
+                        if verdict:
+                            headers["X-QueueRouter-Structured"] = verdict
                         return Response(content, status, headers=headers)
             return error_response("no response", 502, "upstream_error")
         except TimeoutError:
@@ -1629,6 +1659,7 @@ def create_app(
         outcome, status = "error", 200
         response = None
         sniffer = UsageSniffer()
+        captured = bytearray() if adm.log_request is not None else None
         try:
             async with contextlib.aclosing(chained(adm)) as events:
                 async for event in events:
@@ -1671,6 +1702,8 @@ def create_app(
                         try:
                             async for chunk in response.aiter_bytes():
                                 sniffer.feed(chunk)
+                                if captured is not None and len(captured) < CONTENT_CAPTURE_MAX:
+                                    captured += chunk
                                 yield chunk
                                 if adm.expired():
                                     outcome, status = "timeout", 504
@@ -1689,6 +1722,8 @@ def create_app(
             outcome = "cancelled"
             raise
         finally:
+            if captured is not None:
+                rlog.content = (adm.log_request or b"", bytes(captured))
             if response is not None:
                 await response.aclose()
             started = _granted_at(rlog)
@@ -1746,3 +1781,21 @@ def build_app() -> FastAPI:
     except DataDirError as exc:  # a configuration problem, not a bug: no traceback
         print(f"QueueRouter cannot start: {exc}", file=sys.stderr, flush=True)
         raise SystemExit(78) from None  # EX_CONFIG
+
+
+def repair_structured(adm: Admission, content: bytes) -> tuple[bytes, str | None]:
+    """Fix broken JSON in a JSON-mode reply or tool-call arguments (see app/structured.py)."""
+    if b"response_format" not in adm.body and b"tool_calls" not in content:
+        return content, None
+    try:
+        request, reply = json.loads(adm.body), json.loads(content)
+    except ValueError:
+        return content, None
+    if not isinstance(request, dict) or not isinstance(reply, dict):
+        return content, None
+    verdict = structured.repair_reply(request, reply)
+    if verdict:
+        adm.rlog.fields["structured"] = verdict
+    if verdict == "repaired":
+        return json.dumps(reply, ensure_ascii=False).encode(), verdict
+    return content, verdict

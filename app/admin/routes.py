@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import dataclasses
 import io
 import json
 import logging
@@ -76,6 +77,8 @@ MESSAGES = {
     "read": "All notifications marked as read.",
     "2fa_off": "Two-factor sign-in is off.",
     "backup_missing": "That backup file doesn't exist.",
+    "content_purged": "Logged prompts and replies were deleted.",
+    "content_missing": "No logged content for that request (logging was off, or it expired).",
     "2fa_reset": "Two-factor sign-in was reset for that user; they sign in with their password "
     "and can set it up again.",
 }
@@ -110,6 +113,22 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Jobs",
         "Keep finished jobs (days)",
         "Finished jobs, batches and their result files are deleted after this.",
+    ),
+    "content_log_days": (
+        "Usage",
+        "Keep logged content (days)",
+        "Prompts and replies of clients with content logging on (Clients page).",
+    ),
+    "content_log_max_kb": (
+        "Usage",
+        "Logged content size limit (KB)",
+        "Per request and per reply; longer ones are cut.",
+    ),
+    "structured_repair": (
+        "Upstream",
+        "Repair broken JSON",
+        "When a JSON-mode reply or tool-call arguments aren't valid JSON, fix common breakage "
+        "(code fences, extra text, trailing commas, unclosed brackets).",
     ),
     "backup_keep_days": (
         "Backup",
@@ -624,6 +643,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             priorities=PRIORITIES,
             live=live,
             plugin=plugin_install_commands(base),
+            now=time.time(),
+            content_days=store.get_tunables().get("content_log_days", Settings().content_log_days),
+            content_kb=store.get_tunables().get("content_log_max_kb", Settings().content_log_max_kb),
         )
 
     @app.post("/admin/clients")
@@ -670,6 +692,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def clients_policy(client_id: int, request: Request):
         session, form = await require_post(request, "admin")
         try:
+            current = next((c.policy for c in store.list_clients() if c.id == client_id), None)
+            if current is None:
+                raise KeyError(client_id)
             models = tuple(
                 m.strip() for m in str(form.get("allowed_models", "")).replace("\n", ",").split(",") if m.strip()
             )
@@ -695,6 +720,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 run_max_minutes=_opt(form, "run_max_minutes", float, 0.1),
                 loop_threshold=_opt(form, "loop_threshold", int, 2),
                 loop_action="reject" if form.get("loop_action") == "reject" else "warn",
+                log_content=current.log_content,  # set with its own form (below)
+                log_content_until=current.log_content_until,
             )
             store.update_client(client_id, session.user.username, policy=policy)
         except RulesError:
@@ -703,6 +730,57 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             return back("/admin/clients", error="invalid")
         ctx.reload()
         return back("/admin/clients", "saved")
+
+    @app.post("/admin/clients/{client_id}/logging")
+    async def clients_logging(client_id: int, request: Request):
+        """Content logging on/off for one client (optionally for N hours only)."""
+        session, form = await require_post(request, "admin")
+        target = next((c for c in store.list_clients() if c.id == client_id), None)
+        if target is None:
+            return back("/admin/clients", error="invalid")
+        enabled = form.get("enabled") == "on"
+        hours = str(form.get("hours", "")).strip()
+        try:
+            until = time.time() + float(hours) * 3600 if enabled and hours else None
+        except ValueError:
+            return back("/admin/clients", error="invalid")
+        policy = dataclasses.replace(target.policy, log_content=enabled, log_content_until=until)
+        store.update_client(client_id, session.user.username, policy=policy)
+        ctx.reload()
+        return back("/admin/clients", "saved")
+
+    @app.post("/admin/clients/{client_id}/purge-content")
+    async def clients_purge_content(client_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        target = next((c for c in store.list_clients() if c.id == client_id), None)
+        if target is None:
+            return back("/admin/clients", error="invalid")
+        store.purge_content(target.name, session.user.username)
+        return back("/admin/clients", "content_purged")
+
+    @app.post("/admin/requests/purge-content")
+    async def requests_purge_content(request: Request):
+        session, _ = await require_post(request, "admin")
+        store.purge_content(None, session.user.username)
+        return back("/admin/requests", "content_purged")
+
+    @app.get("/admin/requests/{request_id}/content")
+    async def request_content(request_id: str, request: Request):
+        session = require(request, "admin")
+        if not session.user.can_view_content:
+            raise PermissionError("content")
+        content = await asyncio.to_thread(store.get_content, request_id)
+        if content is None:
+            return back("/admin/requests", error="content_missing")
+        store.audit(session.user.username, "content.view", request_id, {"client": content["client"]})
+        return page(
+            request,
+            "request_content.html",
+            session,
+            content=content,
+            request_text=_pretty(content["request"]),
+            response_text=_pretty(content["response"]),
+        )
 
     @app.get("/admin/clients/{client_id}/opencode.json")
     async def clients_opencode(client_id: int, request: Request):
@@ -911,7 +989,14 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         filters = {k: request.query_params.get(k, "") for k in ("client", "outcome", "model", "upstream", "tag")}
         rows = await asyncio.to_thread(store.list_requests, 300, **filters)
         options = await asyncio.to_thread(store.request_filter_values)
-        return page(request, "requests.html", session, rows=rows, filters=filters, options=options)
+        with_content = (
+            await asyncio.to_thread(store.content_ids, [r["id"] for r in rows])
+            if session.user.can_view_content
+            else set()
+        )
+        return page(
+            request, "requests.html", session, rows=rows, filters=filters, options=options, with_content=with_content
+        )
 
     async def usage_summary(request: Request):
         days = _clamp_int(request.query_params.get("days"), 30, 1, 366)
@@ -1466,3 +1551,10 @@ def _mask_url(url: str) -> str:
     scheme, _, rest = url.partition("://")
     host, _, path = rest.partition("/")
     return f"{scheme}://{host}/" + ("…" if path else "")
+
+
+def _pretty(text: str) -> str:
+    try:
+        return json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+    except ValueError:
+        return text

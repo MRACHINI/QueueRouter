@@ -281,6 +281,18 @@ MIGRATIONS: list[str] = [
         metadata TEXT
     );
     """,
+    # 13: opt-in content logging (prompts and replies, encrypted)
+    """
+    CREATE TABLE request_content (
+        id TEXT PRIMARY KEY,
+        ts REAL NOT NULL,
+        client TEXT NOT NULL,
+        request TEXT NOT NULL,
+        response TEXT NOT NULL,
+        truncated INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX request_content_ts ON request_content (ts);
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -1320,6 +1332,51 @@ class Store:
         columns = ", ".join(f"{name} = ?" for name in fields)
         with self.tx() as db:
             db.execute(f"UPDATE batches SET {columns} WHERE id = ?", (*fields.values(), batch_id))  # noqa: S608
+
+    # -- opt-in content logging ----------------------------------------------------------
+
+    def save_contents(self, rows: list[tuple[str, float, str, str, str, bool]]) -> None:
+        """(request id, ts, client, request text, reply text, truncated)."""
+        with self.tx() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO request_content (id, ts, client, request, response, truncated) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [(i, ts, c, self.encrypt(req), self.encrypt(resp), int(cut)) for i, ts, c, req, resp, cut in rows],
+            )
+
+    def get_content(self, request_id: str) -> dict | None:
+        rows = self.query("SELECT * FROM request_content WHERE id = ?", (request_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "id": row["id"],
+            "ts": row["ts"],
+            "client": row["client"],
+            "request": self.decrypt(row["request"]),
+            "response": self.decrypt(row["response"]),
+            "truncated": bool(row["truncated"]),
+        }
+
+    def content_ids(self, request_ids: list[str]) -> set[str]:
+        if not request_ids:
+            return set()
+        marks = ",".join("?" for _ in request_ids)
+        rows = self.query(f"SELECT id FROM request_content WHERE id IN ({marks})", tuple(request_ids))  # noqa: S608
+        return {r["id"] for r in rows}
+
+    def purge_content(self, client: str | None, actor: str) -> int:
+        with self.tx() as db:
+            if client is None:
+                cur = db.execute("DELETE FROM request_content")
+            else:
+                cur = db.execute("DELETE FROM request_content WHERE client = ?", (client,))
+        self.audit(actor, "content.purge", client or "*", {"rows": cur.rowcount})
+        return cur.rowcount
+
+    def prune_content(self, keep_days: float) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM request_content WHERE ts < ?", (time.time() - keep_days * 86_400,))
 
     # -- Responses API conversations ----------------------------------------------------
 
