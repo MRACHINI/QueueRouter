@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 
 from .config import Bootstrap, ClientKey, Settings
-from .store import Pool, Store, Upstream
+from .store import Alias, Pool, Store, Upstream
 
 log = logging.getLogger("queuerouter")
 
@@ -45,6 +45,7 @@ class Snapshot:
     upstreams: dict[int, Target] = field(default_factory=dict)  # in display / failover order
     mode: str = "running"
     maintenance_message: str = ""
+    aliases: dict[str, Alias] = field(default_factory=dict)  # enabled aliases by name
 
     @property
     def configured(self) -> bool:
@@ -66,7 +67,8 @@ def load_snapshot(store: Store) -> Snapshot:
     }
     mode = store.get_meta("mode") or "running"
     message = store.get_meta("maintenance_message") or ""
-    return Snapshot(settings, clients, pools, upstreams, mode if mode in MODES else "running", message)
+    aliases = {a.name: a for a in store.list_aliases() if a.enabled}
+    return Snapshot(settings, clients, pools, upstreams, mode if mode in MODES else "running", message, aliases)
 
 
 def open_store(bootstrap: Bootstrap, seed: Settings | None) -> Store:
