@@ -5,6 +5,24 @@ from __future__ import annotations
 import time
 from collections import Counter, deque
 
+BUCKETS_S = (0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600)  # Prometheus histogram upper bounds
+
+
+class Histogram:
+    def __init__(self) -> None:
+        self.counts = [0] * (len(BUCKETS_S) + 1)  # last = +Inf
+        self.total = 0.0
+        self.n = 0
+
+    def observe(self, seconds: float) -> None:
+        self.n += 1
+        self.total += seconds
+        for i, bound in enumerate(BUCKETS_S):
+            if seconds <= bound:
+                self.counts[i] += 1
+                return
+        self.counts[-1] += 1
+
 
 def _summary(values: deque[float]) -> dict[str, int]:
     if not values:
@@ -40,6 +58,8 @@ class Stats:
         self.recent: deque[dict] = deque(maxlen=50)  # last request log entries, for the dashboard
         self.sink = None  # optional callable(entry) receiving every finished request (usage log)
         self.content_sink = None  # optional callable(request id, client, request bytes, reply bytes)
+        self.queue_hist = Histogram()  # seconds waiting for a slot
+        self.upstream_hist = Histogram()  # seconds from slot to last byte (completed requests)
 
     def record(
         self,
@@ -55,8 +75,10 @@ class Stats:
         self.retries += retries
         if wait_ms is not None:
             self.wait_ms.append(wait_ms)
+            self.queue_hist.observe(wait_ms / 1000)
         if upstream_ms is not None and outcome == "done":
             self.upstream_ms.append(upstream_ms)
+            self.upstream_hist.observe(upstream_ms / 1000)
         self.prompt_tokens += prompt_tokens or 0
         self.completion_tokens += completion_tokens or 0
         per_client = self.clients.setdefault(client, ClientStats())
