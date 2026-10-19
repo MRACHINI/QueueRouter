@@ -1043,6 +1043,16 @@ Fallback chains (incl. refusal fallback), context-length pre-check, default/forc
 sticky routing, session-aware scheduling + fair share, run budgets, loop detection, queue-depth
 hints, Playground.
 
+**Status: shipped as v0.5.0** (session-aware scheduling, fair share and queue hints already came
+in v0.2). Also delivered on the way: opencode auto-configuration (v0.3.4) and cost at official
+prices with plan savings (v0.4.0). Notes vs. the plan:
+- Refusal detection uses errors, `finish_reason` and opening-phrase heuristics; the optional
+  "judge" model was not built (heuristics proved sufficient so far).
+- Fallback targets are plain model names on any upstream (the primary may be pinned).
+- Context pre-check uses a character-based estimate with a 15% margin, so it only refuses prompts
+  that clearly can't fit (no tokenizer download needed).
+- Request tags moved here from Phase 1a.
+
 ### Phase 2 — Compatibility, jobs, insight and alerts
 Anthropic Messages + OpenAI Responses adapters, structured-output repair, async jobs + Batch API
 + scheduled/idle execution, live dashboard (SSE), Usage charts + CSV, Requests log, opt-in
