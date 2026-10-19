@@ -10,14 +10,54 @@ Two layers:
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import NamedTuple
 
 PRIORITIES = ("high", "normal", "low")
 DEFAULT_TRUSTED_PROXIES = "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16,127.0.0.1/32"
 
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+
+ON_LIMIT = ("delay", "reject")
+
+
+@dataclass(frozen=True)
+class ClientPolicy:
+    """Per-client limits. ``None`` / empty = no limit (or the global default)."""
+
+    allowed_models: tuple[str, ...] = ()  # empty = every model
+    rpm: int | None = None  # requests per minute
+    rpd: int | None = None  # requests per day (rolling 24 h)
+    tpm: int | None = None  # tokens per minute
+    tpd: int | None = None  # tokens per day
+    on_limit: str = "delay"  # delay = wait in the queue until allowed; reject = 429 + Retry-After
+    max_queued: int | None = None  # requests waiting at once (beyond -> 429)
+    max_active: int | None = None  # requests in flight at once
+    queue_timeout_s: float | None = None  # overrides the global max queue wait
+    total_timeout_s: float | None = None  # whole request incl. generation
+    max_retries: int | None = None  # overrides the global retry budget
+
+    @classmethod
+    def from_json(cls, text: str | None) -> ClientPolicy:
+        try:
+            data = json.loads(text or "{}")
+        except ValueError:
+            data = {}
+        known = {f.name for f in fields(cls)}
+        data = {k: v for k, v in data.items() if k in known}
+        if "allowed_models" in data:
+            data["allowed_models"] = tuple(data["allowed_models"] or ())
+        return cls(**data)
+
+    def to_json(self) -> str:
+        return json.dumps({k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(self).items()})
+
+    @property
+    def rate_limited(self) -> bool:
+        return any(v is not None for v in (self.rpm, self.rpd, self.tpm, self.tpd))
 
 
 @dataclass(frozen=True)
@@ -27,6 +67,7 @@ class ClientKey:
     name: str
     key_hash: str
     priority: str = "normal"
+    policy: ClientPolicy = ClientPolicy()
 
 
 class ParsedKey(NamedTuple):

@@ -7,6 +7,26 @@
     <span class="muted small" id="live-status">live</span>
   </div>
 
+  {% if state.mode != "running" %}
+  <p class="notice err" role="status"><strong>Mode: {{ state.mode }}</strong> —
+    {% if state.mode == "paused" %}requests are accepted and queued, but none are started.
+    {% elif state.mode == "draining" %}new requests get 503; the queue is still being worked off.
+    {% else %}new requests get 503 and queued ones were cancelled; running ones finish.{% endif %}
+    {% if state.maintenance_message %}<br>Message: {{ state.maintenance_message }}{% endif %}</p>
+  {% endif %}
+
+  {% if user.can("operator") %}
+  <form method="post" action="/admin/mode" class="card row wrap mode-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <strong>Mode</strong>
+    <select name="mode" aria-label="Mode">
+      {% for m in state.modes %}<option value="{{ m }}" {% if m == state.mode %}selected{% endif %}>{{ m }}</option>{% endfor %}
+    </select>
+    <input name="message" value="{{ state.maintenance_message }}" placeholder="message shown to clients (optional)" class="grow" maxlength="300">
+    <button type="submit" class="secondary">Apply</button>
+  </form>
+  {% endif %}
+
   {% if not state.configured %}
   <p class="notice err">No upstream is configured yet, so requests get <code>503</code>.
     Add one under <a href="/admin/upstreams">Upstreams</a>.</p>

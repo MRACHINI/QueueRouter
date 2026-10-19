@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from .config import PRIORITIES, TUNABLES, Settings, parse_access_keys
+from .config import PRIORITIES, TUNABLES, ClientPolicy, Settings, parse_access_keys
 
 log = logging.getLogger("queuerouter")
 
@@ -92,6 +92,10 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX audit_log_ts ON audit_log(ts);
     """,
+    # 2: per-client policies (JSON, see config.ClientPolicy)
+    """
+    ALTER TABLE clients ADD COLUMN policy TEXT NOT NULL DEFAULT '{}';
+    """,
 ]
 
 
@@ -139,6 +143,7 @@ class Client:
     expires_at: float | None
     notes: str
     created_at: float
+    policy: ClientPolicy = ClientPolicy()
 
     @property
     def expired(self) -> bool:
@@ -446,6 +451,7 @@ class Store:
                 r["expires_at"],
                 r["notes"],
                 r["created_at"],
+                ClientPolicy.from_json(r["policy"]),
             )
             for r in self.query("SELECT * FROM clients ORDER BY name")
         ]
@@ -469,7 +475,9 @@ class Store:
     def update_client(self, client_id: int, actor: str, **fields: object) -> None:
         if "priority" in fields and fields["priority"] not in PRIORITIES:
             raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
-        self._update("clients", client_id, {"name", "priority", "enabled", "expires_at", "notes"}, fields)
+        if isinstance(fields.get("policy"), ClientPolicy):
+            fields["policy"] = fields["policy"].to_json()
+        self._update("clients", client_id, {"name", "priority", "enabled", "expires_at", "notes", "policy"}, fields)
         self.audit(actor, "client.update", str(client_id), fields)
 
     def regenerate_client_key(self, client_id: int, actor: str) -> str:

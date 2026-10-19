@@ -192,3 +192,10 @@ label.inline-field input { width: 7.5em; }
 .grow { flex: 1 1 16em; }
 .badge.ok { color: var(--ok-text); border-color: var(--ok-text); }
 [hidden] { display: none !important; }
+
+/* client limits and mode form */
+details.policy { margin-top: 6px; }
+details.policy form { margin-top: 8px; }
+.grid.tight { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.span-all { grid-column: 1 / -1; }
+.mode-form { margin-bottom: 16px; }

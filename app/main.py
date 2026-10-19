@@ -23,10 +23,11 @@ from .admin import AdminContext, mount_admin
 from .auth import AuthGuard, client_ip, find_client, presented_key
 from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
-from .config import PRIORITIES, Bootstrap, ClientKey, Settings
+from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
+from .ratelimit import RateLimiter
 from .sessions import session_key
 from .slots import LANE_NAMES, LANES, Candidate, SlotQueue
-from .state import Target, load_snapshot, open_store
+from .state import MODES, Target, load_snapshot, open_store
 from .stats import Stats
 from .upstream import (
     BUSY_STATUS,
@@ -118,6 +119,11 @@ class Admission:
     body: bytes
     rlog: RequestLog
     hints: dict[str, str]
+    policy: ClientPolicy = ClientPolicy()
+    deadline: float | None = None  # monotonic time by which the whole request must finish
+
+    def expired(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
 
 
 # Events from the attempt loop to the response writers.
@@ -170,7 +176,26 @@ def create_app(
         target = snapshot.upstreams.get(upstream_id)
         return target is not None and target.usable and circuits.allows(upstream_id)
 
-    queue = SlotQueue(available=available, on_grant=lambda c: circuits.begin(c.upstream_id))
+    limiter = RateLimiter()
+
+    def policy_of(client: str) -> ClientPolicy:
+        for key in snapshot.clients.values():
+            if key.name == client:
+                return key.policy
+        return ClientPolicy()
+
+    def eligible(ticket) -> bool:
+        """Client-level gates checked whenever a slot could be handed out."""
+        policy = policy_of(ticket.client)
+        if policy.max_active is not None and queue.client_active(ticket.client) >= policy.max_active:
+            return False
+        return limiter.wait_s(ticket.client, policy) <= 0  # on_limit=delay: wait in the queue
+
+    def on_grant(ticket) -> None:
+        circuits.begin(ticket.target.upstream_id)
+        limiter.record_request(ticket.client)
+
+    queue = SlotQueue(available=available, on_grant=on_grant, eligible=eligible)
 
     def cfg() -> Settings:
         return snapshot.settings
@@ -178,6 +203,9 @@ def create_app(
     def apply_snapshot() -> None:
         s = snapshot.settings
         queue.set_scheduling(s.aging_s, s.session_window_s, s.session_aware, s.fair_share, s.lb_strategy)
+        queue.paused = snapshot.mode == "paused"
+        if snapshot.mode == "maintenance":
+            queue.evict_waiters()
         queue.set_pools({p.id: (p.max_concurrency, p.min_spacing_ms) for p in snapshot.pools.values()})
         circuits.threshold, circuits.cooldown_s = s.circuit_threshold, s.circuit_cooldown_s
         guard.limit, guard.block_s = s.auth_fail_limit, s.auth_block_s
@@ -285,6 +313,28 @@ def create_app(
             return error_response("no upstream configured yet: add one in the admin UI", 503, "not_configured")
         return None
 
+    def mode_refusal() -> JSONResponse | None:
+        """Draining and maintenance refuse new requests; paused still accepts (and queues)."""
+        if snapshot.mode in ("draining", "maintenance"):
+            message = snapshot.maintenance_message or f"QueueRouter is {snapshot.mode}; try again later"
+            return error_response(message, 503, snapshot.mode, **{"Retry-After": "300"})
+        return None
+
+    def policy_refusal(client: ClientKey, model: str | None) -> JSONResponse | None:
+        """Admission checks from the client's policy (the only place QueueRouter itself says no)."""
+        policy = client.policy
+        if policy.allowed_models and model not in policy.allowed_models:
+            return error_response(f"model '{model}' is not allowed for this key", 403, "model_not_allowed")
+        if policy.max_queued is not None and queue.client_queued(client.name) >= policy.max_queued:
+            return error_response(
+                "too many queued requests for this key", 429, "client_queue_full", **{"Retry-After": "5"}
+            )
+        if policy.on_limit == "reject" and (wait := limiter.wait_s(client.name, policy)) > 0:
+            return error_response(
+                "rate limit reached for this key", 429, "rate_limited", **{"Retry-After": str(math.ceil(wait))}
+            )
+        return None
+
     def candidates_for(model: str | None) -> tuple[Candidate, ...]:
         """Usable upstreams for ``model``: those that list it, or all of them if none does
         (the upstream then decides; lists may be stale or incomplete)."""
@@ -345,6 +395,12 @@ def create_app(
             "configured": snapshot.configured,
             "upstream": ", ".join(t.upstream.name for t in snapshot.upstreams.values() if t.usable) or None,
             "upstreams": upstream_info(),
+            "mode": snapshot.mode,
+            "maintenance_message": snapshot.maintenance_message,
+            "modes": MODES,
+            "rate_limits": {
+                key.name: limiter.usage(key.name) for key in snapshot.clients.values() if key.policy.rate_limited
+            },
             **state,
             **stats.snapshot(),
             "recent": list(stats.recent)[-25:],
@@ -363,8 +419,17 @@ def create_app(
 
     # -- the attempt loop ----------------------------------------------------------------
 
-    def can_retry(retries: int) -> bool:
-        return cfg().max_retries < 0 or retries < cfg().max_retries
+    def step(adm: Admission, keepalive: float) -> float:
+        """How long to wait for a slot before the next keep-alive / deadline check."""
+        if adm.deadline is None:
+            return keepalive
+        return max(0.0, min(keepalive, adm.deadline - time.monotonic()))
+
+    def can_retry(adm: Admission, retries: int) -> bool:
+        if adm.expired():
+            return False
+        budget = adm.policy.max_retries if adm.policy.max_retries is not None else cfg().max_retries
+        return budget < 0 or retries < budget
 
     def build_request(adm: Admission, target: Target) -> httpx.Request:
         s = cfg()
@@ -400,9 +465,13 @@ def create_app(
                     if not ticket.granted:
                         yield Queued(queue.position(ticket))
                 keepalive = cfg().keepalive_interval_s
-                while not await queue.wait(ticket, keepalive):
-                    max_wait = cfg().max_queue_wait_s
-                    if max_wait and ticket.wait_s >= max_wait:
+                while not await queue.wait(ticket, step(adm, keepalive)):
+                    if ticket.future.cancelled():  # evicted: maintenance mode
+                        message = snapshot.maintenance_message or "QueueRouter is in maintenance mode"
+                        yield Failed(503, message, "maintenance")
+                        return
+                    max_wait = adm.policy.queue_timeout_s or cfg().max_queue_wait_s
+                    if (max_wait and ticket.wait_s >= max_wait) or adm.expired():
                         yield None
                         return
                     yield Waiting(queue.position(ticket), ticket.wait_s)
@@ -427,7 +496,7 @@ def create_app(
                         reason = type(exc).__name__
                     else:
                         status = response.status_code
-                        if status == BUSY_STATUS and can_retry(retries):
+                        if status == BUSY_STATUS and can_retry(adm, retries):
                             delay = retry_delay(
                                 retries, response.headers, cfg().retry_base_delay_s, cfg().retry_max_delay_s
                             )
@@ -444,7 +513,7 @@ def create_app(
 
                     circuits.failure(target.id, reason)
                     verdict = True
-                    if not can_retry(retries):
+                    if not can_retry(adm, retries):
                         if response is not None:
                             yield Got(response, target)  # pass the upstream's error through
                         else:
@@ -506,8 +575,9 @@ def create_app(
 
     @app.get("/v1/models")
     async def models(request: Request):
-        """Union of all usable upstreams' model lists (cached; doesn't use a slot)."""
-        _, denied = authenticate(request)
+        """Union of all usable upstreams' model lists (cached; doesn't use a slot), limited to the
+        client's allowed models."""
+        client, denied = authenticate(request)
         if denied:
             return denied
         if unavailable := not_configured():
@@ -522,7 +592,9 @@ def create_app(
                 merged.setdefault(model["id"], model)
         if not merged and all(catalogs.ids(t.id) is None for t in targets):
             return error_response("no upstream returned a model list", 502, "upstream_error")
-        return {"object": "list", "data": list(merged.values())}
+        allowed = client.policy.allowed_models
+        data = [m for m in merged.values() if not allowed or m["id"] in allowed]
+        return {"object": "list", "data": data}
 
     @app.get("/v1/{path:path}")
     async def passthrough_get(path: str, request: Request):
@@ -549,7 +621,7 @@ def create_app(
         client, denied = authenticate(request)
         if denied:
             return denied
-        if unavailable := not_configured():
+        if unavailable := not_configured() or mode_refusal():
             return unavailable
 
         max_body = int(cfg().max_body_mb * 1024 * 1024)
@@ -569,6 +641,8 @@ def create_app(
         except ValueError:
             payload = {}
         model = payload.get("model") if isinstance(payload, dict) else None
+        if refusal := policy_refusal(client, model if isinstance(model, str) else None):
+            return refusal
 
         request_id = f"qr-{uuid.uuid4().hex[:12]}"
         lane = request_lane(request, client)
@@ -603,6 +677,8 @@ def create_app(
             body,
             rlog,
             hints,
+            client.policy,
+            time.monotonic() + client.policy.total_timeout_s if client.policy.total_timeout_s else None,
         )
         if rlog.fields["stream"]:
             return StreamingResponse(
@@ -630,8 +706,9 @@ def create_app(
     async def nonstream_flow(adm: Admission) -> Response:
         rlog = adm.rlog
         outcome, status = "error", 500
+        remaining = adm.deadline - time.monotonic() if adm.deadline else None
         try:
-            async with contextlib.aclosing(attempts(adm)) as events:
+            async with asyncio.timeout(remaining), contextlib.aclosing(attempts(adm)) as events:
                 async for event in events:
                     if isinstance(event, Backoff):
                         await asyncio.sleep(event.delay)
@@ -661,6 +738,9 @@ def create_app(
                         headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])
                         return Response(content, status, headers=headers)
             return error_response("no response", 502, "upstream_error")
+        except TimeoutError:
+            outcome, status = "timeout", 504
+            return error_response("request exceeded this key's total time limit", 504, "request_timeout")
         except httpx.HTTPError as exc:
             status = 502
             return error_response(f"upstream error: {type(exc).__name__}", 502, "upstream_error")
@@ -671,6 +751,9 @@ def create_app(
             started = _granted_at(rlog)
             upstream_ms = round((time.monotonic() - started) * 1000) if started else None
             rlog.finish(stats, outcome=outcome, status=status, upstream_ms=upstream_ms)
+            limiter.record_tokens(
+                adm.client, (rlog.fields["prompt_tokens"] or 0) + (rlog.fields["completion_tokens"] or 0)
+            )
 
     # -- streaming -----------------------------------------------------------------------
 
@@ -720,6 +803,12 @@ def create_app(
                             async for chunk in response.aiter_bytes():
                                 sniffer.feed(chunk)
                                 yield chunk
+                                if adm.expired():
+                                    outcome, status = "timeout", 504
+                                    yield sse_error(
+                                        "request exceeded this key's total time limit", 504, "request_timeout"
+                                    )
+                                    return
                         except httpx.HTTPError as exc:
                             status = 502
                             yield sse_error(f"upstream stream interrupted: {type(exc).__name__}", 502)
@@ -744,6 +833,7 @@ def create_app(
                 completion_tokens=sniffer.completion_tokens,
                 finish_reason=sniffer.finish_reason,
             )
+            limiter.record_tokens(adm.client, (sniffer.prompt_tokens or 0) + (sniffer.completion_tokens or 0))
 
     return app
 
