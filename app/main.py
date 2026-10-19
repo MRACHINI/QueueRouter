@@ -17,14 +17,15 @@ from dataclasses import dataclass
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from . import __version__
 from .admin import AdminContext, mount_admin
-from .auth import AuthGuard, client_ip, find_client, presented_key
+from .auth import AuthGuard, client_ip, find_client, ip_in, presented_key
 from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
+from .opencode import model_limits, provider_config, wellknown_manifest
 from .ratelimit import RateLimiter
 from .sessions import session_key
 from .slots import LANE_NAMES, LANES, Candidate, SlotQueue
@@ -590,6 +591,66 @@ def create_app(
                 queue.cancel(ticket)
 
     # -- routes ----------------------------------------------------------------------------
+
+    @app.get("/", include_in_schema=False)
+    async def root():
+        return RedirectResponse("/admin", status_code=303)
+
+    def public_base(request: Request) -> str:
+        """The externally visible base URL (PUBLIC_URL, else what the reverse proxy says)."""
+        if bootstrap.public_url:
+            return bootstrap.public_url
+        scheme, host = request.url.scheme, request.headers.get("host", request.url.netloc)
+        peer = request.client.host if request.client else ""
+        if ip_in(peer, bootstrap.trusted_proxies):
+            scheme = request.headers.get("x-forwarded-proto", scheme).split(",")[0].strip()
+            host = request.headers.get("x-forwarded-host", host).split(",")[0].strip()
+        return f"{scheme}://{host}"
+
+    async def opencode_models(client: ClientKey) -> dict[str, dict]:
+        """Every model and alias ``client`` may use, with opencode limits (plan caps applied)."""
+        targets = [t for t in snapshot.upstreams.values() if t.usable]
+        stale = [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s)]
+        if stale:
+            await asyncio.gather(*(refresh_catalog(t) for t in stale))
+        entries: dict[str, dict] = {}
+        caps: dict[str, list[int | None]] = {}
+        for target in targets:
+            for model in catalogs.models(target.id):
+                entries.setdefault(model["id"], model)
+                caps.setdefault(model["id"], []).append(target.pool.context_cap)
+        allowed = client.policy.allowed_models
+        result: dict[str, dict] = {}
+        for model_id, entry in sorted(entries.items()):
+            if not allowed or model_id in allowed:
+                limits = model_limits(entry, caps[model_id])
+                result[model_id] = {"name": model_id, **({"limit": limits} if limits else {})}
+        for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
+            if allowed and alias.name not in allowed and alias.target_model not in allowed:
+                continue
+            pinned = [t for t in targets if not alias.upstream_ids or t.id in alias.upstream_ids]
+            limits = model_limits(entries.get(alias.target_model), [t.pool.context_cap for t in pinned])
+            result[alias.name] = {
+                "name": f"{alias.name} → {alias.target_model}",
+                **({"limit": limits} if limits else {}),
+            }
+        return result
+
+    @app.get("/v1/opencode-config")
+    async def opencode_config(request: Request):
+        """opencode provider config with this client's models (see app/opencode.py)."""
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        return provider_config(public_base(request), await opencode_models(client))
+
+    @app.get("/.well-known/opencode")
+    async def wellknown_posix(request: Request):
+        return wellknown_manifest(public_base(request), "posix")
+
+    @app.get("/windows/.well-known/opencode")
+    async def wellknown_windows(request: Request):
+        return wellknown_manifest(public_base(request), "windows")
 
     @app.get("/health")
     async def health() -> dict:

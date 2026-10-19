@@ -134,33 +134,31 @@ ignored, and the log says so).
 
 ## Use with opencode
 
-The client page shows this config with your URL filled in. `opencode.json`:
+opencode doesn't discover models from custom providers, so QueueRouter generates the provider
+config for it: every model and alias the key may use, with context limits (capped at your plan,
+e.g. ArliAI Pro 262,144) and `timeout: false` (queued requests may wait longer than opencode's
+default). The client page in the admin shows these commands with your key filled in.
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "queuerouter": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "QueueRouter",
-      "options": {
-        "baseURL": "https://queuerouter.example.com/v1",
-        "apiKey": "{env:QUEUEROUTER_KEY}",
-        "timeout": false
-      },
-      "models": {
-        "MODEL_ID": { "name": "MODEL_ID", "limit": { "context": 262144, "output": 16384 } }
-      }
-    }
-  },
-  "model": "queuerouter/MODEL_ID"
-}
+**Automatic (opencode 1.19+, recommended)** — log in once; opencode stores the key and reloads
+the model list from QueueRouter on every start, so new models and aliases just appear:
+
+```bash
+QUEUEROUTER_KEY=<client key> opencode auth login https://queuerouter.example.com
 ```
 
-- `timeout: false` — a queued request may wait longer than opencode's 5-minute default.
-- `limit.context` — the smaller of the model's own context and your plan's cap (ArliAI Pro:
-  262,144); opencode doesn't read it from the API.
-- Model ids (and aliases) come from `GET /v1/models`.
+```powershell
+$env:QUEUEROUTER_KEY="<client key>"; opencode auth login https://queuerouter.example.com/windows
+```
+
+Then pick a `queuerouter/…` model with `/models`. (This uses opencode's `/.well-known/opencode`
+mechanism; the Windows URL just swaps the login command for a PowerShell one.)
+
+**Config file** — for older opencode, or if you prefer files: download the generated config,
+set `OPENCODE_CONFIG` to it and `QUEUEROUTER_KEY` to your key; re-run to refresh.
+
+```bash
+curl -H "Authorization: Bearer <client key>" https://queuerouter.example.com/v1/opencode-config -o ~/.config/opencode/queuerouter.json
+```
 
 Any OpenAI-compatible client works the same way: base URL `https://<domain>/v1`, API key = a
 client key.
@@ -187,6 +185,8 @@ Everything else is configured in the admin UI.
 | `POST /v1/chat/completions`, `POST /v1/*` | queued |
 | `GET /v1/models` | all upstreams' models + aliases, filtered to the client's allowed models |
 | `GET /v1/queue` | queue depth, your client's queued/active, estimated wait |
+| `GET /v1/opencode-config` | generated opencode provider config for your key |
+| `GET /.well-known/opencode` | opencode login manifest (`/windows/.well-known/opencode` for Windows) |
 | `GET /stats` | full stats as JSON (client key required) |
 | `GET /health` | liveness |
 

@@ -187,7 +187,7 @@ async def test_client_lifecycle_applies_live(admin_stack):
             data={"csrf": csrf, "name": "n8n", "priority": "low", "notes": "workflows", "expires": ""},
         )
         key = key_of(created.text)
-        assert "opencode.json" in created.text and key.startswith("qr-")
+        assert "opencode auth login" in created.text and key.startswith("qr-")
         r = await c.post(api, json=body, headers={"Authorization": f"Bearer {key}"})
         assert r.status_code == 200
 

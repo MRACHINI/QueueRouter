@@ -14,29 +14,26 @@
 <p class="muted">Base URL <code id="base-url">{{ base_url }}</code>
   <button type="button" class="ghost" data-copy="#base-url">Copy</button>, API key = the key above.</p>
 
+<details class="card" open>
+  <summary><strong>opencode — automatic</strong> (models and limits stay up to date)</summary>
+  <p class="small">Log in once; opencode then loads every model and alias this key may use, with context
+  limits, each time it starts. Requires a recent opencode (1.19+).</p>
+  <p class="small muted">Linux / macOS:</p>
+<pre class="mono wrap-any" id="oc-posix">QUEUEROUTER_KEY={{ key }} opencode auth login {{ site_url }}</pre>
+  <button type="button" class="secondary" data-copy="#oc-posix">Copy</button>
+  <p class="small muted">Windows (PowerShell):</p>
+<pre class="mono wrap-any" id="oc-windows">$env:QUEUEROUTER_KEY="{{ key }}"; opencode auth login {{ site_url }}/windows</pre>
+  <button type="button" class="secondary" data-copy="#oc-windows">Copy</button>
+  <p class="small muted">Then pick a <code>queuerouter/…</code> model with <code>/models</code> in opencode.</p>
+</details>
+
 <details class="card">
-  <summary><strong>opencode</strong> (<code>opencode.json</code>)</summary>
-<pre class="mono wrap-any" id="opencode-snippet">{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "queuerouter": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "QueueRouter",
-      "options": {
-        "baseURL": "{{ base_url }}",
-        "apiKey": "{env:QUEUEROUTER_KEY}",
-        "timeout": false
-      },
-      "models": {
-        "MODEL_ID": { "name": "MODEL_ID", "limit": { "context": 262144, "output": 16384 } }
-      }
-    }
-  },
-  "model": "queuerouter/MODEL_ID"
-}</pre>
-  <button type="button" class="secondary" data-copy="#opencode-snippet">Copy config</button>
-  <p class="small muted">Set the environment variable <code>QUEUEROUTER_KEY</code> to the key above.
-  Replace <code>MODEL_ID</code> with an id from <code>GET /v1/models</code>.</p>
+  <summary><strong>opencode — config file</strong> (older opencode, or no login)</summary>
+  <p class="small">Download the generated config and point opencode at it (re-run to refresh the model list):</p>
+<pre class="mono wrap-any" id="oc-file">curl -H "Authorization: Bearer {{ key }}" {{ base_url }}/opencode-config -o ~/.config/opencode/queuerouter.json</pre>
+  <button type="button" class="secondary" data-copy="#oc-file">Copy</button>
+  <p class="small muted">Then set <code>OPENCODE_CONFIG=~/.config/opencode/queuerouter.json</code> and
+  <code>QUEUEROUTER_KEY</code> to the key above.</p>
 </details>
 
 <details class="card">
