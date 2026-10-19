@@ -90,7 +90,8 @@ class SlotQueue:
         fair_share: bool = True,
         strategy: str = "least-busy",
         available: Callable[[int], bool] | None = None,
-        on_grant: Callable[[Candidate], None] | None = None,
+        on_grant: Callable[[Ticket], None] | None = None,
+        eligible: Callable[[Ticket], bool] | None = None,
     ) -> None:
         self.aging_s = aging_s
         self.session_window_s = session_window_s
@@ -99,6 +100,8 @@ class SlotQueue:
         self.strategy = strategy
         self.available = available or (lambda upstream_id: True)
         self.on_grant = on_grant
+        self.eligible = eligible or (lambda ticket: True)
+        self.paused = False  # accept and queue, but start nothing
 
         self._pools: dict[int, _Pool] = {0: _Pool(max_concurrency, min_spacing_ms / 1000)}
         self._waiters: list[Ticket] = []
@@ -152,6 +155,22 @@ class SlotQueue:
     def poke(self) -> None:
         """Re-run dispatch (e.g. after a circuit breaker's cooldown ended)."""
         self._dispatch()
+
+    def evict_waiters(self) -> int:
+        """Cancel every waiting ticket (maintenance mode). Running requests are untouched."""
+        evicted = 0
+        for ticket in list(self._waiters):
+            self._waiters.remove(ticket)
+            if not ticket.future.done():
+                ticket.future.cancel()
+                evicted += 1
+        return evicted
+
+    def client_active(self, client: str) -> int:
+        return sum(1 for t in self._running if t.client == client)
+
+    def client_queued(self, client: str) -> int:
+        return sum(1 for t in self._waiters if t.client == client)
 
     # -- introspection -------------------------------------------------------------------
 
@@ -335,15 +354,17 @@ class SlotQueue:
         if ticket.session is not None:
             self._session_inflight[ticket.session] = self._session_inflight.get(ticket.session, 0) + 1
         if self.on_grant:
-            self.on_grant(target)
+            self.on_grant(ticket)
         ticket.future.set_result(None)
 
     def _dispatch(self) -> None:
-        if not self._waiters or not any(self._free(pid) > 0 for pid in self._pools):
+        if self.paused or not self._waiters or not any(self._free(pid) > 0 for pid in self._pools):
             return
         for ticket in self._ordered():
             if ticket.future.done():
                 self._waiters.remove(ticket)
+                continue
+            if not self.eligible(ticket):  # e.g. its client is at its rate limit or max active
                 continue
             options = [c for c in ticket.candidates if self._free(c.pool_id) > 0 and self.available(c.upstream_id)]
             if not options:

@@ -15,6 +15,10 @@ from .store import Pool, Store, Upstream
 
 log = logging.getLogger("queuerouter")
 
+# running: normal · paused: accept and queue, start nothing new · draining: refuse new requests,
+# finish the queue · maintenance: refuse new requests and fail queued ones (in-flight finish).
+MODES = ("running", "paused", "draining", "maintenance")
+
 
 @dataclass(frozen=True)
 class Target:
@@ -39,6 +43,8 @@ class Snapshot:
     clients: dict[str, ClientKey] = field(default_factory=dict)  # key_hash -> client
     pools: dict[int, Pool] = field(default_factory=dict)
     upstreams: dict[int, Target] = field(default_factory=dict)  # in display / failover order
+    mode: str = "running"
+    maintenance_message: str = ""
 
     @property
     def configured(self) -> bool:
@@ -54,11 +60,13 @@ def load_snapshot(store: Store) -> Snapshot:
         if u.pool_id in pools
     }
     clients = {
-        c.key_hash: ClientKey(c.name, c.key_hash, c.priority)
+        c.key_hash: ClientKey(c.name, c.key_hash, c.priority, c.policy)
         for c in store.list_clients()
         if c.enabled and not c.expired
     }
-    return Snapshot(settings, clients, pools, upstreams)
+    mode = store.get_meta("mode") or "running"
+    message = store.get_meta("maintenance_message") or ""
+    return Snapshot(settings, clients, pools, upstreams, mode if mode in MODES else "running", message)
 
 
 def open_store(bootstrap: Bootstrap, seed: Settings | None) -> Store:

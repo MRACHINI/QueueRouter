@@ -20,9 +20,10 @@ from fastapi.templating import Jinja2Templates
 
 from .. import __version__
 from ..auth import AuthGuard, client_ip
-from ..config import PRIORITIES, TUNABLES, Bootstrap
+from ..config import ON_LIMIT, PRIORITIES, TUNABLES, Bootstrap, ClientPolicy
 from ..presets import ARLIAI_PLANS, PRESETS, plan_for
 from ..slots import STRATEGIES
+from ..state import MODES
 from ..store import ROLES, Store
 from .security import (
     AdminSession,
@@ -381,6 +382,21 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         sessions.set_cookie(response, request, token)
         return response
 
+    # -- operating mode ------------------------------------------------------------------
+
+    @app.post("/admin/mode")
+    async def set_mode(request: Request):
+        session, form = await require_post(request, "operator")
+        mode = str(form.get("mode", ""))
+        if mode not in MODES:
+            return back("/admin", error="invalid")
+        message = str(form.get("message", "")).strip()[:300]
+        store.set_meta("mode", mode)
+        store.set_meta("maintenance_message", message)
+        store.audit(session.user.username, "mode", mode, {"message": message})
+        ctx.reload()
+        return back("/admin", "saved")
+
     # -- clients -------------------------------------------------------------------------
 
     def show_new_key(request: Request, session: AdminSession, name: str, key: str, regenerated: bool):
@@ -430,6 +446,35 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 "expires_at": _parse_date(str(form.get("expires", ""))),
             }
             store.update_client(client_id, session.user.username, **fields)
+        except (ValueError, KeyError):
+            return back("/admin/clients", error="invalid")
+        ctx.reload()
+        return back("/admin/clients", "saved")
+
+    @app.post("/admin/clients/{client_id}/policy")
+    async def clients_policy(client_id: int, request: Request):
+        session, form = await require_post(request, "admin")
+        try:
+            models = tuple(
+                m.strip() for m in str(form.get("allowed_models", "")).replace("\n", ",").split(",") if m.strip()
+            )
+            on_limit = str(form.get("on_limit", "delay"))
+            if on_limit not in ON_LIMIT:
+                raise ValueError("on_limit")
+            policy = ClientPolicy(
+                allowed_models=models,
+                rpm=_opt(form, "rpm", int, 1),
+                rpd=_opt(form, "rpd", int, 1),
+                tpm=_opt(form, "tpm", int, 1),
+                tpd=_opt(form, "tpd", int, 1),
+                on_limit=on_limit,
+                max_queued=_opt(form, "max_queued", int, 0),
+                max_active=_opt(form, "max_active", int, 1),
+                queue_timeout_s=_opt(form, "queue_timeout_s", float, 1),
+                total_timeout_s=_opt(form, "total_timeout_s", float, 1),
+                max_retries=_opt(form, "max_retries", int, -1),
+            )
+            store.update_client(client_id, session.user.username, policy=policy)
         except (ValueError, KeyError):
             return back("/admin/clients", error="invalid")
         ctx.reload()
@@ -634,6 +679,17 @@ def _parse_date(value: str) -> float | None:
         return None
     day = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
     return (day + timedelta(days=1)).timestamp()
+
+
+def _opt(form: dict, name: str, kind: type, minimum: float):
+    """Optional number from a form: blank -> None; otherwise must be >= minimum."""
+    raw = str(form.get(name, "")).strip()
+    if raw == "":
+        return None
+    value = kind(raw)
+    if value < minimum:
+        raise ValueError(name)
+    return value
 
 
 def _expiry_date(timestamp: float | None) -> str:
