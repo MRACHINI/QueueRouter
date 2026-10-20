@@ -450,7 +450,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         async def events():
             last_signature, last_sent, first = None, 0.0, True
             checked_session = time.monotonic()
-            while not await request.is_disconnected():
+            yield "retry: 1000\n\n"  # after a restart, browsers reconnect within a second
+            while not getattr(request.app.state, "stopping", False) and not await request.is_disconnected():
                 now = time.monotonic()
                 if now - checked_session > 60:  # signed out or expired: stop streaming
                     checked_session = now

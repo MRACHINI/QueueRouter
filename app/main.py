@@ -500,6 +500,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        watch_stop_signals(app)
         app.state.client = httpx.AsyncClient(
             transport=transport, limits=httpx.Limits(max_connections=200, max_keepalive_connections=40)
         )
@@ -2128,3 +2129,23 @@ def body_model(body: bytes) -> str:
         return ""
     model = payload.get("model") if isinstance(payload, dict) else None
     return model if isinstance(model, str) else ""
+
+
+def watch_stop_signals(app: FastAPI) -> None:
+    """Note when we're asked to stop (docker stop / Ctrl-C), so endless streams such as the
+    admin's live dashboard end at once instead of holding up the shutdown until Docker kills us.
+    Uvicorn's own handler still runs afterwards."""
+    app.state.stopping = False
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        previous = signal.getsignal(sig)
+        if not callable(previous):
+            continue
+
+        def handler(signum, frame, previous=previous):
+            app.state.stopping = True
+            previous(signum, frame)
+
+        try:
+            signal.signal(sig, handler)
+        except ValueError:  # not the main thread (e.g. tests): nothing to watch
+            return

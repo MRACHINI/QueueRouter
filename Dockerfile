@@ -24,7 +24,9 @@ RUN chmod 755 /usr/local/bin/queuerouter-entrypoint
 ENV PUID=10001 PGID=10001
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# While starting, check every 2 s, so a reverse proxy that waits for "healthy" (Traefik) switches
+# over within seconds; after that every 30 s.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --start-interval=2s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
 
 # One process, one worker: the queue and slot counts live in memory.
