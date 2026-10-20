@@ -329,6 +329,8 @@ MIGRATIONS: list[str] = [
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
+# Tables whose rows belong to a client (by name): deleted with it, renamed with it.
+CLIENT_DATA_TABLES = ("jobs", "files", "batches", "schedules", "stored_responses", "request_content")
 
 REQUEST_COLUMNS = (
     "id",
@@ -590,6 +592,15 @@ class Store:
             return self.fernet.decrypt(token.encode()).decode()
         except InvalidToken as exc:
             raise RuntimeError("cannot decrypt a stored secret: SECRET_KEY / secret.key changed?") from exc
+
+    def reveal(self, value: str | None) -> str | None:
+        """A value stored encrypted, or as plain text by an older version (returned as is)."""
+        if not value:
+            return value
+        try:
+            return self.fernet.decrypt(value.encode()).decode()
+        except InvalidToken:
+            return value
 
     def schema_version(self) -> int:
         with self._lock:
@@ -878,6 +889,12 @@ class Store:
     def update_client(self, client_id: int, actor: str, **fields: object) -> None:
         if "priority" in fields and fields["priority"] not in PRIORITIES:
             raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
+        if "name" in fields:  # its jobs, files, schedules... move with it
+            rows = self.query("SELECT name FROM clients WHERE id = ?", (client_id,))
+            if rows and rows[0]["name"] != fields["name"]:
+                with self.tx() as db:
+                    for table in CLIENT_DATA_TABLES:
+                        db.execute(f"UPDATE {table} SET client = ? WHERE client = ?", (fields["name"], rows[0]["name"]))  # noqa: S608
         if isinstance(fields.get("policy"), ClientPolicy):
             fields["policy"] = fields["policy"].to_json()
         self._update("clients", client_id, {"name", "priority", "enabled", "expires_at", "notes", "policy"}, fields)
@@ -891,9 +908,18 @@ class Store:
         return key
 
     def delete_client(self, client_id: int, actor: str) -> None:
+        """Delete a client and everything it owns, so a later client with the same name (or
+        key) starts empty instead of inheriting its jobs, files and saved conversations."""
         with self.tx() as db:
+            row = db.execute("SELECT name FROM clients WHERE id = ?", (client_id,)).fetchone()
+            removed = {}
+            if row is not None:
+                for table in CLIENT_DATA_TABLES:
+                    cur = db.execute(f"DELETE FROM {table} WHERE client = ?", (row["name"],))  # noqa: S608
+                    if cur.rowcount:
+                        removed[table] = cur.rowcount
             db.execute("DELETE FROM clients WHERE id = ?", (client_id,))
-        self.audit(actor, "client.delete", str(client_id))
+        self.audit(actor, "client.delete", str(client_id), {"name": row["name"] if row else None, "removed": removed})
 
     # -- request log and usage -----------------------------------------------------------
 
@@ -1226,7 +1252,7 @@ class Store:
                         job.get("run_at"),
                         job.get("deadline"),
                         int(bool(job.get("idle_only"))),
-                        job.get("callback_url"),
+                        self.encrypt(job["callback_url"]) if job.get("callback_url") else None,
                         self.encrypt(job["callback_secret"]) if job.get("callback_secret") else None,
                         ",".join(job.get("tags") or ()) or None,
                         job.get("created", time.time()),
@@ -1383,7 +1409,7 @@ class Store:
                     ",".join(s.get("tags") or ()) or None,
                     int(bool(s.get("idle_only"))),
                     s.get("deadline_s"),
-                    s.get("callback_url"),
+                    self.encrypt(s["callback_url"]) if s.get("callback_url") else None,
                     self.encrypt(s["callback_secret"]) if s.get("callback_secret") else None,
                     int(s.get("enabled", True)),
                     time.time(),
