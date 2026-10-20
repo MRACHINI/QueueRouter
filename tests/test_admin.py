@@ -161,7 +161,7 @@ async def test_admin_ip_allow_list(make_stack):
     stack = make_stack(bootstrap={**OWNER, "admin_allowed_ips": (ipaddress.ip_network("10.99.0.0/16"),)})
     async with httpx.AsyncClient(base_url=stack.url) as c:
         assert (await c.get("/admin/login")).status_code == 404
-        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "m", "messages": []})
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "mock-model", "messages": []})
         assert r.status_code == 200  # the API itself is unaffected
 
 
@@ -174,7 +174,7 @@ def key_of(html: str) -> str:
 async def test_client_lifecycle_applies_live(admin_stack):
     """Keys created, changed and revoked in the UI work on the API immediately."""
     api = f"{admin_stack.url}/v1/chat/completions"
-    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    body = {"model": "mock-model", "messages": [{"role": "user", "content": "hi"}]}
     async with httpx.AsyncClient(base_url=admin_stack.url) as c:
         await login(c, admin_stack.url)
         csrf = csrf_of((await c.get("/admin/clients")).text)

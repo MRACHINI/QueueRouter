@@ -21,7 +21,8 @@ from a **web admin UI**.
 - **Several upstreams**: keys and providers grouped into **limit pools** (one per account — keys
   on the same account share its limit), load balancing (least-busy / weighted / ordered),
   model-aware routing, **failover** on errors, **circuit breakers** with health probes.
-- **Provider presets** incl. an **ArliAI plan selector** (Free → Max) that sets parallel requests
+- **Provider presets** (ArliAI, Google Gemini, NVIDIA, OpenRouter, OpenAI, local servers…) incl. an
+  **ArliAI plan selector** (Free → Max) that sets parallel requests
   and context cap.
 - **Model aliases** (`smart`, `code`, …) that you can repoint without touching any app; listed in
   `/v1/models` with the target's context size.
@@ -31,8 +32,14 @@ from a **web admin UI**.
   unchanged.
 - **Sticky routing**: with several upstreams, a conversation returns to the upstream that served
   it, so its prompt cache stays warm.
+- **Provider quotas handled sensibly**: a provider's 429 message is shown (stream notes, errors, the
+  Requests page); a used-up *daily* quota (Google `PerDay`, `limit: 0`, OpenAI `insufficient_quota`)
+  fails fast or falls back instead of waiting, and that provider is skipped for that model for a
+  while; ordinary rate limits wait as long as the provider asks, up to a per-upstream retry limit.
+- **Unknown models** get a clear 404 with the closest names instead of being sent on (Settings can
+  turn this off for providers with incomplete model lists).
 - **Parameter rules** per alias and client: defaults, overrides, clamps (e.g. cap `max_tokens`),
-  and stripping parameters an upstream rejects.
+  and stripping parameters an upstream rejects — also **per upstream** (e.g. Google rejects `store`).
 - **Context-length pre-check**: prompts that clearly can't fit are refused immediately (or sent
   to a bigger-context fallback) instead of waiting in the queue.
 - **Agent guard rails**: per-run budgets (tokens / requests / minutes per `X-Run-Id` or

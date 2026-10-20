@@ -73,8 +73,8 @@ async def test_alias_permissions_and_disable(make_stack):
         csrf = csrf_of((await c.get("/admin/models")).text)
         await c.post(f"/admin/aliases/{alias.id}", data={"csrf": csrf, "target_model": "mock-model"})  # disabled
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("fast"))
-        assert r.status_code == 200  # passed through as-is (no longer rewritten)
-        assert json.loads(stack.mock["last_body"])["model"] == "fast"
+        # no longer rewritten, and no upstream offers "fast": refused instead of sent on
+        assert r.status_code == 404 and r.json()["error"]["type"] == "model_not_found"
 
         bad = await add_alias(c, "bad name!", "x")
         assert "e=invalid" in bad.headers["location"]
