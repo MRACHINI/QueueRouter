@@ -71,6 +71,12 @@ def check_callback(url: str | None) -> str | None:
     parts = urlsplit(url)
     if parts.scheme != "https" or not parts.hostname:
         raise JobError("callback_url must be an https:// URL")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise JobError("callback_url has an invalid port") from exc
+    if port not in (None, 443):
+        raise JobError("callback_url must use the standard HTTPS port (443)")
     if parts.hostname == "localhost" or parts.hostname.endswith((".localhost", ".internal", ".local")):
         raise JobError("callback_url must be a public host")
     try:
@@ -82,9 +88,23 @@ def check_callback(url: str | None) -> str | None:
     return url
 
 
-async def _public(host: str) -> bool:
-    infos = await asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-    return bool(infos) and all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
+async def public_address(host: str) -> str | None:
+    """One address of ``host`` if every address it resolves to is public, else None."""
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except OSError:
+        return None
+    addresses = [ipaddress.ip_address(info[4][0].split("%")[0]) for info in infos]
+    if not addresses or not all(a.is_global for a in addresses):
+        return None
+    return str(addresses[0])
+
+
+def pinned_url(url: str, address: str) -> str:
+    """``url`` with its host replaced by ``address`` (the TLS name and Host header stay the host's)."""
+    parts = urlsplit(url)
+    host = f"[{address}]" if ":" in address else address
+    return parts._replace(netloc=host).geturl()
 
 
 def new_job(client: str, body: dict, priority: str = "low") -> dict:
@@ -102,6 +122,9 @@ def new_job(client: str, body: dict, priority: str = "low") -> dict:
     run_at, deadline = parse_time(body.get("run_at")), parse_time(body.get("deadline"))
     if run_at and deadline and deadline <= run_at:
         raise JobError("'deadline' must be after 'run_at'")
+    secret = body.get("callback_secret")
+    if secret is not None and (not isinstance(secret, str) or len(secret) > 500):
+        raise JobError("'callback_secret' must be a string (up to 500 characters)")
     wanted = body.get("priority", priority)
     if wanted not in ("low", "normal", "high"):
         raise JobError("'priority' must be low, normal or high")
@@ -376,20 +399,31 @@ class JobRunner:
         if row["callback_secret"]:
             secret = self.store.decrypt(row["callback_secret"])
             headers["x-queuerouter-signature"] = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        url = self.store.reveal(row["callback_url"])
+        host = urlsplit(url).hostname or ""
         status = "failed"
         for attempt, delay in enumerate((0, *CALLBACK_RETRY_S)):
             await asyncio.sleep(delay)
+            # Resolve once, check, and connect to exactly that address: a DNS answer can't
+            # change between the check and the request. TLS still verifies the host's name.
+            address = await public_address(host)
+            if address is None:
+                status = "refused: not a public address"
+                break
             try:
-                if not await _public(urlsplit(row["callback_url"]).hostname or ""):
-                    status = "refused: not a public address"
-                    break
-                resp = await self._http().post(row["callback_url"], content=body, headers=headers, timeout=15)
+                resp = await self._http().post(
+                    pinned_url(url, address),
+                    content=body,
+                    headers={**headers, "host": host},
+                    timeout=15,
+                    extensions={"sni_hostname": host},
+                )
                 if resp.status_code < 300:
                     status = "delivered"
                     break
                 status = f"HTTP {resp.status_code}"
-            except (httpx.HTTPError, OSError) as exc:
-                status = type(exc).__name__
+            except (httpx.HTTPError, OSError):
+                status = "failed"  # no details: they could tell open from closed ports
             if attempt == len(CALLBACK_RETRY_S):
                 break
         await asyncio.to_thread(self.store.set_job_fields, job_id, callback_status=status)
@@ -429,7 +463,7 @@ def new_schedule(client: str, body: dict, now: float | None = None) -> dict:
     }
 
 
-def schedule_view(row: sqlite3.Row) -> dict:
+def schedule_view(store: Store, row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
         "object": "schedule",
@@ -440,7 +474,7 @@ def schedule_view(row: sqlite3.Row) -> dict:
         "tags": [t for t in (row["tags"] or "").split(",") if t],
         "idle_only": bool(row["idle_only"]),
         "deadline_s": row["deadline_s"],
-        "callback_url": row["callback_url"],
+        "callback_url": store.reveal(row["callback_url"]),
         "enabled": bool(row["enabled"]),
         "created_at": row["created"],
         "next_run": row["next_run"] if row["enabled"] else None,
@@ -459,7 +493,7 @@ def fire_schedule(store: Store, row: sqlite3.Row, now: float, manual: bool = Fal
         "request": json.loads(store.decrypt(row["request"])),
         "deadline": now + row["deadline_s"] if row["deadline_s"] else None,
         "idle_only": bool(row["idle_only"]),
-        "callback_url": row["callback_url"],
+        "callback_url": store.reveal(row["callback_url"]),
         "callback_secret": store.decrypt(row["callback_secret"]) if row["callback_secret"] else None,
         "tags": ["schedule", *[t for t in (row["tags"] or "").split(",") if t]][:10],
         "created": now,

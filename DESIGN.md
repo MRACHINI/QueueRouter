@@ -1082,6 +1082,10 @@ fall back; per-upstream parameter rules and retry limit; Gemini preset; unknown-
 pricing table limited to offered and recently used models.
 v0.16.0: live dashboard over SSE (Now panel, 1 s chart), live Usage page, time to first byte per request
 (Requests page, `queuerouter_time_to_first_byte_seconds`).
+v0.17.0: fixes from the security review of v0.6-v0.14 — client data deleted/renamed with the client;
+request-size limits while reading (admin forms, /v1/files); callbacks pinned to the checked address,
+port 443, no error details; tracing headers cleared when the collector URL changes; webhook tests
+show only the status; restore zips size-limited; callback URLs encrypted.
 
 ---
 

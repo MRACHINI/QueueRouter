@@ -33,7 +33,8 @@ from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
 from .alerts import Alerts
 from .auth import AuthGuard, client_ip, find_client, ip_in, presented_key
-from .backup import auto_backup
+from .backup import MAX_UPLOAD_BYTES, auto_backup
+from .bodylimit import BodyLimit
 from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
@@ -66,6 +67,7 @@ log = logging.getLogger("queuerouter")
 HEALTH_INTERVAL_S = 30
 HISTORY_POINTS, HISTORY_EVERY_S = 1800, 1  # dashboard chart: 30 minutes, one point per second
 QUOTA_BLOCK_S = 3600  # how long an upstream whose quota ran out is skipped for that model (unless it says)
+ADMIN_MAX_BODY = 4 * 1024 * 1024  # admin forms and the Playground (the restore upload has its own limit)
 CONTENT_CAPTURE_MAX = 16 * 1024 * 1024  # streamed reply bytes kept for content logging (cut later)
 CATALOG_MAX_AGE_S = 3600
 
@@ -507,6 +509,16 @@ def create_app(
         log.info(json.dumps({"event": "startup", "version": __version__, **summary()}))
         if not snapshot.configured:
             log.warning(json.dumps({"event": "no_upstream", "message": "add an upstream in the admin UI"}))
+        if not bootstrap.public_url:
+            log.warning(
+                json.dumps(
+                    {
+                        "event": "public_url_unset",
+                        "message": "set PUBLIC_URL: without it, links in the opencode config and plugin come from "
+                        "the request's Host header",
+                    }
+                )
+            )
         for target in snapshot.upstreams.values():
             if target.usable:
                 asyncio.ensure_future(refresh_catalog(target))
@@ -789,6 +801,19 @@ def create_app(
             live_signature,
         ),
     )
+
+    def body_limit(path: str) -> int | None:
+        """Max request body per path (see app/bodylimit.py). /v1 JSON bodies are checked by
+        read_body instead, which answers in the OpenAI error format."""
+        if path == "/admin/backup/restore":  # owner-only; checked before the body is read
+            return MAX_UPLOAD_BYTES
+        if path.startswith("/admin"):
+            return ADMIN_MAX_BODY
+        if path == "/v1/files":
+            return int(cfg().max_body_mb * 1024 * 1024)
+        return None
+
+    app.add_middleware(BodyLimit, limit_for=body_limit)
 
     # -- the attempt loop ----------------------------------------------------------------
 
@@ -1338,7 +1363,7 @@ def create_app(
             return job_error(exc)
         await asyncio.to_thread(store.create_schedule, schedule)
         row = await asyncio.to_thread(store.get_schedule, schedule["id"])
-        return JSONResponse(jobs_mod.schedule_view(row), status_code=201)
+        return JSONResponse(jobs_mod.schedule_view(store, row), status_code=201)
 
     @app.get("/v1/schedules")
     async def schedules_list(request: Request):
@@ -1346,7 +1371,7 @@ def create_app(
         if denied:
             return denied
         rows = await asyncio.to_thread(store.list_schedules, client.name)
-        return {"object": "list", "data": [jobs_mod.schedule_view(r) for r in rows]}
+        return {"object": "list", "data": [jobs_mod.schedule_view(store, r) for r in rows]}
 
     async def own_schedule(request: Request, schedule_id: str):
         client, denied = authenticate(request)
@@ -1360,7 +1385,7 @@ def create_app(
     @app.get("/v1/schedules/{schedule_id}")
     async def schedules_get(schedule_id: str, request: Request):
         row, denied = await own_schedule(request, schedule_id)
-        return denied or jobs_mod.schedule_view(row)
+        return denied or jobs_mod.schedule_view(store, row)
 
     @app.patch("/v1/schedules/{schedule_id}")
     async def schedules_patch(schedule_id: str, request: Request):
@@ -1377,7 +1402,7 @@ def create_app(
         if body["enabled"]:  # resuming: next run from now, not the missed ones
             fields["next_run"] = cron_mod.parse(row["cron"]).next_after(time.time())
         await asyncio.to_thread(store.set_schedule, schedule_id, **fields)
-        return jobs_mod.schedule_view(await asyncio.to_thread(store.get_schedule, schedule_id))
+        return jobs_mod.schedule_view(store, await asyncio.to_thread(store.get_schedule, schedule_id))
 
     @app.delete("/v1/schedules/{schedule_id}")
     async def schedules_delete(schedule_id: str, request: Request):

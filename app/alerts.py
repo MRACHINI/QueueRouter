@@ -282,7 +282,7 @@ class Alerts:
                 if resp.status_code < 300:
                     error = None
                     break
-                error = f"HTTP {resp.status_code}: {resp.text[:120]}"
+                error = f"HTTP {resp.status_code}"  # not the body: the URL may point at an internal service
             except httpx.HTTPError as exc:
                 error = f"{type(exc).__name__}: {str(exc)[:120]}"
             if attempt < attempts - 1:

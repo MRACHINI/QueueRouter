@@ -89,7 +89,8 @@ from a **web admin UI**.
   requests, settings, users with roles (owner / admin / operator / viewer), audit log. Dark mode
   and phone-friendly. Changes apply instantly.
 - **Secure by default**: two-factor sign-in (authenticator apps, recovery codes), upstream keys
-  encrypted at rest, hashed client keys, argon2 passwords,
+  encrypted at rest, hashed client keys, argon2 passwords, request-size limits enforced while reading, job
+  callbacks pinned to a checked public address (HTTPS, port 443), deleting a client deletes its data,
   CSRF protection, login throttling, strict CSP, optional admin IP allow-list.
 
 ## How it works

@@ -517,6 +517,14 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                         raise ValueError(name)
         except ValueError:
             return back("/admin/settings", error="invalid")
+        current = store.get_tunables()
+        new_endpoint = values.get("otel_endpoint")
+        if (
+            new_endpoint is not None
+            and new_endpoint != current.get("otel_endpoint", "")
+            and "otel_headers" not in values
+        ):
+            values["otel_headers"] = ""  # the stored headers (e.g. an API key) were meant for the old collector
         store.set_tunables(values, session.user.username)
         ctx.reload()
         return back("/admin/settings", "saved")
@@ -1495,7 +1503,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             jobs=[jobs_mod.job_view(store, r, with_result=False) | {"client": r["client"]} for r in rows],
             batches=[jobs_mod.batch_view(store, b) | {"client": b["client"]} for b in batches],
             statuses=("queued", "running", "succeeded", "failed", "cancelled", "expired"),
-            schedules=[jobs_mod.schedule_view(s) | {"client": s["client"]} for s in store.list_schedules()],
+            schedules=[jobs_mod.schedule_view(store, s) | {"client": s["client"]} for s in store.list_schedules()],
             clients=[c.name for c in store.list_clients()],
             status=status or "",
             client=client or "",

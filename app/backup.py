@@ -32,6 +32,7 @@ DB_NAME, KEY_NAME, MANIFEST_NAME = "queuerouter.db", "secret.key", "manifest.jso
 RESTORE_DIR = "restore"
 BACKUP_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.db")
 MAX_UPLOAD_BYTES = 2 * 1024**3
+MAX_RESTORE_DB_BYTES = 8 * 1024**3  # unpacked (a small zip could otherwise fill the disk)
 
 
 class RestoreError(ValueError):
@@ -157,9 +158,18 @@ def stage_restore(data_dir: str, upload_path: str, current: Fernet, env_key: boo
                 names = set(zf.namelist())
                 if DB_NAME not in names:
                     raise RestoreError("The zip has no queuerouter.db; is it a QueueRouter backup?")
+                if zf.getinfo(DB_NAME).file_size > MAX_RESTORE_DB_BYTES:
+                    raise RestoreError("The database in the backup is too large.")
                 with zf.open(DB_NAME) as src, open(db_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+                    copied = 0
+                    while chunk := src.read(1024 * 1024):  # count as we go: sizes in a zip can lie
+                        copied += len(chunk)
+                        if copied > MAX_RESTORE_DB_BYTES:
+                            raise RestoreError("The database in the backup is too large.")
+                        dst.write(chunk)
                 if KEY_NAME in names:
+                    if zf.getinfo(KEY_NAME).file_size > 1024:
+                        raise RestoreError("The encryption key in the backup is invalid.")
                     key_bytes = zf.read(KEY_NAME).strip()
         else:
             shutil.copyfile(upload_path, db_path)
