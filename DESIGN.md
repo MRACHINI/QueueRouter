@@ -1080,6 +1080,8 @@ client/SDK dependencies); quotas also cover requests and cost, not only tokens; 
 v0.15.0 (from real use with Google Gemini): provider 429 messages surfaced; daily-quota 429s fail fast /
 fall back; per-upstream parameter rules and retry limit; Gemini preset; unknown-model 404 with suggestions;
 pricing table limited to offered and recently used models.
+v0.16.0: live dashboard over SSE (Now panel, 1 s chart), live Usage page, time to first byte per request
+(Requests page, `queuerouter_time_to_first_byte_seconds`).
 
 ---
 

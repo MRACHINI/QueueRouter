@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -55,6 +55,7 @@ from .security import (
 log = logging.getLogger("queuerouter")
 TWO_FA_COOKIE, TWO_FA_TTL_S = "qr_2fa", 300
 PRICING_DAYS = 30  # the price table lists models used this recently (plus offered and manually priced ones)
+LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes / send anyway
 HERE = os.path.dirname(__file__)
 
 # Short, fixed flash messages (passed by code in the redirect URL, never as free text).
@@ -200,7 +201,7 @@ class AdminContext:
     store: Store
     bootstrap: Bootstrap
     reload: Callable[[], None]
-    live_state: Callable[[], dict]
+    live_state: Callable[..., dict]
     probe: Callable[[str, str], Awaitable[tuple[bool, str]]]
     upstream_info: Callable[[], list[dict]]
     models_by_upstream: Callable[[], dict[str, list[str]]]
@@ -211,6 +212,7 @@ class AdminContext:
     alerts: Alerts
     restart: Callable[[], None]
     month_usage: Callable[[str], object]
+    live_signature: Callable[[], tuple]
 
 
 class NeedLogin(Exception):
@@ -437,6 +439,35 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def api_stats(request: Request):
         require(request, "viewer")
         return JSONResponse(ctx.live_state())
+
+    @app.get("/admin/api/live")
+    async def api_live(request: Request):
+        """Server-sent events: the dashboard state whenever it changes (checked 4x a second), and
+        every few seconds anyway. The first message has the full chart history, later ones the
+        latest points only."""
+        require(request, "viewer")
+
+        async def events():
+            last_signature, last_sent, first = None, 0.0, True
+            checked_session = time.monotonic()
+            while not await request.is_disconnected():
+                now = time.monotonic()
+                if now - checked_session > 60:  # signed out or expired: stop streaming
+                    checked_session = now
+                    if sessions.current(request) is None:
+                        return
+                signature = ctx.live_signature()
+                if signature != last_signature or now - last_sent >= LIVE_HEARTBEAT_S:
+                    state = ctx.live_state(full_history=first)
+                    yield f"data: {json.dumps(state)}\n\n"
+                    first, last_signature, last_sent = False, signature, now
+                await asyncio.sleep(LIVE_CHECK_S)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # -- settings ------------------------------------------------------------------------
 

@@ -20,7 +20,7 @@
 
 <div class="table-wrap">
 <table class="cards">
-  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Upstream</th><th>Outcome</th><th>Queue ms</th><th>Upstream ms</th><th>Tokens</th><th>Finish</th></tr></thead>
+  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Upstream</th><th>Outcome</th><th>Queue ms</th><th>First byte ms</th><th>Upstream ms</th><th>Tokens</th><th>Finish</th></tr></thead>
   <tbody>
   {% for r in rows %}
   <tr>
@@ -30,12 +30,13 @@
     <td data-label="Upstream">{{ r.upstream or "—" }}</td>
     <td data-label="Outcome">{{ r.outcome }} <span class="muted small">{{ r.status }}{% if r.retries %} · {{ r.retries }} retries{% endif %}</span>{% if r.error %}<div class="small muted wrap-any">{{ r.error }}</div>{% endif %}</td>
     <td data-label="Queue ms">{{ r.queue_ms if r.queue_ms is not none else "—" }}</td>
+    <td data-label="First byte ms">{{ r.ttft_ms if r.ttft_ms is not none else "—" }}</td>
     <td data-label="Upstream ms">{{ r.upstream_ms if r.upstream_ms is not none else "—" }}</td>
     <td data-label="Tokens">{{ (r.prompt_tokens or 0) + (r.completion_tokens or 0) }}</td>
     <td data-label="Finish">{{ r.finish_reason or "—" }}{% if r.id in with_content %} · <a href="/admin/requests/{{ r.id }}/content">content</a>{% endif %}</td>
   </tr>
   {% else %}
-  <tr><td colspan="9" class="muted">No requests logged yet.</td></tr>
+  <tr><td colspan="10" class="muted">No requests logged yet.</td></tr>
   {% endfor %}
   </tbody>
 </table>

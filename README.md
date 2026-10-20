@@ -65,6 +65,9 @@ from a **web admin UI**.
 - **Backup and restore** (owner): download a zip (database + optional encryption key), daily
   automatic copies in `/data/backups`, and restore from an upload or a listed copy — checked first,
   then QueueRouter restarts itself to load it (the previous data is kept).
+- **Real-time admin**: the dashboard is pushed live (server-sent events) with a **Now** panel of
+  requests in flight (queued/running, elapsed, time to first byte) and a 1-second chart; the Usage
+  page refreshes itself as requests finish. Time to first byte is recorded per request.
 - **Charts**: live running/queued chart on the dashboard (last 30 minutes); tokens, requests and
   cost per day on the Usage page (server-rendered SVG, no scripts from elsewhere).
 - **Structured-output repair**: JSON-mode replies and tool-call arguments with common breakage

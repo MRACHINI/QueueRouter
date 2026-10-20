@@ -19,6 +19,7 @@
   </form>
 </div>
 
+<div id="usage-live" data-stream="/admin/api/live">
 <section class="tiles">
   <div class="tile"><div class="tile-label">Requests</div><div class="tile-value">{{ "{:,}".format(totals.requests) }}</div>
     <div class="small muted">errors {{ "{:,}".format(totals.errors) }}</div></div>
@@ -77,4 +78,6 @@ included — <a href="/admin/models#pricing">set a price</a>.</p>
   </tbody>
 </table>
 </div>
+</div>
+<p class="small muted"><span id="usage-status">Updates live as requests finish.</span></p>
 {% endblock %}

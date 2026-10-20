@@ -99,6 +99,9 @@ def render(stats: Stats, live: dict, jobs: dict[str, int], version: str) -> str:
     w.sample("queuerouter_retries_total", stats.retries)
     w.histogram("queuerouter_queue_wait_seconds", "Time waiting for a slot.", stats.queue_hist)
     w.histogram("queuerouter_upstream_seconds", "Time from getting a slot to the last byte.", stats.upstream_hist)
+    w.histogram(
+        "queuerouter_time_to_first_byte_seconds", "Time from arrival to the first byte of the answer.", stats.ttft_hist
+    )
 
     w.family("queuerouter_jobs", "gauge", "Async jobs by status (kept ones).")
     for status, n in sorted(jobs.items()):

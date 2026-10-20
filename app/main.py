@@ -64,7 +64,7 @@ from .upstream import (
 log = logging.getLogger("queuerouter")
 
 HEALTH_INTERVAL_S = 30
-HISTORY_POINTS, HISTORY_EVERY_S = 360, 5  # dashboard chart: 30 minutes
+HISTORY_POINTS, HISTORY_EVERY_S = 1800, 1  # dashboard chart: 30 minutes, one point per second
 QUOTA_BLOCK_S = 3600  # how long an upstream whose quota ran out is skipped for that model (unless it says)
 CONTENT_CAPTURE_MAX = 16 * 1024 * 1024  # streamed reply bytes kept for content logging (cut later)
 CATALOG_MAX_AGE_S = 3600
@@ -114,6 +114,7 @@ class RequestLog:
             "run": None,
             "target_model": None,
             "error": None,  # why it failed or was retried (e.g. the provider's 429 message)
+            "ttft_ms": None,  # from arrival to the first byte of the answer (what the user waits for)
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -129,6 +130,8 @@ class RequestLog:
             f["completion_tokens"],
             client=f["client"] or "default",
         )
+        if f.get("ttft_ms") is not None and f["outcome"] == "done":
+            stats.ttft_hist.observe(f["ttft_ms"] / 1000)
         entry = {**f, "ts": time.time()}
         stats.recent.append(entry)
         if stats.sink:
@@ -342,6 +345,8 @@ def create_app(
         return await catalogs.refresh(app.state.client, target.id, target.upstream.base_url, target.api_key)
 
     pending_usage: list[dict] = []
+    inflight: dict[str, RequestLog] = {}  # request id -> its log, while queued or running
+    usage_version = [0]  # bumped whenever usage rows are written (the Usage page refreshes)
 
     price_overrides: dict = {}
 
@@ -366,6 +371,7 @@ def create_app(
 
     def sink(entry: dict) -> None:
         pending_usage.append(entry)
+        inflight.pop(entry.get("id"), None)
         alerts.observe(entry)
         if entry.get("trace"):
             exporter.observe(entry)
@@ -382,6 +388,7 @@ def create_app(
             pending_usage.clear()
             try:
                 await asyncio.to_thread(store.record_requests, rows, cfg().request_log_days > 0)
+                usage_version[0] += 1
             except Exception as exc:  # never let logging break serving
                 log.error(json.dumps({"event": "usage_write_failed", "error": repr(exc)[:200], "rows": len(rows)}))
         if pending_content:
@@ -669,7 +676,43 @@ def create_app(
             for t in snapshot.upstreams.values()
         ]
 
-    def live_state() -> dict:
+    def inflight_view() -> list[dict]:
+        """Requests queued or running now, longest first (for the dashboard's Now panel)."""
+        now = time.monotonic()
+        rows = []
+        for request_id, rlog in list(inflight.items()):
+            elapsed = now - rlog.started
+            if elapsed > 6 * 3600:  # never finished (shouldn't happen): don't show it forever
+                inflight.pop(request_id, None)
+                continue
+            f = rlog.fields
+            rows.append(
+                {
+                    "id": request_id,
+                    "client": f["client"],
+                    "model": f["target_model"] or f["model"],
+                    "upstream": f["upstream"],
+                    "stage": "queued" if f["queue_ms"] is None else "running",
+                    "elapsed_ms": round(elapsed * 1000),
+                    "queue_ms": f["queue_ms"],
+                    "ttft_ms": f["ttft_ms"],
+                    "stream": f["stream"],
+                    "retries": f["retries"],
+                    "error": f["error"],
+                }
+            )
+        rows.sort(key=lambda r: -r["elapsed_ms"])
+        return rows[:50]
+
+    def live_signature() -> tuple:
+        """Changes whenever the dashboard would look different (cheap: checked 4x a second)."""
+        stages = tuple(
+            (rid, r.fields["queue_ms"] is None, r.fields["ttft_ms"] is None, r.fields["retries"])
+            for rid, r in inflight.items()
+        )
+        return (queue.active, queue.queued, sum(stats.outcomes.values()), stages, usage_version[0], snapshot.mode)
+
+    def live_state(full_history: bool = True) -> dict:
         state = queue_state()
         pool_names = {p.id: p.name for p in snapshot.pools.values()}
         state["pools"] = {pool_names.get(pid, str(pid)): v for pid, v in state["pools"].items()}
@@ -690,7 +733,9 @@ def create_app(
             "recent": list(stats.recent)[-25:],
             "runs": runs.snapshot(),
             "alerts_unread": store.unread_notifications(),
-            "history": list(history),
+            "history": list(history) if full_history else list(history)[-5:],  # live updates: the latest only
+            "inflight": inflight_view(),
+            "usage_version": usage_version[0],
         }
 
     async def probe(base_url: str, api_key: str) -> tuple[bool, str]:
@@ -740,6 +785,7 @@ def create_app(
             alerts,
             lambda: app.state.restart(),
             lambda name: monthly.used(name),
+            live_signature,
         ),
     )
 
@@ -1788,6 +1834,7 @@ def create_app(
                     )
         position = queue.predict_position(client.name, lane, session)
         rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies))
+        inflight[request_id] = rlog  # shown live on the dashboard until it finishes
         if cfg().otel_endpoint:  # tracing: continue the caller's trace, hand ours to the provider
             trace = tracing.start(request_headers.get("traceparent"))
             rlog.fields["trace"] = trace
@@ -1880,6 +1927,7 @@ def create_app(
                             await response.aclose()
                         status = response.status_code
                         outcome = "done" if status < 400 else "error"
+                        rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
                         if adm.log_request is not None:
                             rlog.content = (adm.log_request, content)
                         verdict = None
@@ -1971,6 +2019,8 @@ def create_app(
                         try:
                             async for chunk in response.aiter_bytes():
                                 sniffer.feed(chunk)
+                                if rlog.fields["ttft_ms"] is None:
+                                    rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
                                 if captured is not None and len(captured) < CONTENT_CAPTURE_MAX:
                                     captured += chunk
                                 yield chunk
