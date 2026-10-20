@@ -54,6 +54,7 @@ from .security import (
 
 log = logging.getLogger("queuerouter")
 TWO_FA_COOKIE, TWO_FA_TTL_S = "qr_2fa", 300
+PRICING_DAYS = 30  # the price table lists models used this recently (plus offered and manually priced ones)
 HERE = os.path.dirname(__file__)
 
 # Short, fixed flash messages (passed by code in the redirect URL, never as free text).
@@ -125,6 +126,12 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Usage",
         "Logged content size limit (KB)",
         "Per request and per reply; longer ones are cut.",
+    ),
+    "unknown_model_check": (
+        "Upstream",
+        "Refuse unknown models",
+        "Answer 404 (with the closest names) for a model no upstream lists, instead of sending it on. "
+        "Turn off for providers whose model list is incomplete.",
     ),
     "structured_repair": (
         "Upstream",
@@ -958,9 +965,21 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 pool_id = int(pool_choice)
                 if pool_id not in {p.id for p in store.list_pools()}:
                     raise ValueError("pool")
+            params = _rules_text(form) or preset.params
+            retries = _opt(form, "max_retries", int, 0)
             store.create_upstream(
-                name, base_url, api_key, pool_id, session.user.username, preset=preset.key, weight=weight
+                name,
+                base_url,
+                api_key,
+                pool_id,
+                session.user.username,
+                preset=preset.key,
+                weight=weight,
+                params=params,
+                max_retries=retries if retries is not None else preset.max_retries,
             )
+        except RulesError:
+            return back("/admin/upstreams", error="rules_invalid")
         except ValueError:
             return back("/admin/upstreams", error="invalid")
         except sqlite3.IntegrityError:
@@ -976,6 +995,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 "enabled": form.get("enabled") == "on",
                 "paused": form.get("paused") == "on",
                 "weight": int_field(form, "weight", 1, 100, 1),
+                "params": _rules_text(form),
+                "max_retries": _opt(form, "max_retries", int, 0),
             }
             base_url = str(form.get("base_url", "")).strip().rstrip("/")
             if base_url:
@@ -989,6 +1010,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                     raise ValueError("pool")
                 fields["pool_id"] = int(pool)
             store.update_upstream(upstream_id, session.user.username, **fields)
+        except RulesError:
+            return back("/admin/upstreams", error="rules_invalid")
         except (ValueError, KeyError):
             return back("/admin/upstreams", error="invalid")
         ctx.reload()
@@ -1089,9 +1112,16 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         upstream_names = {u.id: u.name for u in store.list_upstreams()}
         models = ctx.models_by_upstream()
         overrides = store.list_model_prices()
-        priced_models = sorted({m for ids in models.values() for m in ids} | set(store.used_models()) | set(overrides))
+        offered = {m for ids in models.values() for m in ids} | {a.target_model for a in store.list_aliases()}
+        recent = set(store.used_models(days=PRICING_DAYS))  # older names only matter for old usage
+        priced_models = sorted(offered | recent | set(overrides))
         pricing = [
-            {"model": m, "price": resolve(m, overrides, ctx.prices), "override": overrides.get(m)}
+            {
+                "model": m,
+                "price": resolve(m, overrides, ctx.prices),
+                "override": overrides.get(m),
+                "offered": m in offered,
+            }
             for m in priced_models
         ]
         return page(

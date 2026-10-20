@@ -28,7 +28,7 @@
     <td data-label="Client">{{ r.client }} <span class="badge {{ r.priority }}">{{ r.priority }}</span>{% if r.tags %}<div class="small muted">{% for t in r.tags.split(",") %}#{{ t }} {% endfor %}</div>{% endif %}</td>
     <td data-label="Model" class="wrap-any">{{ r.model }}{% if r.target_model %} <span class="muted small">→ {{ r.target_model }}</span>{% endif %}</td>
     <td data-label="Upstream">{{ r.upstream or "—" }}</td>
-    <td data-label="Outcome">{{ r.outcome }} <span class="muted small">{{ r.status }}{% if r.retries %} · {{ r.retries }} retries{% endif %}</span></td>
+    <td data-label="Outcome">{{ r.outcome }} <span class="muted small">{{ r.status }}{% if r.retries %} · {{ r.retries }} retries{% endif %}</span>{% if r.error %}<div class="small muted wrap-any">{{ r.error }}</div>{% endif %}</td>
     <td data-label="Queue ms">{{ r.queue_ms if r.queue_ms is not none else "—" }}</td>
     <td data-label="Upstream ms">{{ r.upstream_ms if r.upstream_ms is not none else "—" }}</td>
     <td data-label="Tokens">{{ (r.prompt_tokens or 0) + (r.completion_tokens or 0) }}</td>

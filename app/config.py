@@ -187,6 +187,7 @@ TUNABLES: dict[str, type] = {
     "content_log_days": int,
     "content_log_max_kb": int,
     "structured_repair": bool,
+    "unknown_model_check": bool,
     "metrics_token": str,
     "otel_endpoint": str,
     "otel_headers": str,
@@ -244,6 +245,7 @@ class Settings:
     content_log_days: int = 7  # logged prompts/replies (clients with content logging on) kept this long
     content_log_max_kb: int = 256  # per request and per reply; longer ones are cut
     structured_repair: bool = True  # fix broken JSON replies (JSON mode, tool-call arguments)
+    unknown_model_check: bool = True  # 404 for models no upstream lists (when every list is known)
     metrics_token: str = ""  # /metrics needs "Authorization: Bearer <token>"; empty = /metrics is off
     otel_endpoint: str = ""  # OTLP/HTTP collector base URL (traces go to <it>/v1/traces); empty = off
     otel_headers: str = ""  # extra headers for the collector, "key=value,key2=value2"

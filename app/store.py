@@ -316,6 +316,12 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX schedules_due ON schedules (enabled, next_run);
     """,
+    # 15: per-upstream parameter rules (e.g. strip fields a provider rejects) and retry limit
+    """
+    ALTER TABLE upstreams ADD COLUMN params TEXT NOT NULL DEFAULT '';
+    ALTER TABLE upstreams ADD COLUMN max_retries INTEGER;
+    ALTER TABLE requests ADD COLUMN error TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -344,6 +350,7 @@ REQUEST_COLUMNS = (
     "tags",
     "finish_reason",
     "ip",
+    "error",
 )
 
 
@@ -379,6 +386,8 @@ class Upstream:
     weight: int
     enabled: bool
     paused: bool
+    params: str = ""  # parameter rules applied to every request sent here (app/params.py)
+    max_retries: int | None = None  # 429 retries on this upstream (None = the client's / global budget)
 
 
 @dataclass(frozen=True)
@@ -727,6 +736,8 @@ class Store:
                 r["weight"],
                 bool(r["enabled"]),
                 bool(r["paused"]),
+                r["params"] or "",
+                r["max_retries"],
             )
             for r in self.query("SELECT * FROM upstreams ORDER BY id")
         ]
@@ -770,12 +781,24 @@ class Store:
         actor: str,
         preset: str | None = None,
         weight: int = 1,
+        params: str = "",
+        max_retries: int | None = None,
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
-                "INSERT INTO upstreams (name, preset, base_url, api_key_enc, pool_id, weight, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (name, preset, base_url.rstrip("/"), self.encrypt(api_key), pool_id, weight, time.time()),
+                "INSERT INTO upstreams (name, preset, base_url, api_key_enc, pool_id, weight, params, max_retries, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    name,
+                    preset,
+                    base_url.rstrip("/"),
+                    self.encrypt(api_key),
+                    pool_id,
+                    weight,
+                    params,
+                    max_retries,
+                    time.time(),
+                ),
             )
         self.audit(actor, "upstream.create", name, {"base_url": base_url, "pool_id": pool_id})
         return cur.lastrowid
@@ -783,7 +806,18 @@ class Store:
     def update_upstream(self, upstream_id: int, actor: str, **fields: object) -> None:
         if "api_key" in fields:
             fields["api_key_enc"] = self.encrypt(str(fields.pop("api_key")))
-        allowed = {"name", "preset", "base_url", "api_key_enc", "pool_id", "weight", "enabled", "paused"}
+        allowed = {
+            "name",
+            "preset",
+            "base_url",
+            "api_key_enc",
+            "pool_id",
+            "weight",
+            "enabled",
+            "paused",
+            "params",
+            "max_retries",
+        }
         self._update("upstreams", upstream_id, allowed, fields)
         self.audit(actor, "upstream.update", str(upstream_id), {k: v for k, v in fields.items() if k != "api_key_enc"})
 
@@ -938,8 +972,13 @@ class Store:
             (since,),
         )
 
-    def used_models(self) -> list[str]:
-        return [r[0] for r in self.query("SELECT DISTINCT model FROM usage_daily WHERE model != '-' ORDER BY model")]
+    def used_models(self, days: int | None = None) -> list[str]:
+        """Model names in the usage history (only the last ``days`` days when given)."""
+        since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86_400)) if days else ""
+        rows = self.query(
+            "SELECT DISTINCT model FROM usage_daily WHERE model != '-' AND day >= ? ORDER BY model", (since,)
+        )
+        return [r[0] for r in rows]
 
     # -- model prices (manual overrides) ----------------------------------------------------
 

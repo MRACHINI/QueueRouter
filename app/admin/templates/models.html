@@ -92,7 +92,7 @@ another models.dev reference or your own prices.
   {% for p in pricing %}
   {% set o = p.override %}
   <tr>
-    <td data-label="Model" class="mono small wrap-any">{{ p.model }}</td>
+    <td data-label="Model" class="mono small wrap-any">{{ p.model }}{% if not p.offered %} <span class="badge" title="No upstream offers this name now; it is here because of recent usage or a manual price">not offered</span>{% endif %}</td>
     <td data-label="Input">{{ "$%.3f" | format(p.price.input) if p.price else "—" }}</td>
     <td data-label="Cached input">{{ "$%.4f" | format(p.price.cached_input) if p.price else "—" }}</td>
     <td data-label="Output">{{ "$%.3f" | format(p.price.output) if p.price else "—" }}</td>
@@ -108,6 +108,13 @@ another models.dev reference or your own prices.
         <input type="number" step="any" min="0" name="output" value="{{ o.output if o and o.output is not none else '' }}" placeholder="out $" aria-label="Output price" class="price">
         <button type="submit" class="secondary">Save</button>
       </form>
+      {% if o %}
+      <form method="post" action="/admin/prices" class="row">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="model" value="{{ p.model }}">
+        <button type="submit" class="ghost small">Remove price</button>
+      </form>
+      {% endif %}
     </td>
   </tr>
   {% else %}
@@ -116,8 +123,10 @@ another models.dev reference or your own prices.
   </tbody>
 </table>
 </div>
-<p class="small muted">Empty override = automatic. Manual prices win over a reference; clear all fields to go back
-to automatic. Prices apply to past usage too.</p>
+<p class="small muted">Lists the models your upstreams offer, plus names used in the last 30 days and manual prices.
+Empty override = automatic. Manual prices win over a reference; <em>Remove price</em> goes back to automatic.
+Costs are counted for the model that answered (an alias's target), so price the target, not the alias. Prices apply to
+past usage too.</p>
 
 <h2>Models per upstream</h2>
 {% for name, ids in models.items() %}

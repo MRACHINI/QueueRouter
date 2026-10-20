@@ -7,6 +7,7 @@ import asyncio
 import collections
 import contextlib
 import dataclasses
+import difflib
 import functools
 import hmac
 import json
@@ -52,6 +53,7 @@ from .upstream import (
     FAILURE_STATUS,
     RETRYABLE_ERRORS,
     UsageSniffer,
+    describe_429,
     finish_reason_from_body,
     response_headers,
     retry_delay,
@@ -63,6 +65,7 @@ log = logging.getLogger("queuerouter")
 
 HEALTH_INTERVAL_S = 30
 HISTORY_POINTS, HISTORY_EVERY_S = 360, 5  # dashboard chart: 30 minutes
+QUOTA_BLOCK_S = 3600  # how long an upstream whose quota ran out is skipped for that model (unless it says)
 CONTENT_CAPTURE_MAX = 16 * 1024 * 1024  # streamed reply bytes kept for content logging (cut later)
 CATALOG_MAX_AGE_S = 3600
 
@@ -110,6 +113,7 @@ class RequestLog:
             "tags": None,
             "run": None,
             "target_model": None,
+            "error": None,  # why it failed or was retried (e.g. the provider's 429 message)
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -231,6 +235,22 @@ def create_app(
     def available(upstream_id: int) -> bool:
         target = snapshot.upstreams.get(upstream_id)
         return target is not None and target.usable and circuits.allows(upstream_id)
+
+    quota_until: dict[tuple[int, str], float] = {}  # (upstream, model) -> monotonic time its quota may be back
+
+    def block_quota(upstream_id: int, model: str, wait: float | None) -> None:
+        """A provider said a quota is used up: skip that upstream for this model for a while
+        (its suggested wait, else an hour; daily quotas come back the next day)."""
+        quota_until[(upstream_id, model)] = time.monotonic() + min(max(wait or QUOTA_BLOCK_S, 30), 6 * 3600)
+
+    def quota_blocked(upstream_id: int, model: str) -> bool:
+        until = quota_until.get((upstream_id, model))
+        if until is None:
+            return False
+        if until <= time.monotonic():
+            quota_until.pop((upstream_id, model), None)
+            return False
+        return True
 
     limiter = RateLimiter()
     runs = Runs()
@@ -595,6 +615,22 @@ def create_app(
         order = {uid: i for i, uid in enumerate(snapshot.upstreams)}
         return tuple(Candidate(t.id, t.pool.id, t.upstream.weight, order[t.id]) for t in usable)
 
+    def unknown_model(name: str | None, alias=None) -> JSONResponse | None:
+        """A 404 with suggestions when no upstream offers ``name`` (only when every upstream's model
+        list is known: a list we couldn't fetch proves nothing)."""
+        only = alias.upstream_ids if alias else ()
+        usable = [t for t in snapshot.upstreams.values() if t.usable and (not only or t.id in only)]
+        if not name or not usable:
+            return None
+        lists = [catalogs.ids(t.id) for t in usable]
+        if any(ids is None for ids in lists) or any(name in ids for ids in lists):
+            return None
+        known = sorted({m for ids in lists for m in ids} | set(snapshot.aliases))
+        close = difflib.get_close_matches(name, known, n=3, cutoff=0.6)
+        hint = f"; did you mean {', '.join(close)}?" if close else "; GET /v1/models lists the models you can use"
+        what = f"alias '{alias.name}' points to '{name}', which" if alias else f"model '{name}'"
+        return error_response(f"{what} is not offered by any upstream{hint}", 404, "model_not_found")
+
     def request_lane(headers: Mapping[str, str], client: ClientKey) -> int:
         """Client's priority, optionally lowered (never raised) by X-QueueRouter-Priority."""
         lane = LANES[client.priority]
@@ -715,19 +751,31 @@ def create_app(
             return keepalive
         return max(0.0, min(keepalive, adm.deadline - time.monotonic()))
 
-    def can_retry(adm: Admission, retries: int) -> bool:
+    def can_retry(adm: Admission, retries: int, target: Target | None = None) -> bool:
         if adm.expired():
             return False
-        budget = adm.policy.max_retries if adm.policy.max_retries is not None else cfg().max_retries
-        return budget < 0 or retries < budget
+        # The client's and the upstream's own limits win over the global one; the lower counts.
+        upstream_limit = target.upstream.max_retries if target else None
+        budgets = [b for b in (adm.policy.max_retries, upstream_limit) if b is not None] or [cfg().max_retries]
+        finite = [b for b in budgets if b >= 0]  # -1 = keep retrying
+        return not finite or retries < min(finite)
 
     def build_request(adm: Admission, target: Target) -> httpx.Request:
         s = cfg()
         url = f"{target.upstream.base_url}/{adm.path}" + (f"?{adm.query}" if adm.query else "")
+        body = adm.body
+        if target.upstream.params and body:  # this provider's own rules (e.g. fields it rejects)
+            try:
+                payload = json.loads(body)
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                apply_rules(payload, rules_of(target.upstream.params), {})
+                body = json.dumps(payload).encode()
         return app.state.client.build_request(
             adm.method,
             url,
-            content=adm.body or None,
+            content=body or None,
             headers=upstream_headers(adm.headers, target.api_key),
             timeout=httpx.Timeout(
                 connect=s.upstream_connect_timeout_s, read=s.upstream_read_timeout_s, write=30, pool=None
@@ -743,7 +791,18 @@ def create_app(
         excluded: set[int] = set()
         retries = 0
         verdict = False
+        model = body_model(adm.body)
         try:
+            blocked = {c.upstream_id for c in adm.candidates if quota_blocked(c.upstream_id, model)}
+            if blocked and blocked >= {c.upstream_id for c in adm.candidates}:  # fail fast, no slot needed
+                names = ", ".join(
+                    sorted(snapshot.upstreams[u].upstream.name for u in blocked if u in snapshot.upstreams)
+                )
+                yield Failed(
+                    429, f"the quota for {model} is used up on {names}; try again later", "upstream_quota_exhausted"
+                )
+                return
+            excluded |= blocked
             while True:
                 pool = tuple(c for c in adm.candidates if c.upstream_id not in excluded) or adm.candidates
                 preferred = sticky_upstream(adm.session)
@@ -795,14 +854,42 @@ def create_app(
                         reason = type(exc).__name__
                     else:
                         status = response.status_code
-                        if status == BUSY_STATUS and can_retry(adm, retries):
-                            delay = retry_delay(
-                                retries, response.headers, cfg().retry_base_delay_s, cfg().retry_max_delay_s
-                            )
-                            await response.aclose()
-                            retries += 1
-                            yield Backoff(delay, retries, "HTTP 429")
-                            continue
+                        if status == BUSY_STATUS:
+                            try:
+                                content = await response.aread()
+                            finally:
+                                await response.aclose()
+                            message, hard, wait = describe_429(content)
+                            adm.rlog.fields["error"] = f"429 from {target.upstream.name}: {message}"[:500]
+                            if hard:  # quota used up: waiting won't help
+                                block_quota(target.id, model, wait)
+                                others = [
+                                    c
+                                    for c in adm.candidates
+                                    if c.upstream_id != target.id
+                                    and c.upstream_id not in excluded
+                                    and available(c.upstream_id)
+                                    and not quota_blocked(c.upstream_id, model)
+                                ]
+                                if others:
+                                    excluded.add(target.id)
+                                    queue.cancel(ticket)
+                                    ticket = None
+                                    yield Backoff(0, retries, f"quota used up on {target.upstream.name}, failing over")
+                                    break
+                                yield Failed(429, f"{target.upstream.name}: {message}", "upstream_quota_exhausted")
+                                return
+                            if can_retry(adm, retries, target):
+                                delay = retry_delay(
+                                    retries, response.headers, cfg().retry_base_delay_s, cfg().retry_max_delay_s
+                                )
+                                if wait and "retry-after" not in response.headers:
+                                    delay = min(wait, cfg().retry_max_delay_s)
+                                retries += 1
+                                yield Backoff(delay, retries, f"HTTP 429 ({message[:150]})")
+                                continue
+                            yield Got(Replay(response, content, complete=True), target)  # pass the 429 through
+                            return
                         if status not in FAILURE_STATUS:
                             circuits.success(target.id)
                             verdict = True
@@ -812,7 +899,7 @@ def create_app(
 
                     circuits.failure(target.id, reason)
                     verdict = True
-                    if not can_retry(adm, retries):
+                    if not can_retry(adm, retries, target):
                         if response is not None:
                             yield Got(response, target)  # pass the upstream's error through
                         else:
@@ -855,7 +942,13 @@ def create_app(
                 adm.rlog.fields["fallback"] = f"{step.model} -> {nxt} ({reason})"
                 return FellBack(step.model, nxt, reason)
 
-            if not last and "unavailable" in triggers and not any(available(c.upstream_id) for c in step.candidates):
+            if (
+                not last
+                and "unavailable" in triggers
+                and not any(
+                    available(c.upstream_id) and not quota_blocked(c.upstream_id, step.model) for c in step.candidates
+                )
+            ):
                 yield fall("unavailable")
                 continue
             if index:
@@ -870,7 +963,8 @@ def create_app(
                             return
                         continue
                     if isinstance(event, Failed):
-                        if event.status >= 500 and "errors" in triggers:
+                        quota_out = event.kind == "upstream_quota_exhausted" and triggers & {"unavailable", "errors"}
+                        if quota_out or (event.status >= 500 and "errors" in triggers):
                             yield fall(event.message)
                             moved_on = True
                             break
@@ -1613,6 +1707,9 @@ def create_app(
         target_model = alias.target_model if alias else model
         if refusal := policy_refusal(client, model, target_model):
             return refusal
+        no_fallbacks = not (alias and alias.fallbacks)  # with fallbacks, a missing target just moves on
+        if cfg().unknown_model_check and no_fallbacks and (missing := unknown_model(target_model, alias)) is not None:
+            return missing
         # The chain: the requested model (or the alias's target), then the alias's fallbacks.
         chain = [target_model, *(alias.fallbacks if alias else ())]
         triggers = frozenset(alias.fallback_on) if alias and alias.fallbacks else frozenset()
@@ -1773,6 +1870,7 @@ def create_app(
                         return error_response("timed out waiting in queue", 504, "queue_timeout")
                     elif isinstance(event, Failed):
                         status = event.status
+                        rlog.fields["error"] = event.message[:500]
                         return error_response(event.message, event.status, event.kind)
                     elif isinstance(event, Got):
                         response = event.response
@@ -1856,6 +1954,7 @@ def create_app(
                         return
                     elif isinstance(event, Failed):
                         status = event.status
+                        rlog.fields["error"] = event.message[:500]
                         yield sse_error(event.message, event.status, event.kind)
                         return
                     elif isinstance(event, Got):
@@ -1969,3 +2068,13 @@ def repair_structured(adm: Admission, content: bytes) -> tuple[bytes, str | None
     if verdict == "repaired":
         return json.dumps(reply, ensure_ascii=False).encode(), verdict
     return content, verdict
+
+
+def body_model(body: bytes) -> str:
+    """The ``model`` of a JSON request body ("" when there is none)."""
+    try:
+        payload = json.loads(body) if body else None
+    except ValueError:
+        return ""
+    model = payload.get("model") if isinstance(payload, dict) else None
+    return model if isinstance(model, str) else ""

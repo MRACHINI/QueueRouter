@@ -130,3 +130,45 @@ class UsageSniffer:
                 prompt, completion, cached = usage_from_body(payload)
                 if prompt is not None or completion is not None:
                     self.prompt_tokens, self.completion_tokens, self.cached_tokens = prompt, completion, cached
+
+
+# Only these mean "waiting won't help". Google's per-minute 429s also say "quota exceeded" and
+# mention billing, so those words alone don't count.
+_HARD_QUOTA_HINTS = ("perday", "per_day", "per day", "limit: 0", "insufficient_quota")
+
+
+def describe_429(content: bytes) -> tuple[str, bool, float | None]:
+    """(message, hard, suggested wait in seconds) from a provider's 429 body.
+
+    *Hard* = waiting a few seconds won't help: a daily quota is used up (Google
+    ``...PerDay...`` quota ids), the plan has no quota for the model (``limit: 0``), or the
+    account is out of credit (OpenAI ``insufficient_quota``).
+    """
+    try:
+        data = json.loads(content or b"{}")
+    except ValueError:
+        text = content.decode("utf-8", "replace").strip()[:300]
+        return text or "rate limited", any(h in text.lower() for h in _HARD_QUOTA_HINTS), None
+    if isinstance(data, list) and data:  # Google wraps errors in a list
+        data = data[0]
+    error = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(error, dict):
+        return "rate limited", False, None
+    message = str(error.get("message") or error.get("status") or "rate limited")
+    hints = " ".join(str(error.get(k, "")) for k in ("type", "code", "status")) + " " + message
+    wait = None
+    for detail in error.get("details") or []:
+        if not isinstance(detail, dict):
+            continue
+        kind = str(detail.get("@type", ""))
+        if kind.endswith("QuotaFailure"):
+            for violation in detail.get("violations") or []:
+                hints += " " + " ".join(str(v) for v in violation.values())
+        elif kind.endswith("RetryInfo"):
+            raw = str(detail.get("retryDelay", ""))
+            try:
+                wait = float(raw.rstrip("s")) if raw else None
+            except ValueError:
+                wait = None
+    hard = any(h in hints.lower() for h in _HARD_QUOTA_HINTS)
+    return " ".join(message.split())[:300], hard, wait

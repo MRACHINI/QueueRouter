@@ -1077,6 +1077,10 @@ Prometheus metrics, monthly token quotas, recurring (cron) jobs, OpenTelemetry.
 **Status: shipped as v0.14.0.** Notes: metrics and the OTLP exporter are written by hand (no
 client/SDK dependencies); quotas also cover requests and cost, not only tokens; cron is UTC.
 
+v0.15.0 (from real use with Google Gemini): provider 429 messages surfaced; daily-quota 429s fail fast /
+fall back; per-upstream parameter rules and retry limit; Gemini preset; unknown-model 404 with suggestions;
+pricing table limited to offered and recently used models.
+
 ---
 
 ## 21. Open questions

@@ -22,6 +22,8 @@ class Preset:
     key_required: bool = True
     plans: tuple[Plan, ...] = field(default_factory=tuple)
     note: str = ""
+    params: str = ""  # parameter rules for requests to this provider (e.g. fields it rejects)
+    max_retries: int | None = None  # 429 retries before giving up (None = the global budget)
 
 
 # ArliAI plans from arliai.com/pricing (October 2026).
@@ -50,6 +52,16 @@ PRESETS: dict[str, Preset] = {
         Preset("together", "Together AI", "https://api.together.xyz/v1", 8),
         Preset("deepinfra", "DeepInfra", "https://api.deepinfra.com/v1/openai", 8),
         Preset("mistral", "Mistral", "https://api.mistral.ai/v1", 4),
+        Preset(
+            "gemini",
+            "Google Gemini (AI Studio)",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            2,
+            params='{"strip": ["store"]}',
+            max_retries=2,
+            note="Key from aistudio.google.com. Free tier: a few requests per minute and per day; "
+            "a used-up daily quota fails fast instead of waiting. Models are listed as models/gemini-....",
+        ),
         Preset(
             "nvidia",
             "NVIDIA (build.nvidia.com)",

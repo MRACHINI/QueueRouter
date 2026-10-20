@@ -61,6 +61,16 @@ def create_mock(limit: int = 2) -> FastAPI:
         # Per-model behaviour (for fallback chains): fail, block by policy, or refuse in text.
         model = body.get("model")
         state.setdefault("models", []).append(model)
+        # Google-style 429s: a used-up daily quota, or a per-minute limit for the first N tries.
+        if (body.get("mock_429_models") or {}).get(model) == "daily":
+            return JSONResponse(
+                _google_429("GenerateRequestsPerDayPerProjectPerModel-FreeTier", "45s"), status_code=429
+            )
+        if times := body.get("mock_429_times"):
+            seen = state["fails"].get(f"429:{key}", 0)
+            if seen < times:
+                state["fails"][f"429:{key}"] = seen + 1
+                return JSONResponse(_google_429("GenerateRequestsPerMinutePerProjectPerModel", "0.1s"), status_code=429)
         if model in body.get("mock_fail_models", []):
             return JSONResponse({"error": {"message": "model overloaded"}}, status_code=503)
         if model in body.get("mock_policy_models", []):
@@ -186,3 +196,25 @@ def _tool_call(body: dict):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+def _google_429(quota_id: str, retry_delay: str) -> list:
+    """A 429 shaped like Google's OpenAI-compatible endpoint returns it (a list with one error)."""
+    return [
+        {
+            "error": {
+                "code": 429,
+                "message": f"You exceeded your current quota. Quota exceeded for metric: {quota_id}",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "violations": [
+                            {"quotaMetric": "generativelanguage.googleapis.com/requests", "quotaId": quota_id}
+                        ],
+                    },
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay},
+                ],
+            }
+        }
+    ]
