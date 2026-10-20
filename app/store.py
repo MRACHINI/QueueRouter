@@ -322,6 +322,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE upstreams ADD COLUMN max_retries INTEGER;
     ALTER TABLE requests ADD COLUMN error TEXT;
     """,
+    # 16: time to first byte per request
+    """
+    ALTER TABLE requests ADD COLUMN ttft_ms INTEGER;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -351,6 +355,7 @@ REQUEST_COLUMNS = (
     "finish_reason",
     "ip",
     "error",
+    "ttft_ms",
 )
 
 

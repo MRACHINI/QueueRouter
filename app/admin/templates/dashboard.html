@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
 {% block content %}
-<div id="dashboard" data-endpoint="/admin/api/stats">
+<div id="dashboard" data-endpoint="/admin/api/stats" data-stream="/admin/api/live">
   <div class="row between">
     <h1>Dashboard</h1>
     <span class="muted small" id="live-status">live</span>
@@ -69,6 +69,16 @@
     </div>
   </section>
 
+  <section>
+    <h2>Now <span class="muted small"><span data-k="inflight_count">{{ state.inflight | length }}</span> in flight</span></h2>
+    <div class="table-wrap">
+      <table class="cards">
+        <thead><tr><th>Client</th><th>Model</th><th>Upstream</th><th>Stage</th><th>Elapsed</th><th>First byte</th></tr></thead>
+        <tbody id="now-body"><tr><td colspan="6" class="muted">Nothing running.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
   <figure class="chart-box">
     <figcaption>Last 30 minutes <span class="legend s1">running</span><span class="legend s3">queued</span></figcaption>
     <svg class="chart" id="live-chart" viewBox="0 0 720 160" role="img"
@@ -99,7 +109,7 @@
     <h2>Recent requests</h2>
     <div class="table-wrap">
       <table class="cards">
-        <thead><tr><th>Time</th><th>Client</th><th>Prio</th><th>Model</th><th>Outcome</th><th>Queue ms</th><th>Upstream ms</th><th>Tokens</th></tr></thead>
+        <thead><tr><th>Time</th><th>Client</th><th>Prio</th><th>Model</th><th>Outcome</th><th>Queue ms</th><th>First byte ms</th><th>Upstream ms</th><th>Tokens</th></tr></thead>
         <tbody id="recent-body"></tbody>
       </table>
     </div>

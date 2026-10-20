@@ -60,6 +60,7 @@ class Stats:
         self.content_sink = None  # optional callable(request id, client, request bytes, reply bytes)
         self.queue_hist = Histogram()  # seconds waiting for a slot
         self.upstream_hist = Histogram()  # seconds from slot to last byte (completed requests)
+        self.ttft_hist = Histogram()  # seconds from arrival to the first byte of the answer
 
     def record(
         self,

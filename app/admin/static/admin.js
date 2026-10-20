@@ -93,6 +93,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const dashboard = document.getElementById("dashboard");
   if (dashboard) liveDashboard(dashboard);
+  const usage = document.getElementById("usage-live");
+  if (usage) liveUsage(usage);
   const playground = document.getElementById("playground");
   if (playground) playgroundPage(playground);
 });
@@ -219,12 +221,12 @@ function liveDashboard(root) {
     if (label) td.dataset.label = label;
     return td;
   };
-  const fill = (tbody, rows) => {
+  const fill = (tbody, rows, empty = "Nothing yet.") => {
     tbody.replaceChildren(...rows);
     if (!rows.length) {
       const tr = document.createElement("tr");
-      const td = cell("Nothing yet.");
-      td.colSpan = 8;
+      const td = cell(empty);
+      td.colSpan = 9;
       td.className = "muted";
       tr.append(td);
       tbody.append(tr);
@@ -264,21 +266,65 @@ function liveDashboard(root) {
     svg.replaceChildren(...nodes);
   }
 
+  // Polling: only when the live stream isn't available.
   async function refresh() {
     if (document.hidden) return;
-    let s;
     try {
       const response = await fetch(endpoint, { credentials: "same-origin", headers: { Accept: "application/json" } });
       if (response.redirected || response.status === 401 || response.status === 403) {
         window.location.reload();
         return;
       }
-      s = await response.json();
-      status.textContent = "live · " + new Date().toLocaleTimeString();
+      render(await response.json(), "polling");
     } catch (_) {
       status.textContent = "offline — retrying";
-      return;
     }
+  }
+
+  // Chart points kept here: the stream sends the whole history once, then only the newest points.
+  let points = [];
+  function mergeHistory(incoming) {
+    if (incoming.length > 5) points = incoming.slice();
+    else {
+      const last = points.length ? points[points.length - 1][0] : 0;
+      points.push(...incoming.filter((p) => p[0] > last));
+    }
+    const cutoff = Date.now() / 1000 - 1800;
+    while (points.length && points[0][0] < cutoff) points.shift();
+  }
+
+  // The "Now" panel: elapsed times tick here between updates.
+  const fmtMs = (ms) => (ms === null || ms === undefined ? "—" : ms < 10000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms / 1000)} s`);
+  function renderNow(rows) {
+    const tbody = document.getElementById("now-body");
+    if (!tbody) return;
+    const now = performance.now();
+    fill(tbody, rows.map((r) => {
+      const tr = document.createElement("tr");
+      const elapsed = cell(fmtMs(r.elapsed_ms), "Elapsed");
+      elapsed.dataset.start = String(now - r.elapsed_ms);
+      elapsed.className = "mono";
+      const stage = cell(r.stage + (r.retries ? ` · ${r.retries} retries` : ""), "Stage");
+      stage.className = r.stage === "queued" ? "muted" : "";
+      if (r.error) stage.title = r.error;
+      tr.append(
+        cell(r.client, "Client"), cell(r.model, "Model"), cell(r.upstream, "Upstream"), stage, elapsed,
+        cell(r.ttft_ms === null ? (r.stage === "running" ? "waiting…" : "—") : fmtMs(r.ttft_ms), "First byte"),
+      );
+      return tr;
+    }), "Nothing running.");
+    set("inflight_count", rows.length);
+  }
+  function tick() {
+    const now = performance.now();
+    root.querySelectorAll("#now-body [data-start]").forEach((td) => {
+      td.textContent = fmtMs(now - Number(td.dataset.start));
+    });
+  }
+
+  function render(s, how) {
+    status.textContent = `${how} · ${new Date().toLocaleTimeString()}`;
+    renderNow(s.inflight || []);
     set("active", s.active);
     set("max_concurrency", s.max_concurrency);
     const meter = root.querySelector('[data-k="slots"]');
@@ -298,7 +344,8 @@ function liveDashboard(root) {
     set("tokens_total", s.tokens.prompt + s.tokens.completion);
     set("uptime", s.uptime_s);
     set("upstream", s.upstream || "none");
-    drawHistory(document.getElementById("live-chart"), s.history || [], s.max_concurrency);
+    mergeHistory(s.history || []);
+    drawHistory(document.getElementById("live-chart"), points, s.max_concurrency);
     const badge = document.getElementById("nav-alerts-count");
     if (badge) {
       badge.textContent = s.alerts_unread || 0;
@@ -340,14 +387,72 @@ function liveDashboard(root) {
       tr.append(
         cell(new Date(r.ts * 1000).toLocaleTimeString(), "Time"), cell(r.client, "Client"),
         cell(r.priority, "Prio"), cell(r.model, "Model"), cell(r.outcome, "Outcome"),
-        cell(r.queue_ms, "Queue ms"), cell(r.upstream_ms, "Upstream ms"), cell(tokens || null, "Tokens"),
+        cell(r.queue_ms, "Queue ms"), cell(r.ttft_ms, "First byte ms"), cell(r.upstream_ms, "Upstream ms"),
+        cell(tokens || null, "Tokens"),
       );
       return tr;
     });
     fill(document.getElementById("recent-body"), recentRows);
   }
 
-  refresh();
-  setInterval(refresh, 2000);
-  document.addEventListener("visibilitychange", refresh);
+  // Live stream (server-sent events); polling every 2 s if it can't connect.
+  let polling = null;
+  const startPolling = () => {
+    if (polling) return;
+    refresh();
+    polling = setInterval(refresh, 2000);
+    document.addEventListener("visibilitychange", refresh);
+  };
+  if (window.EventSource && root.dataset.stream) {
+    const source = new EventSource(root.dataset.stream);
+    source.onmessage = (event) => {
+      if (polling) {
+        clearInterval(polling);
+        polling = null;
+      }
+      render(JSON.parse(event.data), "live");
+    };
+    source.onerror = () => {
+      status.textContent = "reconnecting…"; // the browser retries on its own
+      setTimeout(() => {
+        if (source.readyState !== EventSource.OPEN) startPolling();
+      }, 5000);
+    };
+  } else {
+    startPolling();
+  }
+  setInterval(tick, 250);
+}
+
+// Usage page: when the live stream says new usage was written, reload this page's numbers,
+// charts and table in place (same filters), without a full page reload.
+function liveUsage(root) {
+  const status = document.getElementById("usage-status");
+  if (!window.EventSource || !root.dataset.stream) return;
+  let version = null;
+  let timer = null;
+  const reload = async () => {
+    timer = null;
+    try {
+      const response = await fetch(window.location.href, { credentials: "same-origin" });
+      if (!response.ok || response.redirected) return;
+      const page = new DOMParser().parseFromString(await response.text(), "text/html");
+      const fresh = page.getElementById("usage-live");
+      if (fresh) {
+        root.replaceChildren(...fresh.childNodes);
+        if (status) status.textContent = "Updated " + new Date().toLocaleTimeString() + " · updates live as requests finish.";
+      }
+    } catch (_) {
+      /* next update tries again */
+    }
+  };
+  const source = new EventSource(root.dataset.stream);
+  source.onmessage = (event) => {
+    const next = JSON.parse(event.data).usage_version;
+    if (version !== null && next !== version && !timer) timer = setTimeout(reload, 1000); // batch bursts
+    version = next;
+  };
+  source.onerror = () => {
+    if (status) status.textContent = "Live updates paused — reconnecting…";
+  };
 }
