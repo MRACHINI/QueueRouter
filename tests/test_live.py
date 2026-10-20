@@ -73,3 +73,21 @@ async def test_time_to_first_byte_recorded(make_stack):
         usage = (await c.get("/admin/usage")).text
         assert 'id="usage-live" data-stream="/admin/api/live"' in usage
     assert stack.app.state.stats.ttft_hist.n == 2
+
+
+async def test_live_stream_ends_when_stopping(make_stack):
+    stack = make_stack(bootstrap=OWNER)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        async with c.stream("GET", "/admin/api/live") as live:
+            lines = live.aiter_lines()
+            assert await anext(lines) == "retry: 1000"  # quick reconnects after a restart
+            await next_state(lines)
+            stack.app.state.stopping = True  # what a SIGTERM sets
+            await asyncio.wait_for(_drain(lines), 3)  # the stream ends instead of waiting forever
+        stack.app.state.stopping = False
+
+
+async def _drain(lines) -> None:
+    async for _ in lines:
+        pass
