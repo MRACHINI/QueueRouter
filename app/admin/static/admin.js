@@ -49,6 +49,19 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
+  // Click-to-copy text: <button data-copy-text="exact value">; delegated so live rows work too.
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-copy-text]");
+    if (!button) return;
+    try {
+      await navigator.clipboard.writeText(button.dataset.copyText);
+      button.classList.add("copied");
+      setTimeout(() => button.classList.remove("copied"), 1200);
+    } catch (_) {
+      window.getSelection().selectAllChildren(button);
+    }
+  });
+
   // Local times for <time data-ts="unix seconds">.
   document.querySelectorAll("time[data-ts]").forEach((el) => {
     const date = new Date(Number(el.dataset.ts) * 1000);
@@ -221,8 +234,10 @@ function liveDashboard(root) {
     if (label) td.dataset.label = label;
     return td;
   };
+  // App User-Agent, plus what the provider got when a rule changed it.
+  const uaTitle = (r) => [r.user_agent, r.sent_user_agent && `sent: ${r.sent_user_agent}`].filter(Boolean).join("\n");
   const withTitle = (td, text) => {
-    if (text) td.title = `User-Agent: ${text}`; // which app made the request
+    if (text) td.title = `User-Agent: ${text}`; // which app made the request (and what was sent on)
     return td;
   };
   const fill = (tbody, rows, empty = "Nothing yet.") => {
@@ -312,7 +327,7 @@ function liveDashboard(root) {
       stage.className = r.stage === "queued" ? "muted" : "";
       if (r.error) stage.title = r.error;
       tr.append(
-        withTitle(cell(r.client, "Client"), r.user_agent), cell(r.model, "Model"), cell(r.upstream, "Upstream"), stage, elapsed,
+        withTitle(cell(r.client, "Client"), uaTitle(r)), cell(r.model, "Model"), cell(r.upstream, "Upstream"), stage, elapsed,
         cell(r.ttft_ms === null ? (r.stage === "running" ? "waiting…" : "—") : fmtMs(r.ttft_ms), "First byte"),
       );
       return tr;
@@ -389,7 +404,7 @@ function liveDashboard(root) {
       const tr = document.createElement("tr");
       const tokens = (r.prompt_tokens || 0) + (r.completion_tokens || 0);
       tr.append(
-        cell(new Date(r.ts * 1000).toLocaleTimeString(), "Time"), withTitle(cell(r.client, "Client"), r.user_agent),
+        cell(new Date(r.ts * 1000).toLocaleTimeString(), "Time"), withTitle(cell(r.client, "Client"), uaTitle(r)),
         cell(r.priority, "Prio"), cell(r.model, "Model"), cell(r.outcome, "Outcome"),
         cell(r.queue_ms, "Queue ms"), cell(r.ttft_ms, "First byte ms"), cell(r.upstream_ms, "Upstream ms"),
         cell(tokens || null, "Tokens"),

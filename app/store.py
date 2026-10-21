@@ -335,6 +335,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE upstreams ADD COLUMN ua_mode TEXT NOT NULL DEFAULT 'keep';
     ALTER TABLE upstreams ADD COLUMN ua_template TEXT NOT NULL DEFAULT '';
     """,
+    # 19: the User-Agent QueueRouter sent upstream, when it differs from the app's own
+    """
+    ALTER TABLE requests ADD COLUMN sent_user_agent TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -368,6 +372,7 @@ REQUEST_COLUMNS = (
     "error",
     "ttft_ms",
     "user_agent",
+    "sent_user_agent",
 )
 
 

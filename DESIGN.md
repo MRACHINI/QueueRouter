@@ -1101,6 +1101,8 @@ flagged too); v0.20.0 never published (blocked by the scan).
 v0.21.0: outgoing User-Agent per client and per upstream (keep / neutral queuerouter/<version> / template
 with {original} {client} {priority} {model} {upstream} {version}; client overrides upstream; literal
 replacement, one ASCII line, max 500 chars). Allowed-apps checks still use the app's own User-Agent.
+v0.21.1: the User-Agent actually sent upstream is recorded (requests.sent_user_agent, only when a rule changed
+it) and shown under the app's own on the Requests page; both copy to the clipboard on click.
 
 ---
 

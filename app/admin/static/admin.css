@@ -240,3 +240,8 @@ tr.unread td { background: color-mix(in srgb, var(--danger) 6%, transparent); }
 .legend::before { content: ""; width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .qr svg { display: block; width: 220px; height: 220px; margin: 8px 0; border-radius: 6px; }
 .content-view { max-height: 60vh; overflow: auto; padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); white-space: pre-wrap; }
+
+/* Click-to-copy values (User-Agents on the Requests page) */
+.copy-text { display: block; background: none; border: 0; padding: 0; margin: 0; color: inherit; font: inherit; text-align: left; cursor: copy; overflow-wrap: anywhere; }
+.copy-text:hover { text-decoration: underline dotted; }
+.copy-text.copied::after { content: " ✓ copied"; color: var(--accent); }
