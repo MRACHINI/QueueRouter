@@ -1096,6 +1096,8 @@ v0.19.2: one refresh timer per plugin copy (opencode runs the plugin per project
 left all but the last folder stale), stopped by setup's cleanup / dispose.
 v0.20.0: allowed apps per client (User-Agent prefixes; refusals logged, not counted as usage); every
 request's User-Agent recorded and shown.
+v0.20.1: certifi 2026.10.19 (GHSA-6q48-6c7w-9gw2) and pip removed from the image (its vendored certifi was
+flagged too); v0.20.0 never published (blocked by the scan).
 
 ---
 

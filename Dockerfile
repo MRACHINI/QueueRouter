@@ -14,7 +14,8 @@ VOLUME /data
 
 WORKDIR /srv
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+# pip isn't needed at runtime; removing it also drops its own bundled (often older) certifi copy.
+RUN pip install -r requirements.txt && pip uninstall -y pip
 COPY app ./app
 COPY docker/entrypoint.sh /usr/local/bin/queuerouter-entrypoint
 RUN chmod 755 /usr/local/bin/queuerouter-entrypoint
