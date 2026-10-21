@@ -221,6 +221,10 @@ function liveDashboard(root) {
     if (label) td.dataset.label = label;
     return td;
   };
+  const withTitle = (td, text) => {
+    if (text) td.title = `User-Agent: ${text}`; // which app made the request
+    return td;
+  };
   const fill = (tbody, rows, empty = "Nothing yet.") => {
     tbody.replaceChildren(...rows);
     if (!rows.length) {
@@ -308,7 +312,7 @@ function liveDashboard(root) {
       stage.className = r.stage === "queued" ? "muted" : "";
       if (r.error) stage.title = r.error;
       tr.append(
-        cell(r.client, "Client"), cell(r.model, "Model"), cell(r.upstream, "Upstream"), stage, elapsed,
+        withTitle(cell(r.client, "Client"), r.user_agent), cell(r.model, "Model"), cell(r.upstream, "Upstream"), stage, elapsed,
         cell(r.ttft_ms === null ? (r.stage === "running" ? "waiting…" : "—") : fmtMs(r.ttft_ms), "First byte"),
       );
       return tr;
@@ -385,7 +389,7 @@ function liveDashboard(root) {
       const tr = document.createElement("tr");
       const tokens = (r.prompt_tokens || 0) + (r.completion_tokens || 0);
       tr.append(
-        cell(new Date(r.ts * 1000).toLocaleTimeString(), "Time"), cell(r.client, "Client"),
+        cell(new Date(r.ts * 1000).toLocaleTimeString(), "Time"), withTitle(cell(r.client, "Client"), r.user_agent),
         cell(r.priority, "Prio"), cell(r.model, "Model"), cell(r.outcome, "Outcome"),
         cell(r.queue_ms, "Queue ms"), cell(r.ttft_ms, "First byte ms"), cell(r.upstream_ms, "Upstream ms"),
         cell(tokens || null, "Tokens"),

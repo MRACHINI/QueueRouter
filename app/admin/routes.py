@@ -777,6 +777,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 raise ValueError("on_limit")
             policy = ClientPolicy(
                 allowed_models=models,
+                user_agents=tuple(p.strip() for p in str(form.get("user_agents", "")).split(",") if p.strip())[:20],
                 rpm=_opt(form, "rpm", int, 1),
                 rpd=_opt(form, "rpd", int, 1),
                 tpm=_opt(form, "tpm", int, 1),
