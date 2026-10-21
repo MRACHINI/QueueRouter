@@ -57,12 +57,11 @@ async function fetchModels(previousTag) {
   }
 }
 
-// One refresh timer per opencode process and plugin system, even if an old copy isn't told to stop.
-function startTimer(name, tick) {
-  clearInterval(globalThis[name]);
-  const timer = REFRESH_S > 0 ? setInterval(tick, REFRESH_S * 1000) : undefined;
-  globalThis[name] = timer;
-  return timer;
+// opencode runs (and even loads) the plugin separately for each open project folder, so every copy
+// keeps its own timer. opencode stops it through the cleanup that setup() returns (newer systems)
+// or the dispose hook (terminal UI).
+function startTimer(tick) {
+  return REFRESH_S > 0 ? setInterval(tick, REFRESH_S * 1000) : undefined;
 }
 
 // -- newer plugin system (opencode desktop) --------------------------------------------------
@@ -99,7 +98,7 @@ async function setup(ctx) {
 async function setupCatalog(ctx) {
   let current = await fetchModels();
   await ctx.catalog.transform((catalog) => applyCatalog(catalog, current));
-  const timer = startTimer("__queuerouterCatalogRefresh", async () => {
+  const timer = startTimer(async () => {
     const next = await fetchModels(current?.tag);
     if (!next || !next.provider || next.tag === current?.tag) return;
     current = next;
@@ -155,7 +154,7 @@ async function setupProviders(ctx) {
       if (event.kind === "title") event.headers["X-QueueRouter-Priority"] = "low";
     });
   }
-  const timer = startTimer("__queuerouterProviderRefresh", async () => {
+  const timer = startTimer(async () => {
     const next = await fetchModels(current?.tag);
     if (!next || !next.provider || next.tag === current?.tag) return;
     current = next;
@@ -194,7 +193,7 @@ async function server({ client }) {
     } catch {}
   }
 
-  const timer = startTimer("__queuerouterRefresh", checkModels);
+  const timer = startTimer(checkModels);
   if (timer) checkModels();
 
   async function rootSession(id) {
