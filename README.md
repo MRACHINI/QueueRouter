@@ -214,7 +214,10 @@ mechanism; the Windows URL just swaps the login command for a PowerShell one.)
 request with opencode's session and task, so QueueRouter finishes a conversation (subagents
 included) before starting new ones and applies run budgets and loop detection per task; it sends
 title generation at low priority so it never holds up the main model; and it loads your models on
-every start from `QUEUEROUTER_KEY` (then the login above is optional). Install once into opencode's
+every start from `QUEUEROUTER_KEY` (then the login above is optional). It also keeps the list current **while
+opencode runs**: it checks QueueRouter every minute and, when models or aliases changed and no session is
+busy, reloads opencode's providers so the model picker updates by itself (`QUEUEROUTER_REFRESH_S`
+changes the interval, `0` turns it off). Install once into opencode's
 global plugin folder and restart opencode (the Clients page shows these with your domain):
 
 ```bash

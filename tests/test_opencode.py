@@ -105,3 +105,17 @@ async def test_plugin_is_served_pointing_at_this_router(make_stack):
         page = (await c.get("/admin/clients")).text
         assert "~/.config/opencode/plugin/queuerouter.js" in page
         assert "https://qr.example.com/opencode/queuerouter.js" in page
+
+
+async def test_config_etag_for_live_refresh(make_stack):
+    stack = make_stack(bootstrap=OWNER)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        first = await c.get("/v1/opencode-config", headers=stack.headers)
+        tag = first.headers["etag"]
+        same = await c.get("/v1/opencode-config", headers={**stack.headers, "If-None-Match": tag})
+        assert same.status_code == 304 and same.content == b""
+        await login(c, stack.url)
+        await add_alias(c, "fresh", "mock-model")
+        changed = await c.get("/v1/opencode-config", headers={**stack.headers, "If-None-Match": tag})
+        assert changed.status_code == 200 and changed.headers["etag"] != tag
+        assert "fresh" in changed.json()["provider"]["queuerouter"]["models"]

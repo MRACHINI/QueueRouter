@@ -1086,6 +1086,8 @@ v0.17.0: fixes from the security review of v0.6-v0.14 — client data deleted/re
 request-size limits while reading (admin forms, /v1/files); callbacks pinned to the checked address,
 port 443, no error details; tracing headers cleared when the collector URL changes; webhook tests
 show only the status; restore zips size-limited; callback URLs encrypted.
+v0.18.0: the opencode plugin keeps the model list current while opencode runs (ETag on
+/v1/opencode-config; reload via opencode's instance dispose only when no session is busy).
 
 ---
 
