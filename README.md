@@ -210,14 +210,16 @@ $env:QUEUEROUTER_KEY="<client key>"; opencode auth login https://queuerouter.exa
 Then pick a `queuerouter/…` model with `/models`. (This uses opencode's `/.well-known/opencode`
 mechanism; the Windows URL just swaps the login command for a PowerShell one.)
 
-**Plugin (optional, recommended)** — QueueRouter also serves an opencode plugin. It tags each
+**Plugin (optional, recommended)** — QueueRouter also serves an opencode plugin. One file works in both the opencode
+**terminal** and the **desktop app** (opencode's older and newer plugin systems). It tags each
 request with opencode's session and task, so QueueRouter finishes a conversation (subagents
 included) before starting new ones and applies run budgets and loop detection per task; it sends
 title generation at low priority so it never holds up the main model; and it loads your models on
 every start from `QUEUEROUTER_KEY` (then the login above is optional). It also keeps the list current **while
 opencode runs**: it checks QueueRouter every minute and, when models or aliases changed and no session is
 busy, reloads opencode's providers so the model picker updates by itself (`QUEUEROUTER_REFRESH_S`
-changes the interval, `0` turns it off). Install once into opencode's
+changes the interval, `0` turns it off). Even without the plugin, QueueRouter groups an opencode conversation's
+requests (subagents included) from the session headers opencode sends, and tags them `opencode`. Install once into opencode's
 global plugin folder and restart opencode (the Clients page shows these with your domain):
 
 ```bash
