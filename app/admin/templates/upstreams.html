@@ -84,6 +84,12 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
         <label class="check"><input type="checkbox" name="enabled" {% if u.enabled %}checked{% endif %}> enabled</label>
         <label class="check"><input type="checkbox" name="paused" {% if u.paused %}checked{% endif %}> paused</label>
         <label class="inline-field">429 retries <input type="number" name="max_retries" min="0" value="{{ u.max_retries if u.max_retries is not none else '' }}" placeholder="global"></label>
+        <label class="inline-field">User-Agent <select name="ua_mode">
+          <option value="keep" {% if u.ua_mode == "keep" %}selected{% endif %}>keep</option>
+          <option value="remove" {% if u.ua_mode == "remove" %}selected{% endif %}>neutral</option>
+          <option value="template" {% if u.ua_mode == "template" %}selected{% endif %}>template</option>
+        </select></label>
+        <input name="ua_template" value="{{ u.ua_template }}" placeholder="User-Agent template, e.g. {original} via queuerouter/{version}" aria-label="User-Agent template" class="grow">
         <label class="span-all small">Parameter rules for this provider <small class="muted">e.g. {"strip": ["store"]} for fields it rejects</small>
           <textarea name="params" rows="1" class="rules" placeholder='{"strip": ["store"]}'>{{ u.params }}</textarea></label>
         <button type="submit" class="secondary">Save</button>
@@ -144,6 +150,15 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
   <label>Weight <input type="number" name="weight" min="1" max="100" value="1"></label>
   <label>429 retries <input type="number" name="max_retries" min="0" placeholder="from preset / global">
     <small class="muted">Rate-limit retries before giving up (a used-up daily quota never waits)</small></label>
+  <label>Outgoing User-Agent
+    <select name="ua_mode">
+      <option value="keep">keep the app's own</option>
+      <option value="remove">neutral (queuerouter/version)</option>
+      <option value="template">template</option>
+    </select>
+    <small class="muted">Default for clients set to keep</small></label>
+  <label>User-Agent template <input name="ua_template" placeholder="{original} via queuerouter/{version}">
+    <small class="muted">{original} {client} {priority} {model} {upstream} {version}</small></label>
   <label class="span-all">Parameter rules <small class="muted">optional JSON, applied to every request to this provider; blank = the preset's (Gemini strips "store")</small>
     <textarea name="params" rows="1" class="rules" placeholder='{"strip": ["store"]}'></textarea></label>
   <div class="align-end"><button type="submit">Add upstream</button></div>

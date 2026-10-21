@@ -65,7 +65,7 @@ shown once when created. Changes apply immediately.</p>
     <td colspan="5" data-label="">
         {% set p = c.policy %}
         <details class="policy">
-          <summary class="small">Limits{% if p.allowed_models or p.user_agents or p.rate_limited or p.max_queued is not none or p.max_active is not none or p.total_timeout_s or p.queue_timeout_s or p.max_retries is not none or p.params or p.tags or p.run_max_tokens or p.run_max_requests or p.run_max_minutes or p.loop_threshold or p.month_requests or p.month_tokens or p.month_cost_usd %} <span class="badge">set</span>{% endif %}</summary>
+          <summary class="small">Limits{% if p.allowed_models or p.user_agents or p.ua_mode != "keep" or p.rate_limited or p.max_queued is not none or p.max_active is not none or p.total_timeout_s or p.queue_timeout_s or p.max_retries is not none or p.params or p.tags or p.run_max_tokens or p.run_max_requests or p.run_max_minutes or p.loop_threshold or p.month_requests or p.month_tokens or p.month_cost_usd %} <span class="badge">set</span>{% endif %}</summary>
           <form method="post" action="/admin/clients/{{ c.id }}/policy" class="grid tight">
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <label class="span-all">Allowed models <small class="muted">comma-separated; empty = all</small>
@@ -73,6 +73,14 @@ shown once when created. Changes apply immediately.</p>
             <label class="span-all">Allowed apps <small class="muted">User-Agent starts with, comma-separated; empty = any app.
               The Requests page shows each request's User-Agent.</small>
               <input name="user_agents" value="{{ p.user_agents | join(', ') }}" placeholder="myapp/, telegramgrouphelper/"></label>
+            <label>Outgoing User-Agent <small class="muted">what providers see</small>
+              <select name="ua_mode">
+                <option value="keep" {% if p.ua_mode == "keep" %}selected{% endif %}>keep (upstream setting, else the app's own)</option>
+                <option value="remove" {% if p.ua_mode == "remove" %}selected{% endif %}>neutral (queuerouter/version)</option>
+                <option value="template" {% if p.ua_mode == "template" %}selected{% endif %}>template</option>
+              </select></label>
+            <label class="span-all">User-Agent template <small class="muted">for "template": {original} {client} {priority} {model} {upstream} {version}</small>
+              <input name="ua_template" value="{{ p.ua_template }}" placeholder="{original} via queuerouter/{version} (client={client}; priority={priority})"></label>
             <label>Requests / min <input type="number" name="rpm" min="1" value="{{ p.rpm if p.rpm is not none else '' }}"></label>
             <label>Requests / day <input type="number" name="rpd" min="1" value="{{ p.rpd if p.rpd is not none else '' }}"></label>
             <label>Tokens / min <input type="number" name="tpm" min="1" value="{{ p.tpm if p.tpm is not none else '' }}"></label>

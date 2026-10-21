@@ -172,3 +172,28 @@ def describe_429(content: bytes) -> tuple[str, bool, float | None]:
                 wait = None
     hard = any(h in hints.lower() for h in _HARD_QUOTA_HINTS)
     return " ".join(message.split())[:300], hard, wait
+
+
+UA_MODES = ("keep", "remove", "template")
+UA_PLACEHOLDERS = ("original", "client", "priority", "model", "upstream", "version")
+
+
+def outgoing_user_agent(
+    client_rule: tuple[str, str], upstream_rule: tuple[str, str], values: dict[str, str]
+) -> str | None:
+    """The User-Agent to send to the provider, or None to pass the app's own through.
+
+    Rules are (mode, template); the client's wins unless it is "keep". "remove" sends a neutral
+    ``queuerouter/<version>`` (without any, the HTTP library would add its own). Placeholders such as
+    ``{client}`` are replaced literally, so a template can never fail; the result is one ASCII line.
+    """
+    mode, template = client_rule if client_rule[0] != "keep" else upstream_rule
+    if mode == "remove":
+        return f"queuerouter/{values.get('version', '')}"
+    if mode != "template" or not template.strip():
+        return None
+    result = template
+    for name in UA_PLACEHOLDERS:
+        result = result.replace("{" + name + "}", values.get(name) or "")
+    result = " ".join(result.split()).encode("ascii", "replace").decode()[:500]
+    return result or None

@@ -1098,6 +1098,9 @@ v0.20.0: allowed apps per client (User-Agent prefixes; refusals logged, not coun
 request's User-Agent recorded and shown.
 v0.20.1: certifi 2026.10.19 (GHSA-6q48-6c7w-9gw2) and pip removed from the image (its vendored certifi was
 flagged too); v0.20.0 never published (blocked by the scan).
+v0.21.0: outgoing User-Agent per client and per upstream (keep / neutral queuerouter/<version> / template
+with {original} {client} {priority} {model} {upstream} {version}; client overrides upstream; literal
+replacement, one ASCII line, max 500 chars). Allowed-apps checks still use the app's own User-Agent.
 
 ---
 
