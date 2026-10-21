@@ -9,6 +9,7 @@ import contextlib
 import dataclasses
 import difflib
 import functools
+import hashlib
 import hmac
 import json
 import logging
@@ -1130,7 +1131,12 @@ def create_app(
         client, denied = authenticate(request)
         if denied:
             return denied
-        return provider_config(public_base(request), await opencode_models(client))
+        body = json.dumps(provider_config(public_base(request), await opencode_models(client)), sort_keys=True).encode()
+        # An ETag lets the opencode plugin check for new models and aliases cheaply (304 when unchanged).
+        etag = '"' + hashlib.sha256(body).hexdigest()[:20] + '"'
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        return Response(body, media_type="application/json", headers={"ETag": etag, "Cache-Control": "no-cache"})
 
     @app.get("/.well-known/opencode")
     async def wellknown_posix(request: Request):
