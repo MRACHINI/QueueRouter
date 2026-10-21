@@ -1090,6 +1090,8 @@ v0.18.0: the opencode plugin keeps the model list current while opencode runs (E
 /v1/opencode-config; reload via opencode's instance dispose only when no session is busy).
 v0.19.0: the plugin also loads in opencode's newer plugin system (desktop app): models via the catalog,
 live refresh with catalog.reload(); opencode's own session headers group subagents and tag requests.
+v0.19.1: opencode 2.x (desktop 2.1.2): provider domain + provider.reload(), model.request hook for agent
+tags and low-priority titles, built-in package @opencode/ai/providers/openai-compatible.
 
 ---
 

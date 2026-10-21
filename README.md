@@ -210,8 +210,8 @@ $env:QUEUEROUTER_KEY="<client key>"; opencode auth login https://queuerouter.exa
 Then pick a `queuerouter/…` model with `/models`. (This uses opencode's `/.well-known/opencode`
 mechanism; the Windows URL just swaps the login command for a PowerShell one.)
 
-**Plugin (optional, recommended)** — QueueRouter also serves an opencode plugin. One file works in both the opencode
-**terminal** and the **desktop app** (opencode's older and newer plugin systems). It tags each
+**Plugin (optional, recommended)** — QueueRouter also serves an opencode plugin. One file works in the opencode
+**terminal** and the **desktop app**, on opencode 1.19 and 2.x (tested with 1.19.3 and 2.1.2). It tags each
 request with opencode's session and task, so QueueRouter finishes a conversation (subagents
 included) before starting new ones and applies run budgets and loop detection per task; it sends
 title generation at low priority so it never holds up the main model; and it loads your models on

@@ -2,10 +2,11 @@
 // Install: save it in opencode's global plugin folder (~/.config/opencode/plugin/) and set
 // QUEUEROUTER_KEY to a client key (or log in with `opencode auth login <QueueRouter URL>`).
 //
-// One file for both of opencode's plugin systems:
-// - setup()  — the newer one (the desktop app): puts your QueueRouter models and aliases into
-//   opencode's model catalog and keeps them current while opencode runs (checked every minute,
-//   QUEUEROUTER_REFRESH_S, 0 = off); the model picker updates by itself.
+// One file for every opencode plugin system:
+// - setup()  — the newer ones (desktop app; opencode 2.x and 1.19): adds QueueRouter as a provider
+//   with your models and aliases, keeps them current while opencode runs (checked every minute,
+//   QUEUEROUTER_REFRESH_S, 0 = off; the model picker updates by itself) and, on 2.x, tags requests
+//   with the agent name and sends title requests at low priority.
 // - server() — the older one (the terminal UI): loads the models at start, keeps them current
 //   (reloading opencode's providers when no session is busy), tags requests with the agent name
 //   and sends title/summary requests at low priority.
@@ -23,6 +24,7 @@ const LOW_PRIORITY_AGENTS = new Set(["title", "summary"]);
 const REFRESH_S = Number(process.env.QUEUEROUTER_REFRESH_S ?? 60);
 const DEFAULT_CONTEXT = 131072;
 const DEFAULT_OUTPUT = 16384;
+const OPENCODE2_PACKAGE = "@opencode/ai/providers/openai-compatible"; // opencode 2.x built-in (1.x: @ai-sdk/openai-compatible)
 
 // The client key: QUEUEROUTER_KEY, else the one `opencode auth login <QueueRouter URL>` stored.
 function readKey() {
@@ -90,14 +92,76 @@ function applyCatalog(catalog, current) {
 }
 
 async function setup(ctx) {
+  if (ctx.provider?.transform) return setupProviders(ctx); // opencode 2.x
+  if (ctx.catalog?.transform) return setupCatalog(ctx); // opencode 1.19
+}
+
+async function setupCatalog(ctx) {
   let current = await fetchModels();
   await ctx.catalog.transform((catalog) => applyCatalog(catalog, current));
-  startTimer("__queuerouterCatalogRefresh", async () => {
+  const timer = startTimer("__queuerouterCatalogRefresh", async () => {
     const next = await fetchModels(current?.tag);
     if (!next || !next.provider || next.tag === current?.tag) return;
     current = next;
     await ctx.catalog.reload(); // the desktop app re-reads its model list on this
   });
+  return () => clearInterval(timer);
+}
+
+// opencode 2.x: QueueRouter as a provider with complete model definitions.
+function applyProviders(editor, current) {
+  if (!current?.provider) return;
+  const info = {
+    id: PROVIDER,
+    name: "QueueRouter",
+    activation: "enabled",
+    package: OPENCODE2_PACKAGE,
+    settings: { baseURL: `${BASE}/v1`, apiKey: current.key, timeout: false }, // queued requests may wait long
+  };
+  const models = Object.entries(current.provider.models ?? {}).map(([id, item]) => ({
+    id,
+    modelID: id,
+    providerID: PROVIDER,
+    name: item.name ?? id,
+    package: OPENCODE2_PACKAGE,
+    capabilities: { tools: true, input: ["text"], output: ["text"] },
+    variants: [],
+    time: { released: 0 },
+    cost: [],
+    status: "active",
+    enabled: true,
+    limit: { context: item.limit?.context ?? DEFAULT_CONTEXT, output: item.limit?.output ?? DEFAULT_OUTPUT },
+  }));
+  if (editor.get(PROVIDER)) {
+    editor.update(PROVIDER, (provider) => Object.assign(provider, info));
+    editor.models.set(PROVIDER, models); // replaces the list: removed aliases disappear
+  } else {
+    editor.add({ info, models });
+  }
+}
+
+async function setupProviders(ctx) {
+  let current = await fetchModels();
+  await ctx.provider.transform((editor) => applyProviders(editor, current));
+  if (ctx.session?.hook) {
+    // Every model call: which agent asked, and title requests at low priority.
+    await ctx.session.hook("model.request", (event) => {
+      if (event.model?.providerID !== PROVIDER) return;
+      const agent = String(event.agent ?? "")
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]/g, "-")
+        .slice(0, 50);
+      event.headers["X-QueueRouter-Tags"] = agent ? `opencode,agent:${agent}` : "opencode";
+      if (event.kind === "title") event.headers["X-QueueRouter-Priority"] = "low";
+    });
+  }
+  const timer = startTimer("__queuerouterProviderRefresh", async () => {
+    const next = await fetchModels(current?.tag);
+    if (!next || !next.provider || next.tag === current?.tag) return;
+    current = next;
+    await ctx.provider.reload(); // the desktop app re-reads providers and models on this
+  });
+  return () => clearInterval(timer); // opencode calls this when the plugin is unloaded
 }
 
 // -- older plugin system (opencode terminal UI) ----------------------------------------------
