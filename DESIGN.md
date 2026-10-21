@@ -1094,6 +1094,8 @@ v0.19.1: opencode 2.x (desktop 2.1.2): provider domain + provider.reload(), mode
 tags and low-priority titles, built-in package @opencode/ai/providers/openai-compatible.
 v0.19.2: one refresh timer per plugin copy (opencode runs the plugin per project folder; a shared timer
 left all but the last folder stale), stopped by setup's cleanup / dispose.
+v0.20.0: allowed apps per client (User-Agent prefixes; refusals logged, not counted as usage); every
+request's User-Agent recorded and shown.
 
 ---
 

@@ -55,6 +55,8 @@ class MonthlyUsage:
 
     def observe(self, entry: dict) -> None:
         """A finished request (counted until the next refresh reads it from the database)."""
+        if entry.get("outcome") == "refused":  # turned away at the door: not usage
+            return
         if month_of(entry.get("ts") or time.time()) != self.month:
             return
         prompt, completion = entry.get("prompt_tokens") or 0, entry.get("completion_tokens") or 0

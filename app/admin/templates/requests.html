@@ -25,7 +25,7 @@
   {% for r in rows %}
   <tr>
     <td data-label="Time"><time data-ts="{{ r.ts }}">{{ r.ts | int }}</time></td>
-    <td data-label="Client">{{ r.client }} <span class="badge {{ r.priority }}">{{ r.priority }}</span>{% if r.tags %}<div class="small muted">{% for t in r.tags.split(",") %}#{{ t }} {% endfor %}</div>{% endif %}</td>
+    <td data-label="Client">{{ r.client }} <span class="badge {{ r.priority }}">{{ r.priority }}</span>{% if r.user_agent %}<div class="small muted mono wrap-any" title="User-Agent">{{ r.user_agent }}</div>{% endif %}{% if r.tags %}<div class="small muted">{% for t in r.tags.split(",") %}#{{ t }} {% endfor %}</div>{% endif %}</td>
     <td data-label="Model" class="wrap-any">{{ r.model }}{% if r.target_model %} <span class="muted small">→ {{ r.target_model }}</span>{% endif %}</td>
     <td data-label="Upstream">{{ r.upstream or "—" }}</td>
     <td data-label="Outcome">{{ r.outcome }} <span class="muted small">{{ r.status }}{% if r.retries %} · {{ r.retries }} retries{% endif %}</span>{% if r.error %}<div class="small muted wrap-any">{{ r.error }}</div>{% endif %}</td>

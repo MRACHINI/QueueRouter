@@ -118,6 +118,7 @@ class RequestLog:
             "target_model": None,
             "error": None,  # why it failed or was retried (e.g. the provider's 429 message)
             "ttft_ms": None,  # from arrival to the first byte of the answer (what the user waits for)
+            "user_agent": None,  # the calling app, as it identifies itself
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -570,6 +571,13 @@ def create_app(
         if client is None:
             guard.fail(ip)
             return None, error_response("invalid or missing API key", 401, "invalid_api_key")
+        user_agent = request.headers.get("user-agent", "")
+        if not client.policy.allows_app(user_agent):
+            # Recorded with the User-Agent that was used; the caller isn't told which one is expected.
+            rlog = RequestLog(f"qr-{uuid.uuid4().hex[:12]}", request.method, request.url.path, ip)
+            rlog.fields.update(client=client.name, user_agent=user_agent[:300] or None)
+            rlog.finish(stats, outcome="refused", status=403, error="app not allowed for this key (see User-Agent)")
+            return None, error_response("this key can't be used from this app", 403, "app_not_allowed")
         return client, None
 
     def not_configured() -> JSONResponse | None:
@@ -713,6 +721,7 @@ def create_app(
                     "stream": f["stream"],
                     "retries": f["retries"],
                     "error": f["error"],
+                    "user_agent": f["user_agent"],
                 }
             )
         rows.sort(key=lambda r: -r["elapsed_ms"])
@@ -1874,6 +1883,7 @@ def create_app(
             request_headers = {**request_headers, "traceparent": trace["upstream_traceparent"]}
         rlog.fields.update(
             client=client.name,
+            user_agent=(request_headers.get("user-agent") or "")[:300] or None,
             priority=LANE_NAMES[lane],
             session=session and session[:8],
             position=position,

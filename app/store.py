@@ -326,6 +326,10 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE requests ADD COLUMN ttft_ms INTEGER;
     """,
+    # 17: the calling app's User-Agent per request
+    """
+    ALTER TABLE requests ADD COLUMN user_agent TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -358,6 +362,7 @@ REQUEST_COLUMNS = (
     "ip",
     "error",
     "ttft_ms",
+    "user_agent",
 )
 
 
@@ -935,6 +940,8 @@ class Store:
                         f"INSERT OR IGNORE INTO requests ({', '.join(REQUEST_COLUMNS)}) VALUES ({placeholders})",
                         tuple(int(row[c]) if c == "stream" else row.get(c) for c in REQUEST_COLUMNS),
                     )
+                if row.get("outcome") == "refused":  # turned away before any work: logged, not usage
+                    continue
                 day = time.strftime("%Y-%m-%d", time.gmtime(row["ts"]))
                 db.execute(
                     "INSERT INTO usage_daily (day, client, model, upstream, requests, errors, prompt_tokens, "

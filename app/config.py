@@ -29,6 +29,7 @@ class ClientPolicy:
     """Per-client limits. ``None`` / empty = no limit (or the global default)."""
 
     allowed_models: tuple[str, ...] = ()  # empty = every model
+    user_agents: tuple[str, ...] = ()  # allowed apps: User-Agent prefixes (empty = any app)
     rpm: int | None = None  # requests per minute
     rpd: int | None = None  # requests per day (rolling 24 h)
     tpm: int | None = None  # tokens per minute
@@ -62,10 +63,16 @@ class ClientPolicy:
         data = {k: v for k, v in data.items() if k in known}
         if "allowed_models" in data:
             data["allowed_models"] = tuple(data["allowed_models"] or ())
+        if "user_agents" in data:
+            data["user_agents"] = tuple(data["user_agents"] or ())
         return cls(**data)
 
     def to_json(self) -> str:
         return json.dumps({k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(self).items()})
+
+    def allows_app(self, user_agent: str) -> bool:
+        """Whether a request with this User-Agent may use the key (no rule = any app)."""
+        return not self.user_agents or any(user_agent.startswith(prefix) for prefix in self.user_agents)
 
     def logs_content(self, now: float) -> bool:
         return self.log_content and (self.log_content_until is None or self.log_content_until > now)
