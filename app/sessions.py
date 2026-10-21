@@ -33,7 +33,10 @@ def session_key(headers: Mapping[str, str], client: str, payload: object) -> str
     hashing those (plus client and model) groups an agent's successive calls together, while
     subagents and side tasks (titles, summaries) get their own sessions.
     """
-    explicit = headers.get("x-session-id")
+    # opencode sends its session id (X-Session-Id) and, for subagents, the parent's: a subagent's
+    # requests count as part of the conversation that started it.
+    parent = headers.get("x-opencode-parent-session-id") or headers.get("x-parent-session-id")
+    explicit = parent or headers.get("x-session-id")
     if explicit:
         return _hash("explicit", client, explicit[:256])
     if not isinstance(payload, dict):

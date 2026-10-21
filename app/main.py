@@ -1841,7 +1841,8 @@ def create_app(
         request_id = f"qr-{uuid.uuid4().hex[:12]}"
         lane = request_lane(request_headers, client)
         session = session_key(request_headers, client.name, payload)
-        tags = parse_tags(client.policy.tags, request_headers.get("x-queuerouter-tags"))
+        auto_tags = "opencode" if "x-opencode-session-id" in request_headers else None  # any opencode version
+        tags = parse_tags(client.policy.tags, request_headers.get("x-queuerouter-tags"), auto_tags)
         rkey = run_key(request_headers, client.name, session)
         run = runs.get(rkey) if rkey else None
         if run is not None:

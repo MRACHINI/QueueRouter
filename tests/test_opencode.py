@@ -100,7 +100,7 @@ async def test_plugin_is_served_pointing_at_this_router(make_stack):
         r = await c.get("/opencode/queuerouter.js")  # public: holds no secrets
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/javascript")
         assert 'const BASE = "https://qr.example.com";' in r.text
-        assert "export const QueueRouter" in r.text and '"chat.headers"' in r.text
+        assert 'export default { id: "queuerouter", server, setup }' in r.text and '"chat.headers"' in r.text
         await login(c, stack.url)
         page = (await c.get("/admin/clients")).text
         assert "~/.config/opencode/plugin/queuerouter.js" in page
