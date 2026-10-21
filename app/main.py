@@ -57,6 +57,7 @@ from .upstream import (
     UsageSniffer,
     describe_429,
     finish_reason_from_body,
+    outgoing_user_agent,
     response_headers,
     retry_delay,
     upstream_headers,
@@ -854,11 +855,28 @@ def create_app(
             if isinstance(payload, dict):
                 apply_rules(payload, rules_of(target.upstream.params), {})
                 body = json.dumps(payload).encode()
+        headers = upstream_headers(adm.headers, target.api_key)
+        original_ua = next((v for k, v in headers.items() if k.lower() == "user-agent"), "")
+        user_agent = outgoing_user_agent(
+            (adm.policy.ua_mode, adm.policy.ua_template),
+            (target.upstream.ua_mode, target.upstream.ua_template),
+            {
+                "original": original_ua,
+                "client": adm.client,
+                "priority": LANE_NAMES[adm.lane],
+                "model": adm.rlog.fields["target_model"] or adm.rlog.fields["model"] or "",
+                "upstream": target.upstream.name,
+                "version": __version__,
+            },
+        )
+        if user_agent is not None:
+            headers = {k: v for k, v in headers.items() if k.lower() != "user-agent"}
+            headers["user-agent"] = user_agent
         return app.state.client.build_request(
             adm.method,
             url,
             content=body or None,
-            headers=upstream_headers(adm.headers, target.api_key),
+            headers=headers,
             timeout=httpx.Timeout(
                 connect=s.upstream_connect_timeout_s, read=s.upstream_read_timeout_s, write=30, pool=None
             ),

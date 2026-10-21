@@ -30,6 +30,8 @@ class ClientPolicy:
 
     allowed_models: tuple[str, ...] = ()  # empty = every model
     user_agents: tuple[str, ...] = ()  # allowed apps: User-Agent prefixes (empty = any app)
+    ua_mode: str = "keep"  # outgoing User-Agent to providers: keep | remove | template
+    ua_template: str = ""  # with ua_mode=template: e.g. "{original} via queuerouter/{version}"
     rpm: int | None = None  # requests per minute
     rpd: int | None = None  # requests per day (rolling 24 h)
     tpm: int | None = None  # tokens per minute

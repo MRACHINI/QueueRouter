@@ -40,6 +40,7 @@ from ..pricing import PriceCatalog, resolve, summarize_usage
 from ..slots import STRATEGIES
 from ..state import MODES
 from ..store import ROLES, Store
+from ..upstream import UA_MODES
 from .charts import usage_charts
 from .security import (
     AdminSession,
@@ -778,6 +779,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             policy = ClientPolicy(
                 allowed_models=models,
                 user_agents=tuple(p.strip() for p in str(form.get("user_agents", "")).split(",") if p.strip())[:20],
+                **_ua_fields(form),
                 rpm=_opt(form, "rpm", int, 1),
                 rpd=_opt(form, "rpd", int, 1),
                 tpm=_opt(form, "tpm", int, 1),
@@ -1018,6 +1020,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 weight=weight,
                 params=params,
                 max_retries=retries if retries is not None else preset.max_retries,
+                **_ua_fields(form),
             )
         except RulesError:
             return back("/admin/upstreams", error="rules_invalid")
@@ -1038,6 +1041,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 "weight": int_field(form, "weight", 1, 100, 1),
                 "params": _rules_text(form),
                 "max_retries": _opt(form, "max_retries", int, 0),
+                **_ua_fields(form),
             }
             base_url = str(form.get("base_url", "")).strip().rstrip("/")
             if base_url:
@@ -1719,3 +1723,14 @@ def _pretty(text: str) -> str:
         return json.dumps(json.loads(text), indent=2, ensure_ascii=False)
     except ValueError:
         return text
+
+
+def _ua_fields(form: dict) -> dict:
+    """Outgoing User-Agent settings from a form (client Limits or an upstream)."""
+    mode = str(form.get("ua_mode", "keep"))
+    if mode not in UA_MODES:
+        raise ValueError("ua_mode")
+    template = " ".join(str(form.get("ua_template", "")).split())[:500]
+    if mode == "template" and not template:
+        raise ValueError("ua_template")
+    return {"ua_mode": mode, "ua_template": template}

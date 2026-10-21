@@ -48,6 +48,9 @@ from a **web admin UI**.
 - **Allowed apps per client**: a key can be limited to apps whose User-Agent starts with given
   prefixes (e.g. `myapp/`); other apps get a 403. Every request's User-Agent is shown on the Requests
   page (and on the dashboard's client tooltips).
+- **Outgoing User-Agent**: choose what providers see, per client or as an upstream default (the
+  client's setting wins): keep the app's own, a neutral `queuerouter/<version>`, or a template with
+  `{original} {client} {priority} {model} {upstream} {version}`, e.g. `{original} via {client}`.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.

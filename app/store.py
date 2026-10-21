@@ -330,6 +330,11 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE requests ADD COLUMN user_agent TEXT;
     """,
+    # 18: outgoing User-Agent default per upstream (clients can override it)
+    """
+    ALTER TABLE upstreams ADD COLUMN ua_mode TEXT NOT NULL DEFAULT 'keep';
+    ALTER TABLE upstreams ADD COLUMN ua_template TEXT NOT NULL DEFAULT '';
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -400,6 +405,8 @@ class Upstream:
     paused: bool
     params: str = ""  # parameter rules applied to every request sent here (app/params.py)
     max_retries: int | None = None  # 429 retries on this upstream (None = the client's / global budget)
+    ua_mode: str = "keep"  # outgoing User-Agent default for requests here: keep | remove | template
+    ua_template: str = ""
 
 
 @dataclass(frozen=True)
@@ -759,6 +766,8 @@ class Store:
                 bool(r["paused"]),
                 r["params"] or "",
                 r["max_retries"],
+                r["ua_mode"] or "keep",
+                r["ua_template"] or "",
             )
             for r in self.query("SELECT * FROM upstreams ORDER BY id")
         ]
@@ -804,11 +813,13 @@ class Store:
         weight: int = 1,
         params: str = "",
         max_retries: int | None = None,
+        ua_mode: str = "keep",
+        ua_template: str = "",
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
                 "INSERT INTO upstreams (name, preset, base_url, api_key_enc, pool_id, weight, params, max_retries, "
-                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "ua_mode, ua_template, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     preset,
@@ -818,6 +829,8 @@ class Store:
                     weight,
                     params,
                     max_retries,
+                    ua_mode,
+                    ua_template,
                     time.time(),
                 ),
             )
@@ -838,6 +851,8 @@ class Store:
             "paused",
             "params",
             "max_retries",
+            "ua_mode",
+            "ua_template",
         }
         self._update("upstreams", upstream_id, allowed, fields)
         self.audit(actor, "upstream.update", str(upstream_id), {k: v for k, v in fields.items() if k != "api_key_enc"})
