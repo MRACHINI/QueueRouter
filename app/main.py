@@ -120,6 +120,7 @@ class RequestLog:
             "error": None,  # why it failed or was retried (e.g. the provider's 429 message)
             "ttft_ms": None,  # from arrival to the first byte of the answer (what the user waits for)
             "user_agent": None,  # the calling app, as it identifies itself
+            "sent_user_agent": None,  # what the provider saw instead, when changed by a User-Agent rule
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -723,6 +724,7 @@ def create_app(
                     "retries": f["retries"],
                     "error": f["error"],
                     "user_agent": f["user_agent"],
+                    "sent_user_agent": f["sent_user_agent"],
                 }
             )
         rows.sort(key=lambda r: -r["elapsed_ms"])
@@ -869,6 +871,8 @@ def create_app(
                 "version": __version__,
             },
         )
+        # set on every attempt, so a fallback to an upstream without a rule clears it
+        adm.rlog.fields["sent_user_agent"] = user_agent if user_agent not in (None, original_ua) else None
         if user_agent is not None:
             headers = {k: v for k, v in headers.items() if k.lower() != "user-agent"}
             headers["user-agent"] = user_agent

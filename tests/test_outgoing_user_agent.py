@@ -1,5 +1,7 @@
 """Outgoing User-Agent: what the provider sees, set per client with an upstream default."""
 
+import asyncio
+
 import httpx
 
 from app import __version__
@@ -93,3 +95,29 @@ async def test_allowed_apps_checks_the_original_user_agent(make_stack):
         assert stack.mock["last_headers"]["user-agent"] == f"queuerouter/{__version__}"
         refused = await c.post("/v1/chat/completions", headers=stack.headers, json=CHAT)
         assert refused.status_code == 403
+
+
+async def test_sent_user_agent_is_recorded_and_copyable(make_stack):
+    stack = make_stack(bootstrap=OWNER)
+    store = stack.app.state.store
+    upstream = store.list_upstreams()[0]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        app_headers = {**stack.headers, "User-Agent": "myapp/1.0"}
+        assert (await c.post("/v1/chat/completions", headers=app_headers, json=CHAT)).status_code == 200
+        await set_upstream(c, upstream.id, "template", 'edge "{client}"')
+        assert (await c.post("/v1/chat/completions", headers=app_headers, json=CHAT)).status_code == 200
+
+        for _ in range(50):
+            rows = await asyncio.to_thread(store.list_requests, 10)
+            if len(rows) == 2:
+                break
+            await asyncio.sleep(0.1)
+        sent = 'edge "client1"'
+        assert [r["sent_user_agent"] for r in rows] == [sent, None]  # kept = nothing extra to show
+        assert all(r["user_agent"] == "myapp/1.0" for r in rows)
+
+        page = (await c.get("/admin/requests")).text
+        assert 'data-copy-text="myapp/1.0"' in page
+        assert 'data-copy-text="edge &#34;client1&#34;"' in page  # the exact text, safely escaped
+        assert "sent: edge &#34;client1&#34;" in page
