@@ -56,7 +56,7 @@ from .security import (
 
 log = logging.getLogger("queuerouter")
 TWO_FA_COOKIE, TWO_FA_TTL_S = "qr_2fa", 300
-ENABLED_COMPACT_MODES = ("off", "trim")  # "summarise" arrives with summaries
+ENABLED_COMPACT_MODES = ("off", "trim", "summarise")
 PRICING_DAYS = 30  # the price table lists models used this recently (plus offered and manually priced ones)
 LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes / send anyway
 HERE = os.path.dirname(__file__)
@@ -136,6 +136,28 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Refuse unknown models",
         "Answer 404 (with the closest names) for a model no upstream lists, instead of sending it on. "
         "Turn off for providers whose model list is incomplete.",
+    ),
+    "compaction_idle_update": (
+        "Compaction",
+        "Update summaries while idle",
+        "For aliases in summarise mode: when a conversation near its model's limit has been quiet for about a "
+        "minute, extend its summary in the background (low priority) so the next message doesn't wait.",
+    ),
+    "compaction_idle_minutes": (
+        "Compaction",
+        "Forget summaries after (minutes)",
+        "Summaries and trim plans are kept in memory and dropped after this long unused.",
+    ),
+    "compaction_saved": (
+        "Compaction",
+        "Save summaries",
+        "Also keep summaries in the database (encrypted), so they survive restarts. They contain your "
+        "conversations; they are deleted with the client and after the days below.",
+    ),
+    "compaction_keep_days": (
+        "Compaction",
+        "Keep saved summaries (days)",
+        "Saved summaries unused this long are deleted.",
     ),
     "structured_repair": (
         "Upstream",
@@ -1262,6 +1284,12 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         compact = str(form.get("compact", "off"))
         if compact not in ENABLED_COMPACT_MODES:
             raise ValueError("compact")
+        compact_model = str(form.get("compact_model", "")).strip()
+        if len(compact_model) > 200:
+            raise ValueError("compact_model")
+        virtual_context = _opt(form, "virtual_context", int, 1024)
+        if virtual_context is not None and virtual_context > 100_000_000:
+            raise ValueError("virtual_context")
         return {
             "target_model": target,
             "upstream_ids": upstream_ids,
@@ -1270,6 +1298,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "fallbacks": fallbacks,
             "fallback_on": fallback_on,
             "compact": compact,
+            "compact_model": compact_model,
+            "virtual_context": virtual_context,
         }
 
     @app.post("/admin/aliases")

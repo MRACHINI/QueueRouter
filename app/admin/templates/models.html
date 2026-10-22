@@ -17,7 +17,7 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
   {% for a in aliases %}
   <tr>
     <td data-label="Alias"><strong><code>{{ a.name }}</code></strong>{% if not a.enabled %} <span class="badge">disabled</span>{% endif %}
-      <div class="small muted">→ <code>{{ a.target_model }}</code>{% for fb in a.fallbacks %} → <code>{{ fb }}</code>{% endfor %}{% if a.compact != "off" %} <span class="badge" title="Conversations too big for the model are shrunk">{{ a.compact }}</span>{% endif %}
+      <div class="small muted">→ <code>{{ a.target_model }}</code>{% for fb in a.fallbacks %} → <code>{{ fb }}</code>{% endfor %}{% if a.compact != "off" %} <span class="badge" title="Conversations too big for the model are shrunk">{{ a.compact }}{% if a.compact_model %} with {{ a.compact_model }}{% endif %}</span>{% endif %}{% if a.virtual_context %} <span class="badge" title="Context size told to apps">{{ "{:,}".format(a.virtual_context) }} context</span>{% endif %}
         {% if a.upstream_ids %} on {% for uid in a.upstream_ids %}{{ upstream_names.get(uid, uid) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %} on any upstream{% endif %}</div>
       {% if a.notes %}<div class="small muted">{{ a.notes }}</div>{% endif %}</td>
     <td data-label="">
@@ -34,6 +34,8 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
         <label class="inline-field">Compaction <select name="compact">
           {% for m in compact_modes %}<option value="{{ m }}" {% if a.compact == m %}selected{% endif %}>{{ m }}</option>{% endfor %}
         </select></label>
+        <input name="compact_model" value="{{ a.compact_model }}" list="model-ids" placeholder="summary model (blank = this one)" aria-label="Summary model">
+        <label class="inline-field">Context told to apps <input type="number" name="virtual_context" min="1024" value="{{ a.virtual_context or '' }}" placeholder="real"></label>
         <label class="check"><input type="checkbox" name="enabled" {% if a.enabled %}checked{% endif %}> enabled</label>
         <button type="submit" class="secondary">Save</button>
       </form>
@@ -74,7 +76,13 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
   <label>Compaction
     <select name="compact">{% for m in compact_modes %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select>
     <small class="muted">When a conversation is too big for the model: trim = shorten old tool outputs, then drop old
-    messages (the task, the current message and recent turns are always kept)</small></label>
+    messages; summarise = replace old messages with a summary (kept and extended). The task, the current message and
+    recent turns are always kept.</small></label>
+  <label>Summary model <input name="compact_model" list="model-ids" placeholder="blank = the target model" autocomplete="off">
+    <small class="muted">Writes the summaries (summarise mode). Any size works: long histories are read in parts.</small></label>
+  <label>Context told to apps <input type="number" name="virtual_context" min="1024" placeholder="blank = the model's real one">
+    <small class="muted">e.g. 1000000: opencode keeps the whole conversation and QueueRouter compacts each request to
+    fit the model it goes to. Use with compaction on.</small></label>
   <label class="span-all">Parameter rules <small class="muted">optional JSON: defaults / overrides / clamps / strip</small>
     <textarea name="params" rows="2" class="rules" placeholder='{"defaults": {"temperature": 0.6}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}'></textarea></label>
   <div class="align-end"><button type="submit">Add alias</button></div>

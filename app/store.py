@@ -361,11 +361,29 @@ MIGRATIONS: list[str] = [
     ALTER TABLE aliases ADD COLUMN virtual_context INTEGER;
     ALTER TABLE requests ADD COLUMN compaction TEXT;
     """,
+    # 22: conversation summaries (compaction, summarise mode), when "Save summaries" is on; encrypted
+    """
+    CREATE TABLE compaction_summaries (
+        key        TEXT PRIMARY KEY,
+        client     TEXT NOT NULL,
+        data       TEXT NOT NULL,
+        updated_at REAL NOT NULL
+    );
+    CREATE INDEX compaction_summaries_client ON compaction_summaries (client);
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
 # Tables whose rows belong to a client (by name): deleted with it, renamed with it.
-CLIENT_DATA_TABLES = ("jobs", "files", "batches", "schedules", "stored_responses", "request_content")
+CLIENT_DATA_TABLES = (
+    "jobs",
+    "files",
+    "batches",
+    "schedules",
+    "stored_responses",
+    "request_content",
+    "compaction_summaries",
+)
 
 REQUEST_COLUMNS = (
     "id",
@@ -1649,6 +1667,28 @@ class Store:
     def prune_content(self, keep_days: float) -> None:
         with self.tx() as db:
             db.execute("DELETE FROM request_content WHERE ts < ?", (time.time() - keep_days * 86_400,))
+
+    # -- compaction summaries (saved only when "Save summaries" is on) --------------------
+
+    def save_summary(self, key: str, client: str, data: dict) -> None:
+        with self.tx() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO compaction_summaries (key, client, data, updated_at) VALUES (?, ?, ?, ?)",
+                (key, client, self.encrypt(json.dumps(data)), time.time()),
+            )
+
+    def load_summary(self, key: str) -> dict | None:
+        rows = self.query("SELECT data FROM compaction_summaries WHERE key = ?", (key,))
+        if not rows:
+            return None
+        try:
+            return json.loads(self.decrypt(rows[0]["data"]))
+        except (ValueError, TypeError):
+            return None
+
+    def prune_summaries(self, keep_days: float) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM compaction_summaries WHERE updated_at < ?", (time.time() - keep_days * 86_400,))
 
     # -- Responses API conversations ----------------------------------------------------
 

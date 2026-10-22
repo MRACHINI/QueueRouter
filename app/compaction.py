@@ -63,8 +63,7 @@ class Plan:
     shortened: tuple[int, ...]  # old tool outputs kept as start + end
     upto: int  # the plan depends on messages[:upto]
     prefix: str  # hash of messages[:upto]
-    summary: str = ""
-    summary_upto: int = 0  # the summary covers messages[cut_from:summary_upto]
+    summary: str = ""  # summarise mode: replaces messages[cut_from:cut_to]
 
     def matches(self, messages: list) -> bool:
         return len(messages) > self.upto and _hash(messages[: self.upto]) == self.prefix
@@ -77,10 +76,12 @@ class Result:
     after: int
     mode: str
     reused: bool
+    note: str = ""  # e.g. "new summary", "summary updated"
 
     @property
     def label(self) -> str:
-        return f"{self.mode} {self.before // 1000}k -> {self.after // 1000}k" + (" (reused)" if self.reused else "")
+        note = self.note or ("reused" if self.reused else "")
+        return f"{self.mode} {self.before // 1000}k -> {self.after // 1000}k" + (f" ({note})" if note else "")
 
 
 def _protected(messages: list) -> tuple[int, int]:
@@ -125,8 +126,9 @@ def _apply(payload: dict, plan: Plan, note_first_user: bool = True) -> dict:
     return {**payload, "messages": out}
 
 
-def make_plan(payload: dict, goal_tokens: int) -> Plan | None:
-    """The smallest cut that brings the request under ``goal_tokens``; None if nothing can be cut."""
+def make_plan(payload: dict, goal_tokens: int, shorten_old: bool = True) -> Plan | None:
+    """The smallest cut that brings the request under ``goal_tokens``; None if nothing can be cut.
+    ``shorten_old``: first shorten long old tool outputs (trim mode; summarise mode summarises instead)."""
     messages = payload.get("messages")
     if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
         return None
@@ -136,7 +138,7 @@ def make_plan(payload: dict, goal_tokens: int) -> Plan | None:
     total_chars = estimate_prompt_tokens(payload) * CHARS_PER_TOKEN
     goal_chars = goal_tokens * CHARS_PER_TOKEN
     shortened: list[int] = []
-    for i in range(start, tail):  # 1. long old tool outputs, oldest first
+    for i in range(start, tail if shorten_old else start):  # 1. long old tool outputs, oldest first
         if total_chars <= goal_chars:
             break
         message = messages[i]
@@ -198,8 +200,8 @@ class Plans:
         return len(self._entries)
 
 
-def needed(payload: dict, context: int | None, output: int) -> bool:
-    return bool(context) and estimate_prompt_tokens(payload) + output > context * START_AT
+def needed(payload: dict, context: int | None, output: int, start_at: float = START_AT) -> bool:
+    return bool(context) and estimate_prompt_tokens(payload) + output > context * start_at
 
 
 def compact(payload: dict, context: int, output: int, plans: Plans, key: str | None) -> Result | None:
@@ -222,3 +224,118 @@ def compact(payload: dict, context: int, output: int, plans: Plans, key: str | N
         plans.put(key, plan)
     shrunk = _apply(payload, plan)
     return Result(shrunk, before, estimate_prompt_tokens(shrunk), "trim", False)
+
+
+# -- summarise mode ---------------------------------------------------------------------------
+# The summary is written by a model through QueueRouter's own queue (main.py). It is rolling: each
+# update reads the previous summary plus the part that has become old since, in chunks that fit the
+# summarising model, one after another, so that model never needs the whole history.
+
+SUMMARY_TOKENS = 4_000  # the summariser's answer, and the room kept for the summary in the request
+SUMMARY_PROMPT = (
+    "You compact the history of a conversation between a user and an AI coding agent so the work can "
+    "continue with less context. Merge the summary so far with the next part of the conversation into one "
+    "updated summary. Keep: the user's goals, requirements and preferences; decisions made and why; files "
+    "read, created or changed (exact paths) and what changed; commands run and important results or errors; "
+    "the current state; open problems and next steps. Leave out greetings, repetition and raw tool output "
+    "that no longer matters. Write in the user's language, as compact notes. Output only the summary."
+)
+IDLE_START_AT = 0.70  # idle updates only for conversations above this share of the model's context
+
+
+def summarise_goal(context: int, output: int) -> int:
+    return max(int(context * GOAL) - output - SUMMARY_TOKENS, int(context * GOAL / 2))
+
+
+def conversation_key(client: str, session: str | None, messages: list) -> str | None:
+    """Summaries belong to a conversation: the client, its session and its start (system prompt and task,
+    so a subagent sharing its parent's session id gets its own)."""
+    if not session or not isinstance(messages, list):
+        return None
+    start, _ = _protected(messages)
+    return f"{client}:{session}:{_hash(messages[:start])}"
+
+
+def _render(message: dict) -> str:
+    role = str(message.get("role", "?"))
+    parts = []
+    if (text := _text(message.get("content"))) is None:
+        text = json.dumps(message.get("content"), ensure_ascii=False, default=str)
+    if text:
+        parts.append(text)
+    for call in message.get("tool_calls") or []:
+        function = (call.get("function") or {}) if isinstance(call, dict) else {}
+        parts.append(f"[calls {function.get('name')}({function.get('arguments', '')})]")
+    label = "tool result" if role == "tool" else role
+    return f"### {label}\n" + "\n".join(parts)
+
+
+def chunks(messages: list, max_chars: int) -> list[str]:
+    """The messages as text for the summariser, in pieces of at most ``max_chars`` (a single longer
+    message keeps its start and end)."""
+    out: list[str] = []
+    current = ""
+    for message in messages:
+        block = _render(message)
+        if len(block) > max_chars:
+            keep = max_chars // 2 - 100
+            block = f"{block[:keep]}\n[... {len(block) - 2 * keep} characters left out ...]\n{block[-keep:]}"
+        if current and len(current) + len(block) + 2 > max_chars:
+            out.append(current)
+            current = ""
+        current = f"{current}\n\n{block}" if current else block
+    if current:
+        out.append(current)
+    return out
+
+
+def summary_payload(model: str, previous: str, part: str) -> dict:
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SUMMARY_PROMPT},
+            {
+                "role": "user",
+                "content": f"Summary so far:\n{previous or '(none yet)'}\n\nNext part of the conversation:\n{part}",
+            },
+        ],
+        "max_tokens": SUMMARY_TOKENS,
+        "temperature": 0.2,
+        "stream": False,
+    }
+
+
+def summary_text(body: bytes) -> str | None:
+    try:
+        choice = (json.loads(body).get("choices") or [{}])[0]
+        text = (choice.get("message") or {}).get("content")
+    except (ValueError, AttributeError, IndexError):
+        return None
+    return text.strip() if isinstance(text, str) and text.strip() else None
+
+
+def with_summary(payload: dict, plan: Plan) -> dict:
+    return _apply(payload, plan)
+
+
+def plan_to_dict(plan: Plan) -> dict:
+    return {
+        "cut_from": plan.cut_from,
+        "cut_to": plan.cut_to,
+        "upto": plan.upto,
+        "prefix": plan.prefix,
+        "summary": plan.summary,
+    }
+
+
+def plan_from_dict(data: dict) -> Plan | None:
+    try:
+        return Plan(
+            int(data["cut_from"]), int(data["cut_to"]), (), int(data["upto"]), str(data["prefix"]), str(data["summary"])
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def summary_plan(messages: list, cut_from: int, cut_to: int, summary: str) -> Plan:
+    return Plan(cut_from, cut_to, (), cut_to, _hash(messages[:cut_to]), summary)

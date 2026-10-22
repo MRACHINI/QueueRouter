@@ -28,6 +28,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from . import __version__, anthropic_api, content_log, metrics, responses_api, structured, tracing
+from . import compaction as compaction_mod
 from . import cron as cron_mod
 from . import jobs as jobs_mod
 from .admin import AdminContext, mount_admin
@@ -44,7 +45,7 @@ from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
 from .limits import OVERFLOW_STATUS, ModelLimits, overflow_body, overflow_of
 from .opencode import DEFAULT_OUTPUT, PLUGIN_PATH, model_limits, plugin_source, provider_config, wellknown_manifest
-from .params import apply_rules, parse_rules, requested_output, too_long
+from .params import CHARS_PER_TOKEN, apply_rules, estimate_prompt_tokens, parse_rules, requested_output, too_long
 from .pricing import PriceCatalog, resolve, token_cost
 from .quotas import MonthlyUsage, month_of, over_quota, quota_share, seconds_to_next_month
 from .ratelimit import RateLimiter
@@ -70,6 +71,7 @@ from .upstream import (
 log = logging.getLogger("queuerouter")
 
 HEALTH_INTERVAL_S = 30
+IDLE_AFTER_S = 45  # a conversation this quiet gets its summary updated in the background (summarise mode)
 HISTORY_POINTS, HISTORY_EVERY_S = 1800, 1  # dashboard chart: 30 minutes, one point per second
 QUOTA_BLOCK_S = 3600  # how long an upstream whose quota ran out is skipped for that model (unless it says)
 ADMIN_MAX_BODY = 4 * 1024 * 1024  # admin forms and the Playground (the restore upload has its own limit)
@@ -242,7 +244,9 @@ def create_app(
     catalogs = Catalogs()
     context_sizes = ModelLimits()  # context sizes set by hand or learned from overflow errors
     context_sizes.load(store.list_model_limits())
-    plans = Plans()  # compaction plans per conversation (app/compaction.py)
+    plans = Plans()  # trim plans per conversation and model (app/compaction.py)
+    summaries = Plans()  # summarise mode: the summary per conversation
+    summary_locks: collections.defaultdict[str, asyncio.Lock] = collections.defaultdict(asyncio.Lock)
     prices = PriceCatalog(os.path.join(bootstrap.data_dir, "models-dev-prices.json"))
     prices.load_file()
     circuits = Circuits()
@@ -492,6 +496,7 @@ def create_app(
                 await asyncio.to_thread(store.prune_responses, responses_api.STORE_DAYS)
                 await asyncio.to_thread(store.prune_jobs, cfg().job_retention_days)
                 await asyncio.to_thread(store.prune_content, cfg().content_log_days)
+                await asyncio.to_thread(store.prune_summaries, cfg().compaction_keep_days)
                 try:
                     await asyncio.to_thread(auto_backup, store, bootstrap.data_dir, cfg().backup_keep_days)
                 except Exception as exc:  # e.g. disk full: say so, keep serving
@@ -542,8 +547,10 @@ def create_app(
         if requeued := job_runner.start():
             log.info(json.dumps({"event": "jobs_resumed", "jobs": requeued}))
         task = asyncio.ensure_future(background())
+        idle_task = asyncio.ensure_future(idle_updates())
         yield
         task.cancel()
+        idle_task.cancel()
         await job_runner.stop()
         await flush_usage()
         if exporter.pending and cfg().otel_endpoint:
@@ -1240,6 +1247,9 @@ def create_app(
                 continue
             pinned = [t for t in targets if not alias.upstream_ids or t.id in alias.upstream_ids]
             limits = limits_on(alias.target_model, pinned)
+            if alias.virtual_context:  # told a bigger context than the model has; compaction makes it fit
+                output = limits["output"] if limits else DEFAULT_OUTPUT
+                limits = {"context": alias.virtual_context, "output": min(output, alias.virtual_context)}
             result[alias.name] = {
                 "name": with_providers(
                     f"{alias.name} → {alias.target_model}",
@@ -1412,6 +1422,205 @@ def create_app(
         return response.status_code, bytes(response.body)
 
     job_runner = jobs_mod.JobRunner(store, execute_job, lambda: app.state.client, usage_from_body)
+
+    # -- compaction: summarise mode (see app/compaction.py) ---------------------------------
+
+    async def internal_completion(client: ClientKey, payload: dict, priority: str) -> bytes | None:
+        """A chat completion through the normal pipeline (queue, limits, Requests page) as ``client``;
+        the answer's body, or None if it failed."""
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "raw_path": b"/v1/chat/completions",
+            "query_string": b"",
+            "headers": [],
+            "client": ("compaction", 0),
+            "server": None,
+            "scheme": "http",
+            "root_path": "",
+            "http_version": "1.1",
+        }
+        headers = {
+            "content-type": "application/json",
+            "x-queuerouter-priority": priority,
+            "x-queuerouter-tags": "compaction",
+        }
+        try:
+            response = await serve(
+                Request(scope, _never_disconnects),
+                client,
+                "chat/completions",
+                json.dumps(payload).encode(),
+                headers,
+                "",
+            )
+        except Exception as exc:  # a summary is an optimisation: never fail the user's request over it
+            log.warning(json.dumps({"event": "summary_failed", "client": client.name, "error": repr(exc)[:200]}))
+            return None
+        if isinstance(response, StreamingResponse) or response.status_code != 200:
+            return None
+        return bytes(response.body)
+
+    def summariser(alias, step_model: str) -> tuple[str, int | None]:
+        """The model that writes summaries (the alias's compaction model, else the step's) and its context."""
+        name = alias.compact_model or step_model
+        target_alias = snapshot.aliases.get(name)
+        real = target_alias.target_model if target_alias else name
+        return name, model_context(real, candidates_for(real, target_alias.upstream_ids if target_alias else ()))
+
+    def load_summary(key: str | None) -> compaction_mod.Plan | None:
+        if not key:
+            return None
+        summaries.idle_s = cfg().compaction_idle_minutes * 60
+        plan = summaries.get(key)
+        if plan is None and cfg().compaction_saved and (data := store.load_summary(key)):
+            plan = compaction_mod.plan_from_dict(data)
+            if plan is not None:
+                summaries.put(key, plan)
+        return plan
+
+    def keep_summary(key: str | None, client: str, plan: compaction_mod.Plan) -> None:
+        if not key:
+            return
+        summaries.put(key, plan)
+        if cfg().compaction_saved:
+            store.save_summary(key, client, compaction_mod.plan_to_dict(plan))
+
+    async def write_summary(
+        client: ClientKey,
+        messages: list,
+        cut_from: int,
+        cut_to: int,
+        previous,
+        model: str,
+        context: int | None,
+        priority: str,
+    ) -> tuple[str | None, bool]:
+        """(summary of messages[cut_from:cut_to], whether an earlier summary was extended). Rolling: an
+        earlier summary of a shorter stretch is extended with just the newly old part, in chunks that fit
+        the summarising model, one after another."""
+        text, begin, extended = "", cut_from, False
+        if previous is not None and previous.summary and previous.cut_from == cut_from and previous.cut_to <= cut_to:
+            text, begin, extended = previous.summary, previous.cut_to, True
+        budget = (context or 131_072) * 0.6 - compaction_mod.SUMMARY_TOKENS - 1_000
+        size = max(int(budget * CHARS_PER_TOKEN), 8_000)
+        for part in compaction_mod.chunks(messages[begin:cut_to], size):
+            body = await internal_completion(client, compaction_mod.summary_payload(model, text, part), priority)
+            if body is None or (text := compaction_mod.summary_text(body) or "") == "":
+                return None, extended
+        return text or None, extended
+
+    async def summarise_request(
+        client: ClientKey,
+        session: str | None,
+        payload: dict,
+        context: int,
+        output: int,
+        alias,
+        step_model: str,
+        priority: str,
+        start_at: float = compaction_mod.START_AT,
+    ) -> compaction_mod.Result | None:
+        """Summarise mode: reuse the conversation's summary while the request stays under ``start_at`` of
+        the context, else extend it (down to about half)."""
+        if not compaction_mod.needed(payload, context, output, start_at):
+            return None
+        messages = payload["messages"]
+        key = compaction_mod.conversation_key(client.name, session, messages)
+        before = estimate_prompt_tokens(payload)
+        async with summary_locks[key or ""]:  # one summariser per conversation; the others wait and reuse
+            previous = await asyncio.to_thread(load_summary, key)
+            if previous is not None and not previous.matches(messages):
+                previous = None
+            if previous is not None:
+                shrunk = compaction_mod.with_summary(payload, previous)
+                if not compaction_mod.needed(shrunk, context, output, start_at):
+                    return compaction_mod.Result(shrunk, before, estimate_prompt_tokens(shrunk), "summarise", True)
+            cut = compaction_mod.make_plan(payload, compaction_mod.summarise_goal(context, output), shorten_old=False)
+            if cut is None or cut.cut_to <= cut.cut_from:
+                return None
+            model, model_ctx = summariser(alias, step_model)
+            text, extended = await write_summary(
+                client, messages, cut.cut_from, cut.cut_to, previous, model, model_ctx, priority
+            )
+            if text is None:
+                return None
+            plan = compaction_mod.summary_plan(messages, cut.cut_from, cut.cut_to, text)
+            await asyncio.to_thread(keep_summary, key, client.name, plan)
+        shrunk = compaction_mod.with_summary(payload, plan)
+        note = "summary updated" if extended else "new summary"
+        return compaction_mod.Result(shrunk, before, estimate_prompt_tokens(shrunk), "summarise", False, note)
+
+    @dataclass
+    class IdleWatch:
+        """A conversation near its model's limit, for an update of its summary while it is quiet."""
+
+        client: ClientKey
+        session: str
+        payload: dict
+        context: int
+        output: int
+        alias: object
+        step_model: str
+        seen: float = dataclasses.field(default_factory=time.monotonic)
+
+    idle_watch: dict[str, IdleWatch] = {}
+
+    def watch_idle(client, session, payload, result, context, output, alias, step_model) -> None:
+        """Remember a conversation whose request (after compaction) is above ~70% of its model's context,
+        for an idle update of its summary; others are forgotten."""
+        key = compaction_mod.conversation_key(client.name, session, payload.get("messages"))
+        if not key or not session:
+            return
+        sent = result.payload if result is not None else payload
+        if not cfg().compaction_idle_update or not compaction_mod.needed(
+            sent, context, output, compaction_mod.IDLE_START_AT
+        ):
+            idle_watch.pop(key, None)
+            return
+        idle_watch.pop(key, None)
+        idle_watch[key] = IdleWatch(client, session, payload, context, output, alias, step_model)
+        while len(idle_watch) > 50:  # each holds a whole conversation: keep only the most recent
+            idle_watch.pop(next(iter(idle_watch)))
+
+    async def idle_updates() -> None:
+        """Every few seconds: conversations quiet for ~45 s (nothing of theirs in flight) get their summary
+        extended at low priority, once, so the next message doesn't wait for it."""
+        while True:
+            await asyncio.sleep(5)
+            now = time.monotonic()
+            busy = {(r.fields["client"], r.fields["session"]) for r in inflight.values()}
+            for key, watch in list(idle_watch.items()):
+                if (watch.client.name, watch.session[:8]) in busy:
+                    watch.seen = now  # still working: quiet time starts when it's done
+                    continue
+                if now - watch.seen > 600 or not cfg().compaction_idle_update:
+                    idle_watch.pop(key, None)  # gone quiet for good, or switched off
+                    continue
+                if now - watch.seen < IDLE_AFTER_S:
+                    continue
+                idle_watch.pop(key, None)  # once per quiet period
+                try:
+                    result = await summarise_request(
+                        watch.client,
+                        watch.session,
+                        watch.payload,
+                        watch.context,
+                        watch.output,
+                        watch.alias,
+                        watch.step_model,
+                        "low",
+                        compaction_mod.IDLE_START_AT,
+                    )
+                    if result is not None and not result.reused:
+                        log.info(
+                            json.dumps(
+                                {"event": "summary_idle_update", "client": watch.client.name, "result": result.label}
+                            )
+                        )
+                except Exception as exc:
+                    log.warning(json.dumps({"event": "summary_idle_failed", "error": repr(exc)[:200]}))
 
     # -- async jobs, files and batches (see app/jobs.py) -------------------------------------
 
@@ -1948,8 +2157,19 @@ def create_app(
             bigger_next = "context" in triggers and i < len(chain) - 1  # a fallback loses nothing: prefer it
             if alias and alias.compact != "off" and context and not (bigger_next and too_long(step_payload, context)):
                 output = requested_output(step_payload) or min(DEFAULT_OUTPUT, context // 8)
-                key = f"{client.name}:{session}:{step_model}" if session else None
-                if result := compact_request(step_payload, context, output, plans, key):
+                result = None
+                if alias.compact == "summarise" and isinstance(step_payload.get("messages"), list):
+                    priority = LANE_NAMES[request_lane(request_headers, client)]
+                    full = step_payload
+                    result = await summarise_request(
+                        client, session, step_payload, context, output, alias, step_model, priority
+                    )
+                    watch_idle(client, session, full, result, context, output, alias, step_model)
+                if result is None:  # trim mode, or a summary couldn't be written: trim instead
+                    plans.idle_s = cfg().compaction_idle_minutes * 60
+                    key = f"{client.name}:{session}:{step_model}" if session else None
+                    result = compact_request(step_payload, context, output, plans, key)
+                if result is not None:
                     step_payload, compaction = result.payload, result.label
             if cfg().context_check and (over := too_long(step_payload, context)):
                 too_long_for = too_long_for or (*over, step_model, requested_output(step_payload))
@@ -2255,6 +2475,10 @@ def alias_entry(alias, target: dict | None) -> dict:
     for key in CONTEXT_FIELDS:
         if target and key in target:
             entry[key] = target[key]
+    if alias.virtual_context:  # compaction makes conversations up to this size fit the real model
+        for key in [k for k in CONTEXT_FIELDS if k in entry]:
+            del entry[key]
+        entry["context_length"] = alias.virtual_context
     entry["queuerouter"] = {"type": "alias", "target": alias.target_model}
     return entry
 

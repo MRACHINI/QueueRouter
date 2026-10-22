@@ -1114,6 +1114,11 @@ old tool outputs shortened (start + end), then old middle messages dropped (the 
 message, a note on the task says so); plans remembered per conversation in memory (1 h idle) and reused while
 they fit; a context fallback is preferred when the alias has one. The size estimate now counts tool-call
 arguments too.
+v0.24.0: summarise mode — rolling summaries by a chosen model through the normal queue (tag "compaction", the
+request's own priority; idle updates at low priority), chunked to fit the summariser, cached per conversation
+(client + session + start) in memory or saved encrypted (Settings > Compaction), extended rather than rewritten;
+idle update after ~45 s quiet for conversations above 70%; a failed summary falls back to trim; "context told
+to apps" per alias (opencode config and /v1/models).
 
 ### Later (agreed, not scheduled)
 
@@ -1130,7 +1135,7 @@ arguments too.
   the Models page (also fixes wrong reported values); (3) rewrite every provider's overflow error into the
   standard 400 `context_length_exceeded`, so opencode compacts and retries. Verify on opencode 2.1.2 that it
   compacts on that error (it does compact on token usage).
-- **Compaction in QueueRouter (opt-in per alias/model).** Agreed design (from discussion, 2026-10-22):
+- **Compaction in QueueRouter (opt-in per alias).** Done: v0.23.0 (trim), v0.24.0 (summarise). Agreed design (2026-10-22):
   - *Why here:* after switching e.g. from a 1M model to a 200k one with 800k of history, opencode's own
     compaction would use the small model and overflow too; QueueRouter can use another model.
   - *When:* decided per request, on the whole request (history + current message + system prompt + tools
