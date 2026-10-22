@@ -52,6 +52,10 @@ from a **web admin UI**.
 - **Outgoing User-Agent**: choose what providers see, per client or as an upstream default (the
   client's setting wins): keep the app's own, a neutral `queuerouter/<version>`, or a template with
   `{original} {client} {priority} {model} {upstream} {version}`, e.g. `{original} via {client}`.
+- **Context sizes**: each model's context is read from the provider's model list, **learned** from the
+  provider's own "too long" error when it doesn't say (NVIDIA, Gemini...), or set by hand on the Models
+  page. Requests are checked before queuing, opencode is told the size, and every provider's overflow
+  error is rewritten into the standard `context_length_exceeded` form that opencode compacts on.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.

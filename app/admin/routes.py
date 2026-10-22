@@ -214,6 +214,7 @@ class AdminContext:
     restart: Callable[[], None]
     month_usage: Callable[[str], object]
     live_signature: Callable[[], tuple]
+    context_table: Callable[[], list[dict]]
 
 
 class NeedLogin(Exception):
@@ -1183,7 +1184,37 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             references=ctx.prices.references(),
             catalog_size=len(ctx.prices.prices),
             catalog_age_h=round((time.time() - ctx.prices.fetched_at) / 3600, 1) if ctx.prices.fetched_at else None,
+            contexts=ctx.context_table(),
         )
+
+    @app.post("/admin/model-limits")
+    async def model_limits_update(request: Request):
+        session, form = await require_post(request, "admin")
+        model = str(form.get("model", "")).strip()
+        try:
+            if not model or len(model) > 200:
+                raise ValueError("model")
+            context = _opt(form, "context", int, 1024)
+            output = _opt(form, "output", int, 1)
+            if context and output and output > context:
+                raise ValueError("output")
+            store.set_model_limit(model, session.user.username, context, output)
+        except ValueError:
+            return back("/admin/models#contexts", error="invalid")
+        ctx.reload()
+        return back("/admin/models#contexts", "saved")
+
+    @app.post("/admin/model-limits/forget")
+    async def model_limits_forget(request: Request):
+        session, form = await require_post(request, "admin")
+        try:
+            store.forget_learned_limit(
+                int(form.get("upstream_id", "")), str(form.get("model", "")), session.user.username
+            )
+        except ValueError:
+            return back("/admin/models#contexts", error="invalid")
+        ctx.reload()
+        return back("/admin/models#contexts", "saved")
 
     @app.post("/admin/prices")
     async def prices_update(request: Request):

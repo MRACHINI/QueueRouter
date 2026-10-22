@@ -339,6 +339,20 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE requests ADD COLUMN sent_user_agent TEXT;
     """,
+    # 20: model context sizes beyond what providers report: manual (upstream_id 0 = every upstream) and
+    # learned from a provider's own "too long" error (per upstream)
+    """
+    CREATE TABLE model_limits (
+        upstream_id INTEGER NOT NULL DEFAULT 0,
+        model       TEXT NOT NULL,
+        source      TEXT NOT NULL,
+        context     INTEGER,
+        output      INTEGER,
+        note        TEXT NOT NULL DEFAULT '',
+        updated_at  REAL NOT NULL,
+        PRIMARY KEY (upstream_id, model, source)
+    );
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -865,6 +879,7 @@ class Store:
     def delete_upstream(self, upstream_id: int, actor: str) -> None:
         with self.tx() as db:
             db.execute("DELETE FROM upstreams WHERE id = ?", (upstream_id,))
+            db.execute("DELETE FROM model_limits WHERE upstream_id = ? AND source = 'learned'", (upstream_id,))
         self.audit(actor, "upstream.delete", str(upstream_id))
 
     def delete_pool(self, pool_id: int, actor: str) -> None:
@@ -1039,6 +1054,41 @@ class Store:
         return [r[0] for r in rows]
 
     # -- model prices (manual overrides) ----------------------------------------------------
+
+    def list_model_limits(self) -> list[dict]:
+        return [dict(r) for r in self.query("SELECT * FROM model_limits ORDER BY model, upstream_id")]
+
+    def set_model_limit(self, model: str, actor: str, context: int | None, output: int | None) -> None:
+        """Manual context / output size for ``model`` on every upstream; both None removes it."""
+        with self.tx() as db:
+            if context is None and output is None:
+                db.execute("DELETE FROM model_limits WHERE model = ? AND source = 'manual'", (model,))
+            else:
+                db.execute(
+                    "INSERT INTO model_limits (upstream_id, model, source, context, output, updated_at) "
+                    "VALUES (0, ?, 'manual', ?, ?, ?) ON CONFLICT(upstream_id, model, source) DO UPDATE SET "
+                    "context = excluded.context, output = excluded.output, updated_at = excluded.updated_at",
+                    (model, context, output, time.time()),
+                )
+        self.audit(actor, "model_limit.update", model, {"context": context, "output": output})
+
+    def learn_model_limit(self, upstream_id: int, model: str, context: int, note: str) -> None:
+        """A context size read from the provider's own overflow error."""
+        with self.tx() as db:
+            db.execute(
+                "INSERT INTO model_limits (upstream_id, model, source, context, note, updated_at) "
+                "VALUES (?, ?, 'learned', ?, ?, ?) ON CONFLICT(upstream_id, model, source) DO UPDATE SET "
+                "context = excluded.context, note = excluded.note, updated_at = excluded.updated_at",
+                (upstream_id, model, context, note[:300], time.time()),
+            )
+
+    def forget_learned_limit(self, upstream_id: int, model: str, actor: str) -> None:
+        with self.tx() as db:
+            db.execute(
+                "DELETE FROM model_limits WHERE upstream_id = ? AND model = ? AND source = 'learned'",
+                (upstream_id, model),
+            )
+        self.audit(actor, "model_limit.forget", model, {"upstream_id": upstream_id})
 
     def list_model_prices(self) -> dict[str, sqlite3.Row]:
         return {r["model"]: r for r in self.query("SELECT * FROM model_prices")}

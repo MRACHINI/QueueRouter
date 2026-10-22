@@ -41,7 +41,8 @@ def create_mock(limit: int = 2) -> FastAPI:
 
     @app.get("/v1/models")
     async def models():
-        return {"object": "list", "data": [{"id": "mock-model", "object": "model", "max_model_len": 262144}]}
+        extra = [{"id": m, "object": "model"} for m in state.get("extra_models", [])]  # no size reported
+        return {"object": "list", "data": [{"id": "mock-model", "object": "model", "max_model_len": 262144}, *extra]}
 
     @app.post("/v1/chat/completions")
     async def chat(request: Request):
@@ -52,6 +53,12 @@ def create_mock(limit: int = 2) -> FastAPI:
         body = json.loads(raw)
         if rejected := over_limit():
             return rejected
+        # Context limits set by a test: state["context_limits"][model] = (tokens, style) rejects longer
+        # prompts (about 4 characters per token) the way that provider words it.
+        limit, style = (state.get("context_limits") or {}).get(body.get("model"), (None, None))
+        if limit and len(json.dumps(body.get("messages") or [])) / 4 > limit:
+            state.setdefault("overflowed", []).append(body.get("model"))
+            return _overflow(limit, style)
         if body.get("mock_status"):
             return JSONResponse({"error": {"message": "forced"}}, status_code=body["mock_status"])
         key = body.get("mock_key")
@@ -218,3 +225,16 @@ def _google_429(quota_id: str, retry_delay: str) -> list:
             }
         }
     ]
+
+
+def _overflow(limit: int, style: str) -> JSONResponse:
+    """A "prompt too long" error as different providers word it."""
+    if style == "google":
+        message = f"The input token count (9999999) exceeds the maximum number of tokens allowed ({limit})."
+        return JSONResponse([{"error": {"code": 400, "message": message, "status": "INVALID_ARGUMENT"}}], 400)
+    if style == "anthropic":
+        return JSONResponse({"error": {"message": f"prompt is too long: 9999999 tokens > {limit} maximum"}}, 400)
+    if style == "unstated":
+        return JSONResponse({"error": {"message": "Input is too long for this model."}}, 413)
+    message = f"This model's maximum context length is {limit} tokens. However, you requested more."
+    return JSONResponse({"error": {"message": message, "code": "context_length_exceeded"}}, 400)

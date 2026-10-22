@@ -40,6 +40,7 @@ from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
+from .limits import OVERFLOW_STATUS, ModelLimits, overflow_body, overflow_of
 from .opencode import PLUGIN_PATH, model_limits, plugin_source, provider_config, wellknown_manifest
 from .params import apply_rules, parse_rules, requested_output, too_long
 from .pricing import PriceCatalog, resolve, token_cost
@@ -235,6 +236,8 @@ def create_app(
     snapshot = load_snapshot(store)
     stats = Stats()
     catalogs = Catalogs()
+    context_sizes = ModelLimits()  # context sizes set by hand or learned from overflow errors
+    context_sizes.load(store.list_model_limits())
     prices = PriceCatalog(os.path.join(bootstrap.data_dir, "models-dev-prices.json"))
     prices.load_file()
     circuits = Circuits()
@@ -319,6 +322,7 @@ def create_app(
         """Re-read configuration from the database and apply it live."""
         nonlocal snapshot
         snapshot = load_snapshot(store)
+        context_sizes.load(store.list_model_limits())
         apply_snapshot()
         log.info(json.dumps({"event": "config_reloaded", **summary()}))
 
@@ -627,10 +631,10 @@ def create_app(
             if target is None:
                 continue
             entry = next((m for m in catalogs.models(target.id) if m["id"] == model), None)
-            limits = model_limits(entry, [target.pool.context_cap])
-            if limits is None:
+            known = model_limits(context_sizes.apply(model or "", target.id, entry), [target.pool.context_cap])
+            if known is None:
                 return None  # one candidate with unknown context: don't guess
-            contexts.append(limits["context"])
+            contexts.append(known["context"])
         return min(contexts) if contexts else None
 
     def candidates_for(model: str | None, only: tuple[int, ...] = ()) -> tuple[Candidate, ...]:
@@ -776,6 +780,39 @@ def create_app(
     def models_by_upstream() -> dict[str, list[str]]:
         return {t.upstream.name: sorted(catalogs.ids(t.id) or []) for t in snapshot.upstreams.values()}
 
+    def context_table() -> list[dict]:
+        """Per model: the context each upstream reports, what was learned from its errors, the plan cap,
+        the manual override and the size in use (the smallest; None = unknown). For the Models page."""
+        rows: dict[str, dict] = {}
+        entries: dict[tuple[int, str], dict] = {}
+        for target in snapshot.upstreams.values():
+            for model in catalogs.models(target.id):
+                entries[(target.id, model["id"])] = model
+        learned_only = {key for key in context_sizes.learned if key not in entries and key[0] in snapshot.upstreams}
+        for upstream_id, model_id in [*entries, *learned_only]:
+            target = snapshot.upstreams[upstream_id]
+            entry = entries.get((upstream_id, model_id))
+            reported = model_limits(entry, []) if entry else None
+            used = model_limits(context_sizes.apply(model_id, upstream_id, entry), [target.pool.context_cap])
+            row = rows.setdefault(model_id, {"model": model_id, "upstreams": [], "manual": None, "context": None})
+            row["upstreams"].append(
+                {
+                    "id": upstream_id,
+                    "name": target.upstream.name,
+                    "reported": reported["context"] if reported else None,
+                    "learned": context_sizes.learned.get((upstream_id, model_id)),
+                    "cap": target.pool.context_cap,
+                    "used": used["context"] if used else None,
+                }
+            )
+        for model_id, manual in context_sizes.manual.items():
+            rows.setdefault(model_id, {"model": model_id, "upstreams": [], "manual": None, "context": None})
+            rows[model_id]["manual"] = manual
+        for row in rows.values():
+            used = [u["used"] for u in row["upstreams"]]
+            row["context"] = min(used) if used and all(used) else None
+        return sorted(rows.values(), key=lambda r: r["model"].lower())
+
     async def refresh_prices() -> bool:
         return await prices.refresh(app.state.client)
 
@@ -812,6 +849,7 @@ def create_app(
             lambda: app.state.restart(),
             lambda name: monthly.used(name),
             live_signature,
+            context_table,
         ),
     )
 
@@ -1032,6 +1070,30 @@ def create_app(
                     circuits.abandon(ticket.target.upstream_id)
                 queue.cancel(ticket)
 
+    async def check_overflow(adm: Admission, event: Got, model: str) -> tuple[Got, bool]:
+        """A provider's "prompt too long" error: remember the limit it states (so the next request is
+        checked before sending and opencode is told), and answer in the standard form agents act on."""
+        response = event.response
+        if response.status_code not in OVERFLOW_STATUS:
+            return event, False
+        content = await response.aread()
+        overflow, limit, message = overflow_of(response.status_code, content)
+        if not overflow:
+            return Got(Replay(response, content, complete=True), event.target), False
+        upstream = event.target.upstream
+        adm.rlog.fields["error"] = f"too long for {model} on {upstream.name}: {message}"[:500]
+        if limit and model and context_sizes.learned.get((upstream.id, model)) != limit:
+            context_sizes.learned[(upstream.id, model)] = limit
+            await asyncio.to_thread(store.learn_model_limit, upstream.id, model, limit, message)
+            log.info(
+                json.dumps({"event": "context_learned", "upstream": upstream.name, "model": model, "context": limit})
+            )
+        known = limit or context_sizes.known(model, upstream.id)
+        replay = Replay(response, overflow_body(model, known, detail=message), complete=True)
+        replay.status_code = 400
+        replay.headers = httpx.Headers({"content-type": "application/json"})
+        return Got(replay, event.target), True
+
     async def chained(adm: Admission) -> AsyncIterator:
         """``attempts`` over the alias's fallback chain: on a trigger (unavailable / errors /
         refused) the request moves on to the next model, unchanged otherwise. Same events as
@@ -1061,6 +1123,13 @@ def create_app(
             async with contextlib.aclosing(attempts(step_adm)) as events:
                 moved_on = False
                 async for event in events:
+                    if isinstance(event, Got):
+                        event, overflow = await check_overflow(adm, event, step.model)
+                        if overflow and not last and "context" in triggers:
+                            await event.response.aclose()
+                            yield fall("context (provider)")
+                            moved_on = True
+                            break
                     if last or not isinstance(event, Got | Failed):
                         yield event
                         if isinstance(event, Got | Failed) or event is None:
@@ -1133,26 +1202,38 @@ def create_app(
         stale = [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s)]
         if stale:
             await asyncio.gather(*(refresh_catalog(t) for t in stale))
-        entries: dict[str, dict] = {}
-        caps: dict[str, list[int | None]] = {}
-        offered_by: dict[str, list[str]] = {}  # model -> upstream names, shown in opencode's model list
+        served: dict[str, list[tuple[Target, dict]]] = {}  # model -> the upstreams offering it, with its entry
         for target in targets:
             for model in catalogs.models(target.id):
-                entries.setdefault(model["id"], model)
-                caps.setdefault(model["id"], []).append(target.pool.context_cap)
-                offered_by.setdefault(model["id"], []).append(target.upstream.name)
+                served.setdefault(model["id"], []).append((target, model))
+
+        def limits_on(model_id: str, on: list[Target]) -> dict[str, int] | None:
+            """The smallest known context / output across the upstreams the request may go to."""
+            entries = {t.id: e for t, e in served.get(model_id, [])}
+            known = [
+                lim
+                for t in on
+                if t.id in entries
+                and (lim := model_limits(context_sizes.apply(model_id, t.id, entries[t.id]), [t.pool.context_cap]))
+            ]
+            if not known:
+                return None
+            context = min(lim["context"] for lim in known)
+            return {"context": context, "output": min(min(lim["output"] for lim in known), context)}
+
+        offered_by = {m: [t.upstream.name for t, _ in pairs] for m, pairs in served.items()}  # shown in opencode
         allowed = client.policy.allowed_models
         result: dict[str, dict] = {}
-        for model_id, entry in sorted(entries.items()):
+        for model_id in sorted(served):
             if not allowed or model_id in allowed:
-                limits = model_limits(entry, caps[model_id])
+                limits = limits_on(model_id, targets)
                 name = with_providers(model_id, offered_by[model_id])
                 result[model_id] = {"name": name, **({"limit": limits} if limits else {})}
         for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
             if allowed and alias.name not in allowed and alias.target_model not in allowed:
                 continue
             pinned = [t for t in targets if not alias.upstream_ids or t.id in alias.upstream_ids]
-            limits = model_limits(entries.get(alias.target_model), [t.pool.context_cap for t in pinned])
+            limits = limits_on(alias.target_model, pinned)
             result[alias.name] = {
                 "name": with_providers(
                     f"{alias.name} → {alias.target_model}",
@@ -1271,7 +1352,7 @@ def create_app(
         merged: dict[str, dict] = {}
         for target in targets:
             for model in catalogs.models(target.id):
-                merged.setdefault(model["id"], model)
+                merged.setdefault(model["id"], context_sizes.apply(model["id"], target.id, model))
         if not merged and all(catalogs.ids(t.id) is None for t in targets):
             return error_response("no upstream returned a model list", 502, "upstream_error")
         for alias in snapshot.aliases.values():
@@ -1866,16 +1947,10 @@ def create_app(
         if not steps:
             if too_long_for:
                 estimate, context, _, output = too_long_for
-                return JSONResponse(
-                    {
-                        "error": {
-                            "message": f"This request needs about {estimate:,} prompt tokens plus "
-                            f"{output:,} output tokens, but '{model}' accepts {context:,}.",
-                            "type": "invalid_request_error",
-                            "code": "context_length_exceeded",
-                        }
-                    },
-                    status_code=400,
+                return Response(
+                    overflow_body(model or "", context, estimate + output),
+                    400,
+                    media_type="application/json",
                 )
             return error_response(f"no usable upstream for '{model}' right now", 503, "no_upstream")
         candidates, body = steps[0].candidates, steps[0].body
