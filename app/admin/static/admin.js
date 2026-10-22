@@ -104,6 +104,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const dashboard = document.getElementById("dashboard");
   if (dashboard) liveDashboard(dashboard);
+  document.querySelectorAll("[data-model-picker]").forEach(modelPicker);
   const liveRequestsRoot = document.getElementById("requests-live");
   if (liveRequestsRoot) liveRequests(liveRequestsRoot);
   const usage = document.getElementById("usage-live");
@@ -394,7 +395,7 @@ function liveDashboard(root) {
       tr.append(
         cell(name, "Client"), cell(live.active, "Active"), cell(live.queued, "Queued"),
         cell(totals.outcomes.done || 0, "Done"), cell(totals.outcomes.error || 0, "Errors"),
-        cell(totals.tokens.prompt + totals.tokens.completion, "Tokens"),
+        cell(totals.tokens.prompt.toLocaleString(), "In tokens"), cell(totals.tokens.completion.toLocaleString(), "Out tokens"),
       );
       return tr;
     });
@@ -642,4 +643,29 @@ function liveRequests(root) {
     if (version !== null && state.usage_version !== version && !timer) timer = setTimeout(reload, 1000);
     version = state.usage_version;
   };
+}
+
+// Upstream > choose models: filter the list, tick / untick what's shown, count what's offered.
+function modelPicker(form) {
+  const items = [...form.querySelectorAll("[data-picker-item]")];
+  const count = form.querySelector("[data-picker-count]");
+  const update = () => {
+    if (count) count.textContent = String(form.querySelectorAll('[data-picker-item] input:checked').length);
+  };
+  const shown = () => items.filter((item) => !item.hidden);
+  form.querySelector("[data-picker-search]")?.addEventListener("input", (event) => {
+    const words = event.target.value.toLowerCase().split(/\s+/).filter(Boolean);
+    items.forEach((item) => {
+      item.hidden = !words.every((word) => item.dataset.pickerItem.includes(word));
+    });
+  });
+  const setAll = (value) => () => {
+    shown().forEach((item) => {
+      item.querySelector("input").checked = value;
+    });
+    update();
+  };
+  form.querySelector("[data-picker-all]")?.addEventListener("click", setAll(true));
+  form.querySelector("[data-picker-none]")?.addEventListener("click", setAll(false));
+  form.addEventListener("change", update);
 }

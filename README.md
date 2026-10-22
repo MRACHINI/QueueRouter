@@ -73,6 +73,9 @@ from a **web admin UI**.
   one; tool steps use the alias's model alone. Mix providers so a council doesn't take all of one account's
   slots. Streaming apps get their response at once (keep-alives while members work); the Requests page shows
   "council: pick 2/3: GLM-4.7", and the members' and judge's requests are tagged `#council`.
+- **Choose which models each upstream offers** (Upstreams > "N models"): untick models to hide them from
+  opencode, `/v1/models`, the Models page and the Playground; aliases can still use them. A switch decides
+  whether models the provider adds later appear automatically.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.
