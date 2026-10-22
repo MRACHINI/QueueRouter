@@ -383,6 +383,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE aliases ADD COLUMN council_when TEXT NOT NULL DEFAULT 'planning';
     ALTER TABLE requests ADD COLUMN council TEXT;
     """,
+    # 25: what each client sent about itself (identifying headers and body fields, as JSON)
+    """
+    ALTER TABLE requests ADD COLUMN client_headers TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -427,6 +431,7 @@ REQUEST_COLUMNS = (
     "sent_user_agent",
     "compaction",
     "council",
+    "client_headers",
 )
 
 

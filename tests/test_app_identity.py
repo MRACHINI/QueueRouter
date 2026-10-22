@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import json
 
 import httpx
 
@@ -66,3 +67,55 @@ async def test_rule_survives_other_policy_edits(make_stack):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         r = await c.post("/v1/chat/completions", headers={**stack.headers, "User-Agent": "myapp/1"}, json=CHAT)
         assert r.status_code == 200
+
+
+def test_client_identity_keeps_identifiers_not_secrets():
+    from app.upstream import client_identity
+
+    headers = {
+        "Authorization": "Bearer sk-secret",
+        "x-api-key": "k",
+        "x-goog-api-key": "g",
+        "Cookie": "a=b",
+        "X-Portkey-Token": "t",
+        "Host": "qr",
+        "User-Agent": "opencode/2.1.3",
+        "X-QueueRouter-Priority": "low",
+        "x-opencode-session-id": "ses_1",
+        "x-parent-session-id": "ses_0",
+        "HTTP-Referer": "https://opencode.ai/",
+        "X-Title": "opencode",
+        "X-Stainless-Lang": "js",
+        "anthropic-version": "2023-06-01",
+    }
+    found = json.loads(client_identity(headers, {"user": "u1", "prompt_cache_key": "ses_1", "messages": []}))
+    assert found == {
+        "anthropic-version": "2023-06-01",
+        "body.prompt_cache_key": "ses_1",
+        "body.user": "u1",
+        "http-referer": "https://opencode.ai/",
+        "x-opencode-session-id": "ses_1",
+        "x-parent-session-id": "ses_0",
+        "x-stainless-lang": "js",
+        "x-title": "opencode",
+    }
+    assert client_identity({"Authorization": "x"}, None) is None
+
+
+async def test_identifiers_on_the_requests_page(make_stack):
+    stack = make_stack(bootstrap=OWNER)
+    headers = {**stack.headers, "X-Title": "myapp", "X-Stainless-Package-Version": "6.1.0"}
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        assert (
+            await c.post("/v1/chat/completions", headers=headers, json={**CHAT, "user": "alice"})
+        ).status_code == 200
+        await login(c, stack.url)
+        for _ in range(50):
+            page = (await c.get("/admin/requests")).text
+            if "identifiers</summary>" in page:
+                break
+            await asyncio.sleep(0.1)
+    assert "3 identifiers</summary>" in page
+    assert 'x-title:</span> <button type="button" class="copy-text inline" data-copy-text="myapp"' in page
+    assert "body.user:" in page and "x-stainless-package-version:" in page
+    assert stack.headers["Authorization"].split()[1] not in page  # the key is never recorded
