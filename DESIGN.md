@@ -1141,6 +1141,10 @@ target; streaming answers start at once.
 v0.27.1: every request's identifiers recorded (requests.client_headers: all headers except credentials, connection
 plumbing and our own, plus body user / safety_identifier / prompt_cache_key / metadata) and shown on the Requests
 page and in the Now table, click to copy.
+v0.28.0: per-upstream model choice (upstreams.model_filter, Catalogs filters: hidden models leave every list and
+aren't routed there, except for aliases, summary models and council members; "offer new models" switch; adding an
+upstream opens its choice); the provider's error text on every failed request (retried 5xx, passed-through 4xx/5xx,
+streaming or not, connection errors); dashboard per-client tokens split into in / out.
 
 ### Later (agreed, not scheduled)
 
@@ -1206,7 +1210,7 @@ page and in the Now table, click to copy.
   - *Costs:* you wait for the slowest member plus the judge, nothing streams meanwhile (keep-alive comments
     hold the connection); several times the tokens.
   - *Shown:* the Requests page lists each member's call and the judge's choice.
-- **Choose which models an upstream offers** (requested 2026-10-22, not scheduled). When adding or editing an
+- **Choose which models an upstream offers** (done: v0.28.0; aliases may use hidden models). When adding or editing an
   upstream, pick which of its models are offered (all by default; a checklist from its model list, with
   search and select all / none, since some providers list 100+). Hidden models don't appear in /v1/models,
   the opencode config / plugin (so they drop out of opencode's picker on the next refresh), the Models page

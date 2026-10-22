@@ -31,6 +31,7 @@ from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
 from ..auth import AuthGuard, client_ip
 from ..backup import MAX_UPLOAD_BYTES, RestoreError, backup_path, list_backups, make_archive, stage_restore
+from ..catalog import make_filter, parse_filter
 from ..compaction import MODES as COMPACT_MODES
 from ..config import ON_LIMIT, PRIORITIES, SECRET_TUNABLES, TUNABLES, Bootstrap, ClientPolicy, Settings
 from ..council import MAX_MEMBERS as COUNCIL_MAX
@@ -242,6 +243,7 @@ class AdminContext:
     month_usage: Callable[[str], object]
     live_signature: Callable[[], tuple]
     context_table: Callable[[], list[dict]]
+    upstream_models: Callable[[int], Awaitable[list[str] | None]]
 
 
 class NeedLogin(Exception):
@@ -1008,6 +1010,45 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         ctx.reload()
         return back("/admin/upstreams", "saved")
 
+    @app.get("/admin/upstreams/{upstream_id}/models")
+    async def upstream_models_page(upstream_id: int, request: Request):
+        session = require(request, "admin")
+        upstream = next((u for u in store.list_upstreams() if u.id == upstream_id), None)
+        if upstream is None:
+            return back("/admin/upstreams", error="invalid")
+        listed = await ctx.upstream_models(upstream_id)
+        rule = parse_filter(upstream.model_filter)
+        offer_new = rule[0] if rule else True
+        rows = [
+            {"id": m, "offered": rule is None or ((m not in rule[1]) if rule[0] else (m in rule[1]))}
+            for m in listed or []
+        ]
+        return page(
+            request,
+            "upstream_models.html",
+            session,
+            upstream=upstream,
+            rows=rows,
+            listed=listed,
+            offer_new=offer_new,
+            offered=sum(1 for r in rows if r["offered"]),
+        )
+
+    @app.post("/admin/upstreams/{upstream_id}/models")
+    async def upstream_models_save(upstream_id: int, request: Request):
+        session, form = await require_post(request, "admin")
+        listed = await ctx.upstream_models(upstream_id)
+        if listed is None:
+            return back(f"/admin/upstreams/{upstream_id}/models", error="invalid")
+        chosen = {str(v) for k, v in form.items() if k.startswith("model_")} & set(listed)
+        rule = make_filter(set(listed), chosen, form.get("offer_new") == "on")
+        try:
+            store.update_upstream(upstream_id, session.user.username, model_filter=rule)
+        except (ValueError, KeyError):
+            return back("/admin/upstreams", error="invalid")
+        ctx.reload()
+        return back(f"/admin/upstreams/{upstream_id}/models", "saved")
+
     @app.post("/admin/pools/{pool_id}/delete")
     async def pools_delete(pool_id: int, request: Request):
         session, _ = await require_post(request, "admin")
@@ -1043,7 +1084,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                     raise ValueError("pool")
             params = _rules_text(form) or preset.params
             retries = _opt(form, "max_retries", int, 0)
-            store.create_upstream(
+            upstream_id = store.create_upstream(
                 name,
                 base_url,
                 api_key,
@@ -1062,7 +1103,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         except sqlite3.IntegrityError:
             return back("/admin/upstreams", error="exists")
         ctx.reload()
-        return back("/admin/upstreams", "created")
+        return back(f"/admin/upstreams/{upstream_id}/models", "created")  # then choose what it offers
 
     @app.post("/admin/upstreams/{upstream_id}")
     async def upstreams_update(upstream_id: int, request: Request):

@@ -69,7 +69,7 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
       {% elif i.state == "closed" %}<span class="badge ok">healthy</span>
       {% else %}<span class="badge high">{{ i.state }}</span>{% endif %}
       <div class="small muted">{{ i.active or 0 }} active ·
-        {% if i.catalog_models is not none %}{{ i.catalog_models }} models{% else %}models unknown{% endif %}</div>
+        {% if i.catalog_models is not none %}<a href="/admin/upstreams/{{ u.id }}/models" title="Choose which models it offers">{% if i.catalog_offered < i.catalog_models %}{{ i.catalog_offered }} of {{ i.catalog_models }} models offered{% else %}{{ i.catalog_models }} models{% endif %}</a>{% else %}<a href="/admin/upstreams/{{ u.id }}/models">models unknown</a>{% endif %}</div>
       {% if i.last_error %}<div class="small muted">last error: {{ i.last_error }}</div>{% endif %}
       {% if i.catalog_error %}<div class="small muted">model list: {{ i.catalog_error }}</div>{% endif %}
     </td>

@@ -38,13 +38,13 @@ from .alerts import Alerts
 from .auth import AuthGuard, client_ip, find_client, ip_in, presented_key
 from .backup import MAX_UPLOAD_BYTES, auto_backup
 from .bodylimit import BodyLimit
-from .catalog import Catalogs, fetch_models
+from .catalog import Catalogs, fetch_models, parse_filter
 from .circuit import Circuits
 from .compaction import Plans
 from .compaction import compact as compact_request
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
-from .limits import OVERFLOW_STATUS, ModelLimits, overflow_body, overflow_of
+from .limits import OVERFLOW_STATUS, ModelLimits, error_message, overflow_body, overflow_of
 from .opencode import DEFAULT_OUTPUT, PLUGIN_PATH, model_limits, plugin_source, provider_config, wellknown_manifest
 from .params import CHARS_PER_TOKEN, apply_rules, estimate_prompt_tokens, parse_rules, requested_output, too_long
 from .pricing import PriceCatalog, resolve, token_cost
@@ -335,6 +335,9 @@ def create_app(
         circuits.threshold, circuits.cooldown_s = s.circuit_threshold, s.circuit_cooldown_s
         guard.limit, guard.block_s = s.auth_fail_limit, s.auth_block_s
         catalogs.forget(set(snapshot.upstreams))
+        catalogs.filters = {
+            t.id: rule for t in snapshot.upstreams.values() if (rule := parse_filter(t.upstream.model_filter))
+        }
 
     def reload() -> None:
         """Re-read configuration from the database and apply it live."""
@@ -655,23 +658,26 @@ def create_app(
             target = snapshot.upstreams.get(candidate.upstream_id)
             if target is None:
                 continue
-            entry = next((m for m in catalogs.models(target.id) if m["id"] == model), None)
+            entry = next((m for m in catalogs.models(target.id, raw=True) if m["id"] == model), None)
             known = model_limits(context_sizes.apply(model or "", target.id, entry), [target.pool.context_cap])
             if known is None:
                 return None  # one candidate with unknown context: don't guess
             contexts.append(known["context"])
         return min(contexts) if contexts else None
 
-    def candidates_for(model: str | None, only: tuple[int, ...] = ()) -> tuple[Candidate, ...]:
+    def candidates_for(model: str | None, only: tuple[int, ...] = (), raw: bool = False) -> tuple[Candidate, ...]:
         """Usable upstreams for ``model``: those that list it, or all of them if none does
         (the upstream then decides; lists may be stale or incomplete). ``only`` restricts the
-        choice (an alias pinned to some upstreams)."""
+        choice (an alias pinned to some upstreams). A model hidden on an upstream (Upstreams page)
+        isn't sent there, except with ``raw``: an alias, summary model or council member names it."""
         usable = [t for t in snapshot.upstreams.values() if t.usable and (not only or t.id in only)]
         if model:
-            listing = [t for t in usable if (ids := catalogs.ids(t.id)) is not None and model in ids]
+            listing = [t for t in usable if (ids := catalogs.ids(t.id, raw)) is not None and model in ids]
             unknown = [t for t in usable if catalogs.ids(t.id) is None]
             if listing:
                 usable = listing + unknown
+            elif not raw:
+                usable = [t for t in usable if catalogs.offered(t.id, model)]
         order = {uid: i for i, uid in enumerate(snapshot.upstreams)}
         return tuple(Candidate(t.id, t.pool.id, t.upstream.weight, order[t.id]) for t in usable)
 
@@ -691,7 +697,7 @@ def create_app(
         usable = [t for t in snapshot.upstreams.values() if t.usable and (not only or t.id in only)]
         if not name or not usable:
             return None
-        lists = [catalogs.ids(t.id) for t in usable]
+        lists = [catalogs.ids(t.id, raw=alias is not None) for t in usable]
         if any(ids is None for ids in lists) or any(name in ids for ids in lists):
             return None
         known = sorted({m for ids in lists for m in ids} | set(snapshot.aliases))
@@ -734,6 +740,7 @@ def create_app(
                 "active": active.get(t.id, 0),
                 **circuits.describe(t.id),
                 **{f"catalog_{k}": v for k, v in catalogs.describe(t.id).items()},
+                "catalog_offered": len(catalogs.ids(t.id) or ()),
             }
             for t in snapshot.upstreams.values()
         ]
@@ -827,6 +834,17 @@ def create_app(
     def models_by_upstream() -> dict[str, list[str]]:
         return {t.upstream.name: sorted(catalogs.ids(t.id) or []) for t in snapshot.upstreams.values()}
 
+    async def upstream_models(upstream_id: int) -> list[str] | None:
+        """Every model the upstream lists, hidden ones too (Upstreams page > choose models); None if its
+        list can't be fetched."""
+        target = snapshot.upstreams.get(upstream_id)
+        if target is None:
+            return None
+        if catalogs.stale(target.id, cfg().models_cache_s):
+            await refresh_catalog(target)
+        ids = catalogs.ids(target.id, raw=True)
+        return sorted(ids, key=str.lower) if ids is not None else None
+
     def context_table() -> list[dict]:
         """Per model: the context each upstream reports, what was learned from its errors, the plan cap,
         the manual override and the size in use (the smallest; None = unknown). For the Models page."""
@@ -897,6 +915,7 @@ def create_app(
             lambda name: monthly.used(name),
             live_signature,
             context_table,
+            upstream_models,
         ),
     )
 
@@ -1041,6 +1060,7 @@ def create_app(
                         response = await app.state.client.send(build_request(adm, target), stream=True)
                     except RETRYABLE_ERRORS as exc:
                         reason = type(exc).__name__
+                        adm.rlog.fields["error"] = f"{reason} talking to {target.upstream.name}"[:500]
                     else:
                         status = response.status_code
                         if status == BUSY_STATUS:
@@ -1085,6 +1105,12 @@ def create_app(
                             yield Got(response, target)
                             return
                         reason, headers = f"HTTP {status}", response.headers
+                        try:  # keep what the provider said (small), for the Requests page
+                            content = await response.aread()
+                        except httpx.HTTPError:
+                            content = b""
+                        note_error(adm.rlog, status, content, target)
+                        response = Replay(response, content, complete=True)
 
                     circuits.failure(target.id, reason)
                     verdict = True
@@ -1116,6 +1142,16 @@ def create_app(
                 if ticket.target is not None and not verdict:
                     circuits.abandon(ticket.target.upstream_id)
                 queue.cancel(ticket)
+
+    def note_error(rlog: RequestLog, status: int, content: bytes, target: Target) -> None:
+        """The provider's own error text on the request's log (Requests page), e.g. "HTTP 503 from arliai:
+        model overloaded". More specific notes already there (a 429's quota message, the original wording
+        of a "too long" error) are kept."""
+        current = rlog.fields["error"] or ""
+        if current.startswith(("too long for", "429 from")):
+            return
+        message = " ".join((error_message(content) or "").split()) or "(no error text)"
+        rlog.fields["error"] = f"HTTP {status} from {target.upstream.name}: {message}"[:500]
 
     async def check_overflow(adm: Admission, event: Got, model: str) -> tuple[Got, bool]:
         """A provider's "prompt too long" error: remember the limit it states (so the next request is
@@ -1252,13 +1288,16 @@ def create_app(
         if stale:
             await asyncio.gather(*(refresh_catalog(t) for t in stale))
         served: dict[str, list[tuple[Target, dict]]] = {}  # model -> the upstreams offering it, with its entry
+        listed: dict[str, list[tuple[Target, dict]]] = {}  # the same with hidden models (aliases may use them)
         for target in targets:
-            for model in catalogs.models(target.id):
-                served.setdefault(model["id"], []).append((target, model))
+            for model in catalogs.models(target.id, raw=True):
+                listed.setdefault(model["id"], []).append((target, model))
+                if catalogs.offered(target.id, model["id"]):
+                    served.setdefault(model["id"], []).append((target, model))
 
         def limits_on(model_id: str, on: list[Target]) -> dict[str, int] | None:
             """The smallest known context / output across the upstreams the request may go to."""
-            entries = {t.id: e for t, e in served.get(model_id, [])}
+            entries = {t.id: e for t, e in listed.get(model_id, [])}
             known = [
                 lim
                 for t in on
@@ -1270,13 +1309,14 @@ def create_app(
             context = min(lim["context"] for lim in known)
             return {"context": context, "output": min(min(lim["output"] for lim in known), context)}
 
-        offered_by = {m: [t.upstream.name for t, _ in pairs] for m, pairs in served.items()}  # shown in opencode
+        offered_by = {m: [t.upstream.name for t, _ in pairs] for m, pairs in listed.items()}  # shown in opencode
         allowed = client.policy.allowed_models
         result: dict[str, dict] = {}
         for model_id in sorted(served):
             if not allowed or model_id in allowed:
-                limits = limits_on(model_id, targets)
-                name = with_providers(model_id, offered_by[model_id])
+                serving = [t for t, _ in served[model_id]]
+                limits = limits_on(model_id, serving)
+                name = with_providers(model_id, [t.upstream.name for t in serving])
                 result[model_id] = {"name": name, **({"limit": limits} if limits else {})}
         for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
             if allowed and alias.name not in allowed and alias.target_model not in allowed:
@@ -1402,13 +1442,17 @@ def create_app(
         if stale:
             await asyncio.gather(*(refresh_catalog(t) for t in stale))
         merged: dict[str, dict] = {}
+        everything: dict[str, dict] = {}  # hidden models too: an alias may point at one
         for target in targets:
-            for model in catalogs.models(target.id):
-                merged.setdefault(model["id"], context_sizes.apply(model["id"], target.id, model))
+            for model in catalogs.models(target.id, raw=True):
+                entry = context_sizes.apply(model["id"], target.id, model)
+                everything.setdefault(model["id"], entry)
+                if catalogs.offered(target.id, model["id"]):
+                    merged.setdefault(model["id"], entry)
         if not merged and all(catalogs.ids(t.id) is None for t in targets):
             return error_response("no upstream returned a model list", 502, "upstream_error")
         for alias in snapshot.aliases.values():
-            merged[alias.name] = alias_entry(alias, merged.get(alias.target_model))
+            merged[alias.name] = alias_entry(alias, everything.get(alias.target_model))
         allowed = client.policy.allowed_models
         data = [
             m
@@ -1507,7 +1551,9 @@ def create_app(
         name = alias.compact_model or step_model
         target_alias = snapshot.aliases.get(name)
         real = target_alias.target_model if target_alias else name
-        return name, model_context(real, candidates_for(real, target_alias.upstream_ids if target_alias else ()))
+        return name, model_context(
+            real, candidates_for(real, target_alias.upstream_ids if target_alias else (), raw=True)
+        )
 
     def load_summary(key: str | None) -> compaction_mod.Plan | None:
         if not key:
@@ -2395,7 +2441,9 @@ def create_app(
         steps: list[Step] = []
         too_long_for: tuple | None = None
         for i, step_model in enumerate(chain):
-            step_candidates = candidates_for(step_model, alias.upstream_ids if alias and i == 0 else ())
+            step_candidates = candidates_for(
+                step_model, alias.upstream_ids if alias and i == 0 else (), raw=alias is not None
+            )
             if not step_candidates:
                 continue
             if not isinstance(payload, dict):  # not JSON: forward as-is, no chain
@@ -2604,6 +2652,8 @@ def create_app(
                             await response.aclose()
                         status = response.status_code
                         outcome = "done" if status < 400 else "error"
+                        if status >= 400:
+                            note_error(rlog, status, content, event.target)
                         rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
                         if adm.log_request is not None:
                             rlog.content = (adm.log_request, content)
@@ -2687,6 +2737,7 @@ def create_app(
                         status = response.status_code
                         if status != 200:
                             content = await response.aread()
+                            note_error(rlog, status, content, event.target)
                             try:
                                 message = json.loads(content)["error"]["message"]
                             except (ValueError, KeyError, TypeError):

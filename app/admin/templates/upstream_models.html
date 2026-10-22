@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Models of {{ upstream.name }}{% endblock %}
+{% block content %}
+<p class="small"><a href="/admin/upstreams">← Upstreams</a></p>
+<h1>Models offered by {{ upstream.name }}</h1>
+<p class="muted">Untick models to hide them: they leave opencode's model list (on its next refresh), <code>/v1/models</code>,
+the Models page and the Playground, and requests for them aren't sent to {{ upstream.name }} (another upstream offering the
+same model still can). An alias can still point at a hidden model, so you can hide everything and offer a few aliases.</p>
+
+{% if listed is none %}
+<p class="notice err">{{ upstream.name }}'s model list couldn't be loaded right now. Check the upstream (Test on the
+Upstreams page) and reload this page.</p>
+{% else %}
+<form method="post" action="/admin/upstreams/{{ upstream.id }}/models" class="card" data-model-picker>
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="row wrap">
+    <input type="search" placeholder="Filter models…" aria-label="Filter models" data-picker-search class="grow">
+    <button type="button" class="secondary" data-picker-all>Tick all shown</button>
+    <button type="button" class="secondary" data-picker-none>Untick all shown</button>
+    <span class="muted small"><span data-picker-count>{{ offered }}</span> of {{ rows | length }} offered</span>
+  </div>
+  <label class="check"><input type="checkbox" name="offer_new" {% if offer_new %}checked{% endif %}>
+    Offer models {{ upstream.name }} adds later automatically</label>
+  <small class="muted">Off: a new model stays hidden until you tick it here.</small>
+  <ul class="plain columns picker">
+    {% for r in rows %}
+    <li data-picker-item="{{ r.id | lower }}"><label class="check mono small"><input type="checkbox" name="model_{{ loop.index }}" value="{{ r.id }}" {% if r.offered %}checked{% endif %}> {{ r.id }}</label></li>
+    {% endfor %}
+  </ul>
+  <div class="align-end"><button type="submit">Save</button></div>
+</form>
+{% endif %}
+{% endblock %}

@@ -387,6 +387,11 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE requests ADD COLUMN client_headers TEXT;
     """,
+    # 26: which models an upstream offers: '' = all, else JSON {"offer_new": bool, "models": [...]} (hidden
+    # ones when offer_new, else the only ones offered)
+    """
+    ALTER TABLE upstreams ADD COLUMN model_filter TEXT NOT NULL DEFAULT '';
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -472,6 +477,7 @@ class Upstream:
     max_retries: int | None = None  # 429 retries on this upstream (None = the client's / global budget)
     ua_mode: str = "keep"  # outgoing User-Agent default for requests here: keep | remove | template
     ua_template: str = ""
+    model_filter: str = ""  # which models it offers (see Catalogs.filters); "" = all
 
 
 @dataclass(frozen=True)
@@ -841,6 +847,7 @@ class Store:
                 r["max_retries"],
                 r["ua_mode"] or "keep",
                 r["ua_template"] or "",
+                r["model_filter"] or "",
             )
             for r in self.query("SELECT * FROM upstreams ORDER BY id")
         ]
@@ -933,6 +940,7 @@ class Store:
             fields["api_key_enc"] = self.encrypt(str(fields.pop("api_key")))
         allowed = {
             "name",
+            "model_filter",
             "preset",
             "base_url",
             "api_key_enc",

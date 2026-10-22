@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 
@@ -36,15 +37,30 @@ async def fetch_models(client: httpx.AsyncClient, base_url: str, api_key: str, t
 class Catalogs:
     def __init__(self) -> None:
         self._entries: dict[int, _Entry] = {}
+        # Which models each upstream offers (Upstreams page): {upstream_id: (offer_new, models)}, where
+        # models are the hidden ones when offer_new, else the only ones offered. Absent = all offered.
+        self.filters: dict[int, tuple[bool, frozenset[str]]] = {}
 
-    def ids(self, upstream_id: int) -> set[str] | None:
-        """Model ids the upstream serves, or None if not known (yet)."""
-        entry = self._entries.get(upstream_id)
-        return {m["id"] for m in entry.models} if entry and entry.ok else None
+    def offered(self, upstream_id: int, model: str) -> bool:
+        rule = self.filters.get(upstream_id)
+        if rule is None:
+            return True
+        offer_new, models = rule
+        return (model not in models) if offer_new else (model in models)
 
-    def models(self, upstream_id: int) -> list[dict]:
+    def ids(self, upstream_id: int, raw: bool = False) -> set[str] | None:
+        """Model ids the upstream offers, or None if not known (yet). ``raw``: all it lists, hidden ones too
+        (what an alias may still target, and what the Upstreams page offers to choose from)."""
         entry = self._entries.get(upstream_id)
-        return entry.models if entry and entry.ok else []
+        if not (entry and entry.ok):
+            return None
+        return {m["id"] for m in entry.models if raw or self.offered(upstream_id, m["id"])}
+
+    def models(self, upstream_id: int, raw: bool = False) -> list[dict]:
+        entry = self._entries.get(upstream_id)
+        if not (entry and entry.ok):
+            return []
+        return [m for m in entry.models if raw or self.offered(upstream_id, m["id"])]
 
     def stale(self, upstream_id: int, max_age_s: float) -> bool:
         """Due for a refresh. A list we never got is retried soon, not after ``max_age_s``."""
@@ -75,3 +91,22 @@ class Catalogs:
         for upstream_id in list(self._entries):
             if upstream_id not in keep:
                 del self._entries[upstream_id]
+
+
+def parse_filter(text: str) -> tuple[bool, frozenset[str]] | None:
+    """An upstream's stored model choice ("" = everything offered)."""
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        return bool(data.get("offer_new", True)), frozenset(str(m) for m in data.get("models") or [])
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def make_filter(listed: set[str], chosen: set[str], offer_new: bool) -> str:
+    """Store a choice: the hidden models when new ones are offered automatically, else the chosen ones."""
+    if offer_new and chosen >= listed:
+        return ""  # everything offered, as by default
+    models = sorted(listed - chosen) if offer_new else sorted(chosen)
+    return json.dumps({"offer_new": offer_new, "models": models})

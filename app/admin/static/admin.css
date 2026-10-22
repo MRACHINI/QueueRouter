@@ -248,3 +248,5 @@ tr.unread td { background: color-mix(in srgb, var(--danger) 6%, transparent); }
 .copy-text.inline { display: inline; }
 details.ids { margin-top: 2px; }
 details.ids > div { overflow-wrap: anywhere; }
+ul.picker { margin: 12px 0; padding: 0; list-style: none; }
+ul.picker li[hidden] { display: none; }
