@@ -1123,6 +1123,10 @@ v0.25.0: separate embedding slots per limit pool (embedding_concurrency; a secon
 pool id, left out of the chat slot totals, shown as "<pool> (embeddings)"); ArliAI plans fill it (= parallel).
 v0.25.1: request lists (Requests page, dashboard) show input and output tokens in separate columns (cached input
 in brackets / on hover).
+v0.25.2: compaction fixes from real use — the cut may reach into the current agent turn (all but the last 6
+messages; the user's latest message moves next to the task), summarise mode doesn't wait below 90% (the request
+goes out at once, the summary is extended alongside), and sizes are judged in the provider's tokens (per model
+ratio of reported prompt tokens to the estimate, learned from finished requests).
 
 ### Later (agreed, not scheduled)
 

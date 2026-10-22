@@ -28,6 +28,7 @@ from .params import CHARS_PER_TOKEN, estimate_prompt_tokens, message_chars
 
 MODES = ("off", "trim", "summarise")
 START_AT = 0.80  # of the model's context: compact from here...
+BLOCK_AT = 0.90  # summarise mode: below this the request goes out at once and the summary is written alongside
 GOAL = 0.50  # ...down to here
 KEEP_RECENT = 6  # messages at the end that are never touched (besides the current user message)
 LONG_OUTPUT = 2_000  # characters: old tool outputs longer than this are shortened
@@ -95,13 +96,24 @@ def _protected(messages: list) -> tuple[int, int]:
         head += 1
     first_user = next((i for i in range(head, len(messages)) if messages[i].get("role") == "user"), None)
     start = (first_user + 1) if first_user is not None else head
-    last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=len(messages) - 1)
-    tail = min(len(messages) - KEEP_RECENT, last_user)
+    # An agent's turn can be dozens of tool rounds after the user's latest message: those may be cut too
+    # (all but the last few). The latest message itself is kept: it moves next to the task (see _apply),
+    # which needs it to be plain text.
+    tail = len(messages) - KEEP_RECENT
+    latest = _latest_user(messages)
+    if latest is not None and _text(messages[latest].get("content")) is None:
+        tail = min(tail, latest)
     return start, max(start, tail)
+
+
+def _latest_user(messages: list) -> int | None:
+    return max((i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") == "user"), default=None)
 
 
 def _apply(payload: dict, plan: Plan, note_first_user: bool = True) -> dict:
     messages = payload["messages"]
+    latest = _latest_user(messages)
+    kept_latest = latest if latest is not None and plan.cut_from <= latest < plan.cut_to else None
     out = []
     for i, message in enumerate(messages):
         if plan.cut_from <= i < plan.cut_to:
@@ -117,6 +129,8 @@ def _apply(payload: dict, plan: Plan, note_first_user: bool = True) -> dict:
             note = f"\n\n{SUMMARY_MARK}\n{plan.summary}"
         else:
             note = f"\n\n[QueueRouter: {dropped} earlier messages were removed here to fit the model's context.]"
+        if kept_latest is not None:  # the user's latest message was inside the cut: keep it, after the summary
+            note += f"\n\n[The user's latest message]\n{_text(messages[kept_latest].get('content'))}"
         if target is not None:
             content = target.get("content")
             if isinstance(content, str):

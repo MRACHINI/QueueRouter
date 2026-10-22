@@ -118,3 +118,38 @@ async def test_request_lists_split_tokens(make_stack):
         in page
     )
     assert '<td data-label="Out tokens">5</td>' in page
+
+
+def agent_turn(rounds: int, chars: int = 4_000) -> list[dict]:
+    """One long opencode turn: the user's latest message early, then many tool rounds (the request ends
+    with a tool result, not a user message)."""
+    messages = conversation(2, 500)[:-1]  # system, task, two rounds, "done reading"
+    messages.append({"role": "user", "content": "LATEST: refactor the parser"})
+    for i in range(rounds):
+        call = {"id": f"t{i}", "type": "function", "function": {"name": "edit", "arguments": json.dumps({"n": i})}}
+        messages.append({"role": "assistant", "content": f"step {i}", "tool_calls": [call]})
+        messages.append({"role": "tool", "tool_call_id": f"t{i}", "content": f"OUT{i} " + "z" * chars})
+    return messages
+
+
+def test_cut_reaches_into_the_current_turn():
+    payload = {"messages": agent_turn(100, 1_500)}  # outputs too short to shorten: rounds must go
+    result = compact(payload, 40_000, 1_000, Plans(), None)
+    out = result.payload["messages"]
+    assert result.after <= 20_000  # before: nothing after the latest user message could be cut
+    assert out[-6:] == payload["messages"][-6:]
+    assert not any(m.get("content") == "LATEST: refactor the parser" for m in out[2:])  # moved...
+    assert out[1]["content"].endswith("[The user's latest message]\nLATEST: refactor the parser")  # ...next to the task
+    assert out[2]["role"] == "assistant"
+
+
+def test_estimate_calibration():
+    from app.stats import Stats
+
+    stats = Stats()
+    assert stats.ratio("m") == 1.0
+    stats.learn_ratio("m", 42_000, 56_700)
+    assert 1.34 < stats.ratio("m") < 1.36
+    stats.learn_ratio("m", 500, 5_000)  # too small to judge
+    stats.learn_ratio("other", 10_000, 8_000)
+    assert stats.ratio("other") == 1.0  # never trusted to be pessimistic

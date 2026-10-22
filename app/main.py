@@ -142,6 +142,7 @@ class RequestLog:
             f["completion_tokens"],
             client=f["client"] or "default",
         )
+        stats.learn_ratio(f["target_model"] or f["model"], f.get("estimate"), f["prompt_tokens"])
         if f.get("ttft_ms") is not None and f["outcome"] == "done":
             stats.ttft_hist.observe(f["ttft_ms"] / 1000)
         entry = {**f, "ts": time.time()}
@@ -188,6 +189,7 @@ class Step:
     candidates: tuple[Candidate, ...]
     body: bytes
     compaction: str | None = None  # what compaction did to this step's request (shown on the Requests page)
+    estimate: int | None = None  # estimated prompt tokens of ``body`` (compared with the provider's count)
 
 
 @dataclass
@@ -1145,6 +1147,7 @@ def create_app(
             if index:
                 adm.rlog.fields["target_model"] = step.model
                 adm.rlog.fields["compaction"] = step.compaction
+                adm.rlog.fields["estimate"] = step.estimate
             step_adm = dataclasses.replace(adm, candidates=step.candidates, body=step.body)
             async with contextlib.aclosing(attempts(step_adm)) as events:
                 moved_on = False
@@ -1534,9 +1537,12 @@ def create_app(
         step_model: str,
         priority: str,
         start_at: float = compaction_mod.START_AT,
+        background: bool = False,
     ) -> compaction_mod.Result | None:
         """Summarise mode: reuse the conversation's summary while the request stays under ``start_at`` of
-        the context, else extend it (down to about half)."""
+        the context, else extend it (down to about half). With ``background``, a request that still fits
+        under BLOCK_AT goes out at once (with the current summary, or none yet) while the summary is
+        extended alongside; only a request that wouldn't fit waits for it."""
         if not compaction_mod.needed(payload, context, output, start_at):
             return None
         messages = payload["messages"]
@@ -1546,10 +1552,17 @@ def create_app(
             previous = await asyncio.to_thread(load_summary, key)
             if previous is not None and not previous.matches(messages):
                 previous = None
-            if previous is not None:
-                shrunk = compaction_mod.with_summary(payload, previous)
-                if not compaction_mod.needed(shrunk, context, output, start_at):
-                    return compaction_mod.Result(shrunk, before, estimate_prompt_tokens(shrunk), "summarise", True)
+            current = compaction_mod.with_summary(payload, previous) if previous is not None else payload
+            if previous is not None and not compaction_mod.needed(current, context, output, start_at):
+                return compaction_mod.Result(current, before, estimate_prompt_tokens(current), "summarise", True)
+            if background and key and not compaction_mod.needed(current, context, output, compaction_mod.BLOCK_AT):
+                if key not in summarising:  # one background update per conversation
+                    summarising.add(key)
+                    asyncio.ensure_future(
+                        background_summary(key, client, session, payload, context, output, alias, step_model, priority)
+                    )
+                after = estimate_prompt_tokens(current)
+                return compaction_mod.Result(current, before, after, "summarise", previous is not None, "updating")
             cut = compaction_mod.make_plan(payload, compaction_mod.summarise_goal(context, output), shorten_old=False)
             if cut is None or cut.cut_to <= cut.cut_from:
                 return None
@@ -1564,6 +1577,18 @@ def create_app(
         shrunk = compaction_mod.with_summary(payload, plan)
         note = "summary updated" if extended else "new summary"
         return compaction_mod.Result(shrunk, before, estimate_prompt_tokens(shrunk), "summarise", False, note)
+
+    summarising: set[str] = set()  # conversations whose summary is being extended in the background
+
+    async def background_summary(key, client, session, payload, context, output, alias, step_model, priority) -> None:
+        try:
+            result = await summarise_request(client, session, payload, context, output, alias, step_model, priority)
+            if result is not None and not result.reused:
+                log.info(json.dumps({"event": "summary_background", "client": client.name, "result": result.label}))
+        except Exception as exc:
+            log.warning(json.dumps({"event": "summary_background_failed", "error": repr(exc)[:200]}))
+        finally:
+            summarising.discard(key)
 
     @dataclass
     class IdleWatch:
@@ -2170,12 +2195,13 @@ def create_app(
             bigger_next = "context" in triggers and i < len(chain) - 1  # a fallback loses nothing: prefer it
             if alias and alias.compact != "off" and context and not (bigger_next and too_long(step_payload, context)):
                 output = requested_output(step_payload) or min(DEFAULT_OUTPUT, context // 8)
+                context = int(context / stats.ratio(step_model))  # in estimate units: providers count more
                 result = None
                 if alias.compact == "summarise" and isinstance(step_payload.get("messages"), list):
                     priority = LANE_NAMES[request_lane(request_headers, client)]
                     full = step_payload
                     result = await summarise_request(
-                        client, session, step_payload, context, output, alias, step_model, priority
+                        client, session, step_payload, context, output, alias, step_model, priority, background=True
                     )
                     watch_idle(client, session, full, result, context, output, alias, step_model)
                 if result is None:  # trim mode, or a summary couldn't be written: trim instead
@@ -2192,7 +2218,8 @@ def create_app(
             unchanged = i == 0 and not alias and not param_changes
             unchanged = unchanged and compaction is None
             step_body = body if unchanged else json.dumps(step_payload).encode()
-            steps.append(Step(step_model, step_candidates, step_body, compaction))
+            estimate = estimate_prompt_tokens(step_payload)
+            steps.append(Step(step_model, step_candidates, step_body, compaction, estimate))
         if not steps:
             if too_long_for:
                 estimate, context, _, output = too_long_for
@@ -2252,6 +2279,7 @@ def create_app(
             model=model,
             target_model=target_model if alias_used else None,
             compaction=steps[0].compaction,
+            estimate=steps[0].estimate,
             tags=",".join(tags) or None,
             run=rkey[:80] if rkey else None,
             stream=isinstance(payload, dict) and payload.get("stream") is True,

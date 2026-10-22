@@ -61,6 +61,9 @@ class Stats:
         self.queue_hist = Histogram()  # seconds waiting for a slot
         self.upstream_hist = Histogram()  # seconds from slot to last byte (completed requests)
         self.ttft_hist = Histogram()  # seconds from arrival to the first byte of the answer
+        # Per model: real prompt tokens / QueueRouter's estimate (about 4 characters per token), learned from
+        # finished requests so compaction can judge sizes in the provider's own tokens.
+        self.token_ratio: dict[str, float] = {}
 
     def record(
         self,
@@ -102,3 +105,15 @@ class Stats:
             "per_client": {name: c.snapshot() for name, c in self.clients.items()},
             "uptime_s": round(time.time() - self.started),
         }
+
+    def learn_ratio(self, model: str | None, estimate: int | None, actual: int | None) -> None:
+        if not model or not estimate or not actual or estimate < 1_000:
+            return
+        ratio = min(3.0, max(0.5, actual / estimate))
+        old = self.token_ratio.get(model)
+        self.token_ratio[model] = ratio if old is None else old * 0.7 + ratio * 0.3
+
+    def ratio(self, model: str | None) -> float:
+        """How much bigger the provider counts a prompt than the estimate (never below 1: the estimate is
+        only trusted to be optimistic)."""
+        return max(1.0, self.token_ratio.get(model or "", 1.0))
