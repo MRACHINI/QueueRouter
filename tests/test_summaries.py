@@ -138,3 +138,26 @@ async def test_saved_summaries(make_stack):
     client = store.list_clients()[0]
     store.delete_client(client.id, "t")
     assert store.query("SELECT COUNT(*) AS n FROM compaction_summaries")[0]["n"] == 0
+
+
+async def test_summary_written_in_the_background(make_stack):
+    """Between 80% and 90% of the context the request goes out at once; the summary follows."""
+    from app.params import estimate_prompt_tokens
+
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0, compaction_idle_update=False)
+    stack.mock["extra_models"] = ["small-model"]
+    turns = next(  # 12k context, 1.5k reserved for the answer: 80% < estimate + 1.5k < 90%
+        t for t in range(4, 40) if 8_300 < estimate_prompt_tokens({"messages": conversation(t, 1_000)}) < 9_000
+    )
+    async with httpx.AsyncClient(base_url=stack.url, timeout=60) as c:
+        await setup_alias(c, stack, compact_model="mock-model")
+        label, sent = await send(c, stack, turns, 1_000)
+        assert label.endswith("(updating)") and SUMMARY_MARK not in json.dumps(sent)  # didn't wait
+        for _ in range(100):
+            if stack.mock.get("summary_inputs"):
+                break
+            await asyncio.sleep(0.1)
+        assert len(stack.mock["summary_inputs"]) == 1
+        await asyncio.sleep(0.3)
+        label, sent = await send(c, stack, turns, 1_000)
+        assert label.endswith("(reused)") and sent["messages"][1]["content"].endswith("summary 1")
