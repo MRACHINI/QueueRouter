@@ -322,7 +322,10 @@ def create_app(
         queue.paused = snapshot.mode == "paused"
         if snapshot.mode == "maintenance":
             queue.evict_waiters()
-        queue.set_pools({p.id: (p.max_concurrency, p.min_spacing_ms) for p in snapshot.pools.values()})
+        pools = {p.id: (p.max_concurrency, p.min_spacing_ms) for p in snapshot.pools.values()}
+        # /v1/embeddings on a pool with its own limit use a second set of slots (pool id negated)
+        pools.update({-p.id: (p.embedding_concurrency, 0) for p in snapshot.pools.values() if p.embedding_concurrency})
+        queue.set_pools(pools)
         circuits.threshold, circuits.cooldown_s = s.circuit_threshold, s.circuit_cooldown_s
         guard.limit, guard.block_s = s.auth_fail_limit, s.auth_block_s
         catalogs.forget(set(snapshot.upstreams))
@@ -662,6 +665,15 @@ def create_app(
         order = {uid: i for i, uid in enumerate(snapshot.upstreams)}
         return tuple(Candidate(t.id, t.pool.id, t.upstream.weight, order[t.id]) for t in usable)
 
+    def embedding_slots(candidates: tuple[Candidate, ...]) -> tuple[Candidate, ...]:
+        """Candidates using their pool's embedding slots (pool id negated) where it has its own limit."""
+        return tuple(
+            dataclasses.replace(c, pool_id=-c.pool_id)
+            if (pool := snapshot.pools.get(c.pool_id)) is not None and pool.embedding_concurrency
+            else c
+            for c in candidates
+        )
+
     def unknown_model(name: str | None, alias=None) -> JSONResponse | None:
         """A 404 with suggestions when no upstream offers ``name`` (only when every upstream's model
         list is known: a list we couldn't fetch proves nothing)."""
@@ -757,6 +769,7 @@ def create_app(
     def live_state(full_history: bool = True) -> dict:
         state = queue_state()
         pool_names = {p.id: p.name for p in snapshot.pools.values()}
+        pool_names.update({-p.id: f"{p.name} (embeddings)" for p in snapshot.pools.values()})
         state["pools"] = {pool_names.get(pid, str(pid)): v for pid, v in state["pools"].items()}
         state.pop("upstreams_active", None)
         return {
@@ -2189,6 +2202,8 @@ def create_app(
                     media_type="application/json",
                 )
             return error_response(f"no usable upstream for '{model}' right now", 503, "no_upstream")
+        if path == "embeddings":  # their own slots where the provider limits them separately
+            steps = [dataclasses.replace(s, candidates=embedding_slots(s.candidates)) for s in steps]
         candidates, body = steps[0].candidates, steps[0].body
         if steps[0].model != target_model:
             target_model, alias_used = steps[0].model, True

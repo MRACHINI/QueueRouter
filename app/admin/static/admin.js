@@ -93,6 +93,8 @@ document.addEventListener("DOMContentLoaded", () => {
       form.querySelector('[name="context_cap"]').value = option.dataset.context;
       const price = form.querySelector('[name="monthly_price"]');
       if (price) price.value = option.dataset.price;
+      const embeddings = form.querySelector('[name="embedding_concurrency"]');
+      if (embeddings) embeddings.value = option.dataset.embeddings || "";
     });
   });
   document.querySelectorAll("[data-pool-select]").forEach((select) => {

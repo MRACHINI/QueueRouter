@@ -11,6 +11,7 @@ class Plan:
     max_concurrency: int
     context_cap: int | None
     monthly_price: float = 0.0  # USD
+    embedding_concurrency: int | None = None  # its own parallel limit for /v1/embeddings
 
 
 @dataclass(frozen=True)
@@ -26,13 +27,14 @@ class Preset:
     max_retries: int | None = None  # 429 retries before giving up (None = the global budget)
 
 
-# ArliAI plans from arliai.com/pricing (October 2026).
+# ArliAI plans from arliai.com/pricing (October 2026). Embedding requests have their own parallel limit
+# (the account page shows "Embedding Request" next to "Parallel Request"), assumed equal to the chat one.
 ARLIAI_PLANS = (
-    Plan("Free", 1, 12_288, 0),
-    Plan("Core", 1, 32_768, 15),
-    Plan("Plus", 1, 131_072, 20),
-    Plan("Pro", 2, 262_144, 30),
-    Plan("Max", 6, 524_288, 160),
+    Plan("Free", 1, 12_288, 0, 1),
+    Plan("Core", 1, 32_768, 15, 1),
+    Plan("Plus", 1, 131_072, 20, 1),
+    Plan("Pro", 2, 262_144, 30, 2),
+    Plan("Max", 6, 524_288, 160, 6),
 )
 
 PRESETS: dict[str, Preset] = {

@@ -1119,10 +1119,12 @@ request's own priority; idle updates at low priority), chunked to fit the summar
 (client + session + start) in memory or saved encrypted (Settings > Compaction), extended rather than rewritten;
 idle update after ~45 s quiet for conversations above 70%; a failed summary falls back to trim; "context told
 to apps" per alias (opencode config and /v1/models).
+v0.25.0: separate embedding slots per limit pool (embedding_concurrency; a second set of slots under the negated
+pool id, left out of the chat slot totals, shown as "<pool> (embeddings)"); ArliAI plans fill it (= parallel).
 
 ### Later (agreed, not scheduled)
 
-- **Separate embedding slots per limit pool.** ArliAI (and others) count `/v1/embeddings` against its
+- **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
   own parallel limit (Pro: 2 chat + 2 embedding), but QueueRouter queues embeddings in the chat slots,
   so an indexing burst (Continue / Roo / Kilo codebase indexing, RAG in our own apps) makes chat wait
   needlessly. Plan: an optional `embedding_concurrency` per pool (blank = shared with chat, as now),
