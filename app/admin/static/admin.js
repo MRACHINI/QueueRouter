@@ -247,7 +247,7 @@ function liveDashboard(root) {
     if (!rows.length) {
       const tr = document.createElement("tr");
       const td = cell(empty);
-      td.colSpan = 9;
+      td.colSpan = tbody.closest("table")?.tHead?.rows[0]?.cells.length || 9;
       td.className = "muted";
       tr.append(td);
       tbody.append(tr);
@@ -404,12 +404,14 @@ function liveDashboard(root) {
 
     const recentRows = (s.recent || []).slice().reverse().map((r) => {
       const tr = document.createElement("tr");
-      const tokens = (r.prompt_tokens || 0) + (r.completion_tokens || 0);
+      const count = (n) => (n === null || n === undefined ? null : Number(n).toLocaleString());
+      const input = cell(count(r.prompt_tokens), "In tokens");
+      if (r.cached_tokens) input.title = `${count(r.cached_tokens)} of them cached`;
       tr.append(
         cell(new Date(r.ts * 1000).toLocaleTimeString(), "Time"), withTitle(cell(r.client, "Client"), uaTitle(r)),
         cell(r.priority, "Prio"), cell(r.model, "Model"), cell(r.outcome, "Outcome"),
         cell(r.queue_ms, "Queue ms"), cell(r.ttft_ms, "First byte ms"), cell(r.upstream_ms, "Upstream ms"),
-        cell(tokens || null, "Tokens"),
+        input, cell(count(r.completion_tokens), "Out tokens"),
       );
       return tr;
     });

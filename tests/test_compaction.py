@@ -99,3 +99,22 @@ async def test_alias_compacts_before_sending(make_stack):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         assert "compacted: trim" in (await c.get("/admin/requests")).text
+
+
+async def test_request_lists_split_tokens(make_stack):
+    stack = make_stack(bootstrap=OWNER)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        chat = {"model": "mock-model", "messages": [{"role": "user", "content": "hi"}], "mock_cached": 4}
+        assert (await c.post("/v1/chat/completions", headers=stack.headers, json=chat)).status_code == 200
+        await login(c, stack.url)
+        for _ in range(50):
+            page = (await c.get("/admin/requests")).text
+            if 'data-label="In tokens"' in page:
+                break
+            await asyncio.sleep(0.1)
+    assert "<th>In tokens</th><th>Out tokens</th>" in page
+    assert (
+        '<td data-label="In tokens" title="4 of them cached">10 <span class="muted small">(4 cached)</span></td>'
+        in page
+    )
+    assert '<td data-label="Out tokens">5</td>' in page
