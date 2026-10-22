@@ -1203,6 +1203,14 @@ target; streaming answers start at once.
   - *Costs:* you wait for the slowest member plus the judge, nothing streams meanwhile (keep-alive comments
     hold the connection); several times the tokens.
   - *Shown:* the Requests page lists each member's call and the judge's choice.
+- **Choose which models an upstream offers** (requested 2026-10-22, not scheduled). When adding or editing an
+  upstream, pick which of its models are offered (all by default; a checklist from its model list, with
+  search and select all / none, since some providers list 100+). Hidden models don't appear in /v1/models,
+  the opencode config / plugin (so they drop out of opencode's picker on the next refresh), the Models page
+  lists or the Playground, and requests for them aren't routed to that upstream (another upstream offering
+  the same model still can). New models a provider adds later: an "offer new models automatically" switch
+  per upstream (on = they appear, off = only the ticked ones). Aliases can still point at a hidden model
+  explicitly (or should they? decide when building).
 
 ---
 
