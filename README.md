@@ -56,6 +56,11 @@ from a **web admin UI**.
   provider's own "too long" error when it doesn't say (NVIDIA, Gemini...), or set by hand on the Models
   page. Requests are checked before queuing, opencode is told the size, and every provider's overflow
   error is rewritten into the standard `context_length_exceeded` form that opencode compacts on.
+- **Compaction** (per alias): when a conversation is too big for the model it goes to, QueueRouter shrinks
+  it before sending — from ~80% of the model's context down to ~50%: old tool outputs keep their start and
+  end, then old middle messages are dropped. The system prompt, the task, the current message and the
+  last turns are always kept; the same cut is reused while it fits, so provider prompt caching keeps
+  working. Shown on the Requests page ("compacted: trim 180k -> 95k").
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.
