@@ -96,15 +96,22 @@ def _text_of(value: Any) -> str:
     return ""
 
 
+def message_chars(message: dict) -> int:
+    """Characters a message adds to the prompt: its text plus any tool calls (whose arguments can hold
+    whole files, e.g. an agent's write/edit calls)."""
+    calls = message.get("tool_calls")
+    return len(_text_of(message.get("content"))) + (len(json.dumps(calls)) if calls else 0) + 1
+
+
 def estimate_prompt_tokens(payload: dict) -> int:
-    text = ""
+    chars = 0
     if isinstance(payload.get("messages"), list):
-        text = " ".join(_text_of(m.get("content")) for m in payload["messages"] if isinstance(m, dict))
+        chars = sum(message_chars(m) for m in payload["messages"] if isinstance(m, dict))
     elif isinstance(payload.get("prompt"), str | list):
-        text = _text_of(payload["prompt"])
+        chars = len(_text_of(payload["prompt"]))
     tools = payload.get("tools")
     extra = len(json.dumps(tools)) if tools else 0
-    return int((len(text) + extra) / CHARS_PER_TOKEN)
+    return int((chars + extra) / CHARS_PER_TOKEN)
 
 
 def requested_output(payload: dict) -> int:

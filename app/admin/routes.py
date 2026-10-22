@@ -31,6 +31,7 @@ from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
 from ..auth import AuthGuard, client_ip
 from ..backup import MAX_UPLOAD_BYTES, RestoreError, backup_path, list_backups, make_archive, stage_restore
+from ..compaction import MODES as COMPACT_MODES
 from ..config import ON_LIMIT, PRIORITIES, SECRET_TUNABLES, TUNABLES, Bootstrap, ClientPolicy, Settings
 from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
 from ..opencode import plugin_install_commands
@@ -55,6 +56,7 @@ from .security import (
 
 log = logging.getLogger("queuerouter")
 TWO_FA_COOKIE, TWO_FA_TTL_S = "qr_2fa", 300
+ENABLED_COMPACT_MODES = ("off", "trim")  # "summarise" arrives with summaries
 PRICING_DAYS = 30  # the price table lists models used this recently (plus offered and manually priced ones)
 LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes / send anyway
 HERE = os.path.dirname(__file__)
@@ -1177,6 +1179,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             aliases=store.list_aliases(),
             triggers=TRIGGERS,
             default_triggers=DEFAULT_TRIGGERS,
+            compact_modes=[m for m in COMPACT_MODES if m in ENABLED_COMPACT_MODES],
             upstreams=store.list_upstreams(),
             upstream_names=upstream_names,
             models=models,
@@ -1256,6 +1259,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         if any(len(m) > 200 for m in fallbacks) or len(fallbacks) > 10:
             raise ValueError("fallbacks")
         fallback_on = tuple(t for t in TRIGGERS if form.get(f"on_{t}") == "on")
+        compact = str(form.get("compact", "off"))
+        if compact not in ENABLED_COMPACT_MODES:
+            raise ValueError("compact")
         return {
             "target_model": target,
             "upstream_ids": upstream_ids,
@@ -1263,6 +1269,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "params": params,
             "fallbacks": fallbacks,
             "fallback_on": fallback_on,
+            "compact": compact,
         }
 
     @app.post("/admin/aliases")
@@ -1273,16 +1280,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             if not ALIAS_NAME.fullmatch(name):
                 raise ValueError("name")
             fields = alias_fields(form)
-            store.create_alias(
-                name,
-                fields["target_model"],
-                fields["upstream_ids"],
-                session.user.username,
-                notes=fields["notes"],
-                params=fields["params"],
-                fallbacks=fields["fallbacks"],
-                fallback_on=fields["fallback_on"],
-            )
+            target_model, upstream_ids = fields.pop("target_model"), fields.pop("upstream_ids")
+            store.create_alias(name, target_model, upstream_ids, session.user.username, **fields)
         except RulesError:
             return back("/admin/models", error="rules_invalid")
         except ValueError:

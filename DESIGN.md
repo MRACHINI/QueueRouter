@@ -1109,6 +1109,11 @@ v0.22.0: context sizes learned from providers' overflow errors (per upstream + m
 (Models page > Context sizes); overflow errors from any provider rewritten to OpenAI's form (400
 context_length_exceeded, "maximum context length is N tokens"), which opencode 2.x compacts on (checked in
 its source); an overflow can also trigger an alias's "context" fallback.
+v0.23.0: compaction per alias, trim mode (app/compaction.py): from 80% of the target model's context down to 50%;
+old tool outputs shortened (start + end), then old middle messages dropped (the kept part starts at an assistant
+message, a note on the task says so); plans remembered per conversation in memory (1 h idle) and reused while
+they fit; a context fallback is preferred when the alias has one. The size estimate now counts tool-call
+arguments too.
 
 ### Later (agreed, not scheduled)
 

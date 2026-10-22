@@ -38,10 +38,12 @@ from .backup import MAX_UPLOAD_BYTES, auto_backup
 from .bodylimit import BodyLimit
 from .catalog import Catalogs, fetch_models
 from .circuit import Circuits
+from .compaction import Plans
+from .compaction import compact as compact_request
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
 from .limits import OVERFLOW_STATUS, ModelLimits, overflow_body, overflow_of
-from .opencode import PLUGIN_PATH, model_limits, plugin_source, provider_config, wellknown_manifest
+from .opencode import DEFAULT_OUTPUT, PLUGIN_PATH, model_limits, plugin_source, provider_config, wellknown_manifest
 from .params import apply_rules, parse_rules, requested_output, too_long
 from .pricing import PriceCatalog, resolve, token_cost
 from .quotas import MonthlyUsage, month_of, over_quota, quota_share, seconds_to_next_month
@@ -122,6 +124,7 @@ class RequestLog:
             "ttft_ms": None,  # from arrival to the first byte of the answer (what the user waits for)
             "user_agent": None,  # the calling app, as it identifies itself
             "sent_user_agent": None,  # what the provider saw instead, when changed by a User-Agent rule
+            "compaction": None,  # e.g. "trim 812k -> 402k": the conversation was shrunk to fit (app/compaction.py)
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -182,6 +185,7 @@ class Step:
     model: str
     candidates: tuple[Candidate, ...]
     body: bytes
+    compaction: str | None = None  # what compaction did to this step's request (shown on the Requests page)
 
 
 @dataclass
@@ -238,6 +242,7 @@ def create_app(
     catalogs = Catalogs()
     context_sizes = ModelLimits()  # context sizes set by hand or learned from overflow errors
     context_sizes.load(store.list_model_limits())
+    plans = Plans()  # compaction plans per conversation (app/compaction.py)
     prices = PriceCatalog(os.path.join(bootstrap.data_dir, "models-dev-prices.json"))
     prices.load_file()
     circuits = Circuits()
@@ -1119,6 +1124,7 @@ def create_app(
                 continue
             if index:
                 adm.rlog.fields["target_model"] = step.model
+                adm.rlog.fields["compaction"] = step.compaction
             step_adm = dataclasses.replace(adm, candidates=step.candidates, body=step.body)
             async with contextlib.aclosing(attempts(step_adm)) as events:
                 moved_on = False
@@ -1924,6 +1930,7 @@ def create_app(
             client_rules = rules_of(client.policy.params)
             if alias_rules or client_rules:
                 param_changes = apply_rules(payload, alias_rules, client_rules)
+        session = session_key(request_headers, client.name, payload)
         steps: list[Step] = []
         too_long_for: tuple | None = None
         for i, step_model in enumerate(chain):
@@ -1937,13 +1944,22 @@ def create_app(
             if alias or i > 0:
                 step_payload["model"] = step_model  # the upstream gets the real model name
             context = model_context(step_model, step_candidates)
+            compaction = None
+            bigger_next = "context" in triggers and i < len(chain) - 1  # a fallback loses nothing: prefer it
+            if alias and alias.compact != "off" and context and not (bigger_next and too_long(step_payload, context)):
+                output = requested_output(step_payload) or min(DEFAULT_OUTPUT, context // 8)
+                key = f"{client.name}:{session}:{step_model}" if session else None
+                if result := compact_request(step_payload, context, output, plans, key):
+                    step_payload, compaction = result.payload, result.label
             if cfg().context_check and (over := too_long(step_payload, context)):
                 too_long_for = too_long_for or (*over, step_model, requested_output(step_payload))
                 if "context" in triggers:
                     continue  # try a model with a bigger context
                 break
             unchanged = i == 0 and not alias and not param_changes
-            steps.append(Step(step_model, step_candidates, body if unchanged else json.dumps(step_payload).encode()))
+            unchanged = unchanged and compaction is None
+            step_body = body if unchanged else json.dumps(step_payload).encode()
+            steps.append(Step(step_model, step_candidates, step_body, compaction))
         if not steps:
             if too_long_for:
                 estimate, context, _, output = too_long_for
@@ -1961,7 +1977,6 @@ def create_app(
 
         request_id = f"qr-{uuid.uuid4().hex[:12]}"
         lane = request_lane(request_headers, client)
-        session = session_key(request_headers, client.name, payload)
         auto_tags = "opencode" if "x-opencode-session-id" in request_headers else None  # any opencode version
         tags = parse_tags(client.policy.tags, request_headers.get("x-queuerouter-tags"), auto_tags)
         rkey = run_key(request_headers, client.name, session)
@@ -2001,6 +2016,7 @@ def create_app(
             position=position,
             model=model,
             target_model=target_model if alias_used else None,
+            compaction=steps[0].compaction,
             tags=",".join(tags) or None,
             run=rkey[:80] if rkey else None,
             stream=isinstance(payload, dict) and payload.get("stream") is True,
@@ -2015,6 +2031,8 @@ def create_app(
         }
         if keep_content:
             hints["X-QueueRouter-Logging"] = "on"  # never secret: the client is told
+        if steps[0].compaction:
+            hints["X-QueueRouter-Compacted"] = steps[0].compaction
         adm = Admission(
             request_id,
             client.name,

@@ -353,6 +353,14 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (upstream_id, model, source)
     );
     """,
+    # 21: compaction per alias (off / trim / summarise, the model that writes summaries, the context size
+    # told to apps) and what was done to each request
+    """
+    ALTER TABLE aliases ADD COLUMN compact TEXT NOT NULL DEFAULT 'off';
+    ALTER TABLE aliases ADD COLUMN compact_model TEXT NOT NULL DEFAULT '';
+    ALTER TABLE aliases ADD COLUMN virtual_context INTEGER;
+    ALTER TABLE requests ADD COLUMN compaction TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -387,6 +395,7 @@ REQUEST_COLUMNS = (
     "ttft_ms",
     "user_agent",
     "sent_user_agent",
+    "compaction",
 )
 
 
@@ -471,6 +480,9 @@ class Alias:
     params: str = ""  # parameter rules JSON (app/params.py)
     fallbacks: tuple[str, ...] = ()  # backup models, tried in order
     fallback_on: tuple[str, ...] = ("unavailable", "errors", "context")
+    compact: str = "off"  # off / trim / summarise: shrink conversations too big for the model (app/compaction.py)
+    compact_model: str = ""  # writes the summaries ("summarise"); blank = the target model
+    virtual_context: int | None = None  # context size told to apps (opencode); None = the real one
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -1147,6 +1159,9 @@ class Store:
                 r["params"],
                 tuple(json.loads(r["fallbacks"] or "[]")),
                 tuple(json.loads(r["fallback_on"] or "[]")),
+                r["compact"] or "off",
+                r["compact_model"] or "",
+                r["virtual_context"],
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1161,11 +1176,14 @@ class Store:
         params: str = "",
         fallbacks: tuple[str, ...] = (),
         fallback_on: tuple[str, ...] = ("unavailable", "errors", "context"),
+        compact: str = "off",
+        compact_model: str = "",
+        virtual_context: int | None = None,
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
                 "INSERT INTO aliases (name, target_model, upstream_ids, notes, params, fallbacks, fallback_on, "
-                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "compact, compact_model, virtual_context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     target_model,
@@ -1174,6 +1192,9 @@ class Store:
                     params,
                     json.dumps(list(fallbacks)),
                     json.dumps(list(fallback_on)),
+                    compact,
+                    compact_model,
+                    virtual_context,
                     time.time(),
                 ),
             )
@@ -1190,6 +1211,7 @@ class Store:
             if name in fields:
                 fields[name] = json.dumps(list(fields[name]))
         allowed = {"target_model", "upstream_ids", "enabled", "notes", "params", "fallbacks", "fallback_on"}
+        allowed |= {"compact", "compact_model", "virtual_context"}
         self._update("aliases", alias_id, allowed, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)
 

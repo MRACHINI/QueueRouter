@@ -17,7 +17,7 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
   {% for a in aliases %}
   <tr>
     <td data-label="Alias"><strong><code>{{ a.name }}</code></strong>{% if not a.enabled %} <span class="badge">disabled</span>{% endif %}
-      <div class="small muted">→ <code>{{ a.target_model }}</code>{% for fb in a.fallbacks %} → <code>{{ fb }}</code>{% endfor %}
+      <div class="small muted">→ <code>{{ a.target_model }}</code>{% for fb in a.fallbacks %} → <code>{{ fb }}</code>{% endfor %}{% if a.compact != "off" %} <span class="badge" title="Conversations too big for the model are shrunk">{{ a.compact }}</span>{% endif %}
         {% if a.upstream_ids %} on {% for uid in a.upstream_ids %}{{ upstream_names.get(uid, uid) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %} on any upstream{% endif %}</div>
       {% if a.notes %}<div class="small muted">{{ a.notes }}</div>{% endif %}</td>
     <td data-label="">
@@ -31,6 +31,9 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
         <textarea name="params" rows="1" class="rules grow" aria-label="Parameter rules" placeholder='parameter rules (JSON), e.g. {"defaults": {"temperature": 0.6}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}'>{{ a.params }}</textarea>
         <input name="fallbacks" value="{{ a.fallbacks | join(', ') }}" list="model-ids" placeholder="fallback models, in order" aria-label="Fallback models" class="grow">
         {% for t in triggers %}<label class="check small"><input type="checkbox" name="on_{{ t }}" {% if t in a.fallback_on %}checked{% endif %}> {{ t }}</label>{% endfor %}
+        <label class="inline-field">Compaction <select name="compact">
+          {% for m in compact_modes %}<option value="{{ m }}" {% if a.compact == m %}selected{% endif %}>{{ m }}</option>{% endfor %}
+        </select></label>
         <label class="check"><input type="checkbox" name="enabled" {% if a.enabled %}checked{% endif %}> enabled</label>
         <button type="submit" class="secondary">Save</button>
       </form>
@@ -68,6 +71,10 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
   <fieldset class="span-all plain"><legend class="small muted">Fall back when</legend><div class="row wrap">
     {% for t in triggers %}<label class="check"><input type="checkbox" name="on_{{ t }}" {% if t in default_triggers %}checked{% endif %}> {{ t }}</label>{% endfor %}
   </div></fieldset>
+  <label>Compaction
+    <select name="compact">{% for m in compact_modes %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select>
+    <small class="muted">When a conversation is too big for the model: trim = shorten old tool outputs, then drop old
+    messages (the task, the current message and recent turns are always kept)</small></label>
   <label class="span-all">Parameter rules <small class="muted">optional JSON: defaults / overrides / clamps / strip</small>
     <textarea name="params" rows="2" class="rules" placeholder='{"defaults": {"temperature": 0.6}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}'></textarea></label>
   <div class="align-end"><button type="submit">Add alias</button></div>
