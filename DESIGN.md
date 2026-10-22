@@ -1127,6 +1127,12 @@ pinned upstreams); model IDs are unchanged.
   "compaction model" (opencode's own compaction would use the small model and overflow too). The summary
   is cached per session by a hash of the replaced message prefix (history is append-only), so later
   turns reuse it instead of summarising again. Shown on the Requests page (compacted: 800k -> 150k).
+  "Virtual context": such an alias can advertise a big context to opencode (e.g. 1M, or the biggest model
+  used) while each request is compacted to fit the model it actually goes to, so you keep working across
+  models without opencode compacting. Rolling summaries: each compaction reads only the previous summary +
+  the newly-old part, so the compaction model never needs the whole history. Compact in steps (at ~80% of
+  the target model, down to ~50%) so the prefix stays stable between compactions and provider prompt
+  caching keeps working. Needs a body limit big enough for the full history (1M tokens is several MB).
 
 ---
 
