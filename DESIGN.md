@@ -1121,6 +1121,8 @@ idle update after ~45 s quiet for conversations above 70%; a failed summary fall
 to apps" per alias (opencode config and /v1/models).
 v0.25.0: separate embedding slots per limit pool (embedding_concurrency; a second set of slots under the negated
 pool id, left out of the chat slot totals, shown as "<pool> (embeddings)"); ArliAI plans fill it (= parallel).
+v0.25.1: request lists (Requests page, dashboard) show input and output tokens in separate columns (cached input
+in brackets / on hover).
 
 ### Later (agreed, not scheduled)
 
