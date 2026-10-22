@@ -1104,6 +1104,15 @@ replacement, one ASCII line, max 500 chars). Allowed-apps checks still use the a
 v0.21.1: the User-Agent actually sent upstream is recorded (requests.sent_user_agent, only when a rule changed
 it) and shown under the app's own on the Requests page; both copy to the clipboard on click.
 
+### Later (agreed, not scheduled)
+
+- **Separate embedding slots per limit pool.** ArliAI (and others) count `/v1/embeddings` against its
+  own parallel limit (Pro: 2 chat + 2 embedding), but QueueRouter queues embeddings in the chat slots,
+  so an indexing burst (Continue / Roo / Kilo codebase indexing, RAG in our own apps) makes chat wait
+  needlessly. Plan: an optional `embedding_concurrency` per pool (blank = shared with chat, as now),
+  a second SlotQueue per pool for `/v1/embeddings`, shown on the dashboard/metrics; plan presets fill
+  it (ArliAI 2). opencode itself doesn't use embeddings (it searches with grep/LSP tools).
+
 ---
 
 ## 21. Open questions
