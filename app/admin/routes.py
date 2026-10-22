@@ -961,12 +961,16 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         monthly_price = _opt(form, "monthly_price", float, 0)
         if plan and monthly_price is None:
             monthly_price = plan.monthly_price
+        embeddings = int_field(form, "embedding_concurrency", 1, 1000)  # blank = shared with chat
+        if plan and embeddings is None and "embedding_concurrency" not in form:
+            embeddings = plan.embedding_concurrency
         return {
             "plan": f"ArliAI {plan.name}" if plan else (str(form.get("plan_label", "")).strip() or None),
             "max_concurrency": concurrency,
             "context_cap": context_cap,
             "min_spacing_ms": int_field(form, "min_spacing_ms", 0, 600_000, 0),
             "monthly_price": monthly_price,
+            "embedding_concurrency": embeddings,
         }
 
     @app.get("/admin/upstreams")

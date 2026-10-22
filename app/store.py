@@ -371,6 +371,10 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX compaction_summaries_client ON compaction_summaries (client);
     """,
+    # 23: a separate parallel limit for /v1/embeddings per pool (blank = shared with chat)
+    """
+    ALTER TABLE limit_pools ADD COLUMN embedding_concurrency INTEGER;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -437,6 +441,7 @@ class Pool:
     context_cap: int | None
     min_spacing_ms: int
     monthly_price: float | None = None  # plan fee, for "savings vs official prices"
+    embedding_concurrency: int | None = None  # /v1/embeddings get their own slots (None = shared with chat)
 
 
 @dataclass(frozen=True)
@@ -798,6 +803,7 @@ class Store:
                 r["context_cap"],
                 r["min_spacing_ms"],
                 r["monthly_price"],
+                r["embedding_concurrency"],
             )
             for r in self.query("SELECT * FROM limit_pools ORDER BY id")
         ]
@@ -836,18 +842,36 @@ class Store:
         context_cap: int | None = None,
         min_spacing_ms: int = 0,
         monthly_price: float | None = None,
+        embedding_concurrency: int | None = None,
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
                 "INSERT INTO limit_pools (name, plan, max_concurrency, context_cap, min_spacing_ms, monthly_price, "
-                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (name, plan, max_concurrency, context_cap, min_spacing_ms, monthly_price, time.time()),
+                "embedding_concurrency, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    name,
+                    plan,
+                    max_concurrency,
+                    context_cap,
+                    min_spacing_ms,
+                    monthly_price,
+                    embedding_concurrency,
+                    time.time(),
+                ),
             )
         self.audit(actor, "pool.create", name, {"max_concurrency": max_concurrency, "plan": plan})
         return cur.lastrowid
 
     def update_pool(self, pool_id: int, actor: str, **fields: object) -> None:
-        allowed = {"name", "plan", "max_concurrency", "context_cap", "min_spacing_ms", "monthly_price"}
+        allowed = {
+            "name",
+            "plan",
+            "max_concurrency",
+            "context_cap",
+            "min_spacing_ms",
+            "monthly_price",
+            "embedding_concurrency",
+        }
         self._update("limit_pools", pool_id, allowed, fields)
         self.audit(actor, "pool.update", str(pool_id), fields)
 

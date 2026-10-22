@@ -66,6 +66,8 @@ from a **web admin UI**.
   (in memory, or saved encrypted) and extended rather than rewritten, and updated in the background when a
   conversation near its limit goes quiet. An alias can also tell apps a bigger context than the model has
   (e.g. 1M), so opencode keeps the whole conversation while each request is fitted to the real model.
+- **Embedding slots**: a limit pool can give `/v1/embeddings` their own parallel limit (ArliAI counts them
+  separately; its plans fill it in), so an indexing burst never makes chat requests wait.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.

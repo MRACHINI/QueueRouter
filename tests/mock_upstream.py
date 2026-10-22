@@ -44,6 +44,24 @@ def create_mock(limit: int = 2) -> FastAPI:
         extra = [{"id": m, "object": "model"} for m in state.get("extra_models", [])]  # no size reported
         return {"object": "list", "data": [{"id": "mock-model", "object": "model", "max_model_len": 262144}, *extra]}
 
+    @app.post("/v1/embeddings")
+    async def embeddings(request: Request):
+        """Its own parallel counter (providers like ArliAI limit embeddings separately)."""
+        body = json.loads(await request.body())
+        state["embed_active"] = state.get("embed_active", 0) + 1
+        state["embed_peak"] = max(state.get("embed_peak", 0), state["embed_active"])
+        try:
+            await asyncio.sleep(body.get("mock_delay", 0.05))
+        finally:
+            state["embed_active"] -= 1
+        state["embedded"] = state.get("embedded", 0) + 1
+        return {
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+            "model": body.get("model"),
+            "usage": {"prompt_tokens": 3, "total_tokens": 3},
+        }
+
     @app.post("/v1/chat/completions")
     async def chat(request: Request):
         raw = await request.body()

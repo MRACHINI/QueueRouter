@@ -176,13 +176,15 @@ class SlotQueue:
 
     # -- introspection -------------------------------------------------------------------
 
+    # Pools with a negative id are a pool's separate embedding slots: not counted in these totals (the
+    # dashboard's "slots"), listed on their own in snapshot()["pools"].
     @property
     def active(self) -> int:
-        return sum(p.active for p in self._pools.values())
+        return sum(p.active for pid, p in self._pools.items() if pid >= 0)
 
     @property
     def max_concurrency(self) -> int:
-        return sum(p.capacity for p in self._pools.values())
+        return sum(p.capacity for pid, p in self._pools.items() if pid >= 0)
 
     @property
     def queued(self) -> int:
