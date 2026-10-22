@@ -33,6 +33,9 @@ from ..auth import AuthGuard, client_ip
 from ..backup import MAX_UPLOAD_BYTES, RestoreError, backup_path, list_backups, make_archive, stage_restore
 from ..compaction import MODES as COMPACT_MODES
 from ..config import ON_LIMIT, PRIORITIES, SECRET_TUNABLES, TUNABLES, Bootstrap, ClientPolicy, Settings
+from ..council import MAX_MEMBERS as COUNCIL_MAX
+from ..council import MODES as COUNCIL_MODES
+from ..council import WHEN as COUNCIL_WHEN
 from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
@@ -1206,6 +1209,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             triggers=TRIGGERS,
             default_triggers=DEFAULT_TRIGGERS,
             compact_modes=[m for m in COMPACT_MODES if m in ENABLED_COMPACT_MODES],
+            council_modes=COUNCIL_MODES,
+            council_when=COUNCIL_WHEN,
             upstreams=store.list_upstreams(),
             upstream_names=upstream_names,
             models=models,
@@ -1294,6 +1299,18 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         virtual_context = _opt(form, "virtual_context", int, 1024)
         if virtual_context is not None and virtual_context > 100_000_000:
             raise ValueError("virtual_context")
+        council = str(form.get("council", "off"))
+        members = tuple(
+            m.strip() for m in str(form.get("council_members", "")).replace("\n", ",").split(",") if m.strip()
+        )
+        judge = str(form.get("council_judge", "")).strip()
+        when = str(form.get("council_when", "planning"))
+        if council not in COUNCIL_MODES or when not in COUNCIL_WHEN or len(judge) > 200:
+            raise ValueError("council")
+        if any(len(m) > 200 for m in members) or len(members) > COUNCIL_MAX:
+            raise ValueError("council_members")
+        if council != "off" and len(members) < 2:
+            raise ValueError("council_members")  # a council needs at least two answers to compare
         return {
             "target_model": target,
             "upstream_ids": upstream_ids,
@@ -1304,6 +1321,10 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "compact": compact,
             "compact_model": compact_model,
             "virtual_context": virtual_context,
+            "council": council,
+            "council_members": members,
+            "council_judge": judge,
+            "council_when": when,
         }
 
     @app.post("/admin/aliases")

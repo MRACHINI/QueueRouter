@@ -1134,6 +1134,10 @@ so an agent clearing old tool output keeps its summary; background summaries at 
 v0.26.1: a streaming request that must wait for a summary is answered at once (headers, then SSE keep-alive
 comments) and served when the summary is ready — opencode gave up waiting for headers and retried; the waiting
 request shows as "compacting" in the Now table.
+v0.27.0: model council per alias (app/council.py): pick / combine, 2-5 members, judge (blank = target), on
+planning steps or every request; members and judge are internal requests through the queue (tag council), the
+client's own row records the decision and isn't usage; a council with no answering member falls back to the
+target; streaming answers start at once.
 
 ### Later (agreed, not scheduled)
 
@@ -1186,7 +1190,7 @@ request shows as "compacting" in the Now table.
   - *Shown:* Requests page "compacted 800k -> 150k" (mode, cache hit/miss); opencode's own token and
     cost numbers will show the full history. Needs a body limit big enough (MAX_BODY_MB, default 20).
   - *Depends on* the automatic context sizes item above (it must know each model's real limit).
-- **Model council (alias mode).** Agreed design (2026-10-22), not scheduled:
+- **Model council (alias mode)** (done: v0.27.0). Agreed design (2026-10-22):
   - *What:* an alias sends one request to several member models at once (non-streaming), then a judge
     model decides; the answer goes back in the normal format, so the app (opencode) doesn't know.
   - *Modes:* "pick" (the judge only names the best candidate: fast, and works for tool calls, which can't

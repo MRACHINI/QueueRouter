@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 
 from . import __version__, anthropic_api, content_log, metrics, responses_api, structured, tracing
 from . import compaction as compaction_mod
+from . import council as council_mod
 from . import cron as cron_mod
 from . import jobs as jobs_mod
 from .admin import AdminContext, mount_admin
@@ -127,6 +128,7 @@ class RequestLog:
             "user_agent": None,  # the calling app, as it identifies itself
             "sent_user_agent": None,  # what the provider saw instead, when changed by a User-Agent rule
             "compaction": None,  # e.g. "trim 812k -> 402k": the conversation was shrunk to fit (app/compaction.py)
+            "council": None,  # e.g. "pick 2/3: GLM-4.7": what a model council did (app/council.py)
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -762,6 +764,7 @@ def create_app(
                     "target_model": f["target_model"],
                     "tags": f["tags"],
                     "compaction": f["compaction"],
+                    "council": f.get("council"),
                     "position": f["position"],
                     "estimate": f.get("estimate"),
                     "path": f["path"],
@@ -1451,7 +1454,9 @@ def create_app(
 
     # -- compaction: summarise mode (see app/compaction.py) ---------------------------------
 
-    async def internal_completion(client: ClientKey, payload: dict, priority: str) -> bytes | None:
+    async def internal_completion(
+        client: ClientKey, payload: dict, priority: str, tag: str = "compaction"
+    ) -> bytes | None:
         """A chat completion through the normal pipeline (queue, limits, Requests page) as ``client``;
         the answer's body, or None if it failed."""
         scope = {
@@ -1470,7 +1475,7 @@ def create_app(
         headers = {
             "content-type": "application/json",
             "x-queuerouter-priority": priority,
-            "x-queuerouter-tags": "compaction",
+            "x-queuerouter-tags": tag,
         }
         try:
             response = await serve(
@@ -1480,9 +1485,11 @@ def create_app(
                 json.dumps(payload).encode(),
                 headers,
                 "",
+                allow_defer=False,
+                allow_council=False,
             )
-        except Exception as exc:  # a summary is an optimisation: never fail the user's request over it
-            log.warning(json.dumps({"event": "summary_failed", "client": client.name, "error": repr(exc)[:200]}))
+        except Exception as exc:  # summaries and council members are extras: never fail the user's request
+            log.warning(json.dumps({"event": f"{tag}_failed", "client": client.name, "error": repr(exc)[:200]}))
             return None
         if isinstance(response, StreamingResponse) or response.status_code != 200:
             return None
@@ -1590,6 +1597,125 @@ def create_app(
         shrunk = compaction_mod.with_summary(payload, plan)
         note = "summary updated" if extended else "new summary"
         return compaction_mod.Result(shrunk, before, estimate_prompt_tokens(shrunk), "summarise", False, note)
+
+    # -- model council (see app/council.py) -------------------------------------------------
+
+    async def run_council(request, client, alias, payload, request_headers, lane, tags, path, body, query) -> Response:
+        """Members answer at once (internal requests, tagged "council"), the judge picks one or writes the
+        answer. A streaming app gets its response headers at once and keep-alives meanwhile."""
+        priority = LANE_NAMES[lane]
+        stream = payload.get("stream") is True
+        rlog = RequestLog(
+            f"qr-{uuid.uuid4().hex[:12]}", "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies)
+        )
+        rlog.fields.update(
+            client=client.name,
+            user_agent=(request_headers.get("user-agent") or "")[:300] or None,
+            priority=priority,
+            model=alias.name,
+            tags=",".join([*tags, "council"]),
+            stream=stream,
+            stage="council",
+        )
+        inflight[rlog.fields["id"]] = rlog  # "council…" in the Now table while members and judge work
+
+        async def work() -> tuple[bytes | None, Response | None]:
+            base = {k: v for k, v in payload.items() if k not in ("stream", "stream_options")}
+            members = alias.council_members[: council_mod.MAX_MEMBERS]
+            bodies = await asyncio.gather(
+                *(internal_completion(client, {**base, "model": m}, priority, "council") for m in members)
+            )
+            answered = [
+                (m, msg, b) for m, b in zip(members, bodies, strict=True) if b and (msg := council_mod.message_of(b))
+            ]
+            if not answered:
+                rlog.fields["council"] = f"no member answered: {alias.target_model} alone"
+                return None, None
+            if len(answered) == 1:
+                rlog.fields["council"] = f"only {answered[0][0]} answered"
+                return answered[0][2], None
+            judge = alias.council_judge or alias.target_model
+            candidates = [(m, msg) for m, msg, _ in answered]
+            if alias.council == "pick":
+                verdict = await internal_completion(
+                    client, council_mod.judge_payload(payload, judge, "pick", candidates), priority, "council"
+                )
+                said = (council_mod.message_of(verdict) or {}).get("content") if verdict else None
+                index = council_mod.parse_pick(said, len(answered))
+                rlog.fields["council"] = f"pick {index + 1}/{len(answered)}: {answered[index][0]}" + (
+                    "" if verdict else " (no verdict)"
+                )
+                return answered[index][2], None
+            judged = council_mod.judge_payload(payload, judge, "combine", candidates)
+            judge_headers = {**request_headers, "x-queuerouter-tags": ",".join([*tags, "council"])}
+            response = await serve(
+                request,
+                client,
+                path,
+                json.dumps(judged).encode(),
+                judge_headers,
+                query,
+                allow_defer=False,
+                allow_council=False,
+            )
+            rlog.fields["council"] = f"combine {len(answered)}: {judge}"
+            return None, response
+
+        def finish(ok: bool) -> None:
+            inflight.pop(rlog.fields["id"], None)
+            rlog.fields["target_model"] = alias.target_model
+            rlog.finish(stats, outcome="done" if ok else "error", status=200 if ok else 502)
+
+        async def fallback() -> Response:  # no member answered: the alias's own model, as without a council
+            return await serve(request, client, path, body, request_headers, query, allow_council=False)
+
+        if not stream:
+            try:
+                content, response = await work()
+            except Exception:
+                finish(False)
+                raise
+            if content is not None:
+                finish(True)
+                return Response(
+                    content,
+                    200,
+                    media_type="application/json",
+                    headers={"X-QueueRouter-Council": rlog.fields["council"] or ""},
+                )
+            finish(response is not None)
+            return response if response is not None else await fallback()
+
+        async def events() -> AsyncIterator[bytes]:
+            task = asyncio.ensure_future(work())
+            ok = False
+            try:
+                while not task.done():
+                    yield b": council: members are answering\n\n"
+                    await asyncio.wait({task}, timeout=max(1.0, cfg().keepalive_interval_s))
+                content, response = task.result()
+                ok = content is not None or response is not None
+            except Exception as exc:
+                log.warning(json.dumps({"event": "council_failed", "error": repr(exc)[:200]}))
+                content, response = None, None
+            finally:
+                finish(ok)
+            if content is not None:
+                yield council_mod.as_stream(content, alias.target_model)
+                return
+            if response is None:
+                response = await fallback()
+            if isinstance(response, StreamingResponse):
+                async for chunk in response.body_iterator:
+                    yield chunk if isinstance(chunk, bytes) else chunk.encode()
+            elif response.status_code >= 400:
+                yield b"data: " + bytes(response.body).replace(b"\n", b" ") + b"\n\n"
+            else:
+                yield council_mod.as_stream(bytes(response.body), alias.target_model)
+
+        return StreamingResponse(
+            events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        )
 
     summarising: set[str] = set()  # conversations whose summary is being extended in the background
 
@@ -2218,6 +2344,7 @@ def create_app(
         headers: dict[str, str] | None = None,
         query: str | None = None,
         allow_defer: bool = True,
+        allow_council: bool = True,
     ) -> Response:
         """Everything after authentication: policies, aliases/fallbacks, queueing, forwarding.
         Used by the API and by the admin Playground (which passes its own clean ``headers``).
@@ -2239,6 +2366,14 @@ def create_app(
         no_fallbacks = not (alias and alias.fallbacks)  # with fallbacks, a missing target just moves on
         if cfg().unknown_model_check and no_fallbacks and (missing := unknown_model(target_model, alias)) is not None:
             return missing
+        if allow_council and alias and alias.council != "off" and isinstance(payload, dict):
+            lane = request_lane(request_headers, client)
+            auto = "opencode" if "x-opencode-session-id" in request_headers else None
+            tags = parse_tags(client.policy.tags, request_headers.get("x-queuerouter-tags"), auto)
+            if council_mod.applies(alias, payload, tags, lane == LANES["low"]):
+                return await run_council(
+                    request, client, alias, payload, request_headers, lane, tags, path, body, query
+                )
         # The chain: the requested model (or the alias's target), then the alias's fallbacks.
         chain = [target_model, *(alias.fallbacks if alias else ())]
         triggers = frozenset(alias.fallback_on) if alias and alias.fallbacks else frozenset()

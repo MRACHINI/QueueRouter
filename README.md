@@ -68,6 +68,11 @@ from a **web admin UI**.
   (e.g. 1M), so opencode keeps the whole conversation while each request is fitted to the real model.
 - **Embedding slots**: a limit pool can give `/v1/embeddings` their own parallel limit (ArliAI counts them
   separately; its plans fill it in), so an indexing burst never makes chat requests wait.
+- **Model council** (per alias): on planning steps (the first step after your message, or opencode's plan
+  agent) several models answer at once and a judge either **picks** the best answer or **combines** them into
+  one; tool steps use the alias's model alone. Mix providers so a council doesn't take all of one account's
+  slots. Streaming apps get their response at once (keep-alives while members work); the Requests page shows
+  "council: pick 2/3: GLM-4.7", and the members' and judge's requests are tagged `#council`.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.
