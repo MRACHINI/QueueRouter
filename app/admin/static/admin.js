@@ -554,8 +554,9 @@ function liveRequests(root) {
         line.append(el("span", "badge", `compacted: ${r.compaction}`));
         model.append(line);
       }
-      const queued = r.stage === "queued";
-      const status = queued ? `queued${r.position ? ` #${r.position}` : ""}` : "running";
+      const compacting = r.stage === "compacting"; // waiting for its conversation's summary
+      const queued = r.stage === "queued" || compacting;
+      const status = compacting ? "compacting…" : queued ? `queued${r.position ? ` #${r.position}` : ""}` : "running";
       const outcome = td("Outcome", el("strong", queued ? "muted" : "", status));
       if (r.retries) outcome.append(el("span", "muted small", ` · ${r.retries} retries`));
       if (r.error) {

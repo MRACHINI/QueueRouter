@@ -82,6 +82,7 @@ def create_mock(limit: int = 2) -> FastAPI:
         if str(first.get("content", "")).startswith("You compact the history"):
             state.setdefault("summary_inputs", []).append(body["messages"][1]["content"])
             body["mock_content"] = f"summary {len(state['summary_inputs'])}"
+            body["mock_delay"] = state.get("summary_delay", 0.05)  # per chunk of 5: a slow summariser
         if body.get("mock_status"):
             return JSONResponse({"error": {"message": "forced"}}, status_code=body["mock_status"])
         key = body.get("mock_key")

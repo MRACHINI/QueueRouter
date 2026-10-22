@@ -746,7 +746,7 @@ def create_app(
                     "client": f["client"],
                     "model": f["target_model"] or f["model"],
                     "upstream": f["upstream"],
-                    "stage": "queued" if f["queue_ms"] is None else "running",
+                    "stage": f.get("stage") or ("queued" if f["queue_ms"] is None else "running"),
                     "elapsed_ms": round(elapsed * 1000),
                     "queue_ms": f["queue_ms"],
                     "ttft_ms": f["ttft_ms"],
@@ -1548,6 +1548,7 @@ def create_app(
         priority: str,
         start_at: float = compaction_mod.START_AT,
         background: bool = False,
+        write: bool = True,
     ) -> compaction_mod.Result | None:
         """Summarise mode: reuse the conversation's summary while the request stays under ``start_at`` of
         the context, else extend it (down to about half). With ``background``, a request that still fits
@@ -1565,6 +1566,8 @@ def create_app(
             current = compaction_mod.with_summary(payload, previous) if previous is not None else payload
             if previous is not None and not compaction_mod.needed(current, context, output, start_at):
                 return compaction_mod.Result(current, before, estimate_prompt_tokens(current), "summarise", True)
+            if not write:  # only use what exists (the deferred retry): trim takes over otherwise
+                return None
             if background and key and not compaction_mod.needed(current, context, output, compaction_mod.BLOCK_AT):
                 if key not in summarising:  # one background update per conversation
                     summarising.add(key)
@@ -1589,6 +1592,61 @@ def create_app(
         return compaction_mod.Result(shrunk, before, estimate_prompt_tokens(shrunk), "summarise", False, note)
 
     summarising: set[str] = set()  # conversations whose summary is being extended in the background
+
+    def summary_would_block(client: ClientKey, session: str | None, payload: dict, context: int, output: int) -> bool:
+        """Whether this request would have to wait for a summary to be written (see summarise_request)."""
+        if not compaction_mod.needed(payload, context, output):
+            return False
+        messages = payload["messages"]
+        key = compaction_mod.conversation_key(client.name, session, messages)
+        if key and summary_locks[key].locked():
+            return True  # another request of this conversation is writing one: we'd wait for it
+        previous = load_summary(key)
+        current = payload
+        if previous is not None and previous.matches(messages):
+            current = compaction_mod.with_summary(payload, previous)
+            if not compaction_mod.needed(current, context, output):
+                return False
+        return not key or compaction_mod.needed(current, context, output, compaction_mod.BLOCK_AT)
+
+    def deferred_response(request, client, path, body, headers, query, write, model, priority) -> StreamingResponse:
+        """Answer a streaming request at once and keep the connection alive (SSE comments, which apps
+        ignore) while its summary is written, then serve it normally and pass its stream on. Without this
+        the app sees no response headers for a minute or more, gives up and retries."""
+
+        async def stream() -> AsyncIterator[bytes]:
+            request_id = f"qr-{uuid.uuid4().hex[:12]}"
+            placeholder = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies))
+            placeholder.fields.update(
+                client=client.name, model=model, priority=priority, stream=True, stage="compacting"
+            )
+            placeholder.fields["user_agent"] = ((headers or dict(request.headers)).get("user-agent") or "")[
+                :300
+            ] or None
+            inflight[request_id] = placeholder  # shown as "compacting" in the Now table, never logged itself
+            task = asyncio.ensure_future(write())  # finishes even if the app goes away: the summary is kept
+            try:
+                while not task.done():
+                    yield b": compacting the conversation to fit the model (writing a summary)\n\n"
+                    await asyncio.wait({task}, timeout=max(1.0, cfg().keepalive_interval_s))
+            finally:
+                inflight.pop(request_id, None)
+            with contextlib.suppress(Exception):
+                task.result()
+            response = await serve(request, client, path, body, headers, query, allow_defer=False)
+            if isinstance(response, StreamingResponse):
+                async for chunk in response.body_iterator:
+                    yield chunk if isinstance(chunk, bytes) else chunk.encode()
+            elif response.status_code >= 400:  # headers are sent: an error goes out as a stream event
+                yield b"data: " + bytes(response.body).replace(b"\n", b" ") + b"\n\n"
+            else:
+                yield bytes(response.body)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-QueueRouter-Compacting": "summary"},
+        )
 
     async def background_summary(key, client, session, payload, context, output, alias, step_model, priority) -> None:
         try:
@@ -2159,9 +2217,12 @@ def create_app(
         body: bytes,
         headers: dict[str, str] | None = None,
         query: str | None = None,
+        allow_defer: bool = True,
     ) -> Response:
         """Everything after authentication: policies, aliases/fallbacks, queueing, forwarding.
-        Used by the API and by the admin Playground (which passes its own clean ``headers``)."""
+        Used by the API and by the admin Playground (which passes its own clean ``headers``).
+        ``allow_defer``: a streaming request that must wait for a summary is answered at once (see
+        deferred_response) and served again once the summary is ready."""
         if unavailable := not_configured() or mode_refusal():
             return unavailable
         request_headers = headers if headers is not None else dict(request.headers)
@@ -2210,8 +2271,34 @@ def create_app(
                 if alias.compact == "summarise" and isinstance(step_payload.get("messages"), list):
                     priority = LANE_NAMES[request_lane(request_headers, client)]
                     full = step_payload
+                    if (
+                        allow_defer
+                        and step_payload.get("stream") is True
+                        and summary_would_block(client, session, step_payload, context, output)
+                    ):
+                        write = functools.partial(
+                            summarise_request,
+                            client,
+                            session,
+                            step_payload,
+                            context,
+                            output,
+                            alias,
+                            step_model,
+                            priority,
+                        )
+                        return deferred_response(request, client, path, body, headers, query, write, model, priority)
                     result = await summarise_request(
-                        client, session, step_payload, context, output, alias, step_model, priority, background=True
+                        client,
+                        session,
+                        step_payload,
+                        context,
+                        output,
+                        alias,
+                        step_model,
+                        priority,
+                        background=True,
+                        write=allow_defer or not step_payload.get("stream"),
                     )
                     watch_idle(client, session, full, result, context, output, alias, step_model)
                 if result is None:  # trim mode, or a summary couldn't be written: trim instead
