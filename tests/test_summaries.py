@@ -187,3 +187,33 @@ async def test_summary_survives_cleared_tool_output(make_stack):
         assert r.status_code == 200
         assert "new summary" not in r.headers.get("x-queuerouter-compacted", "")
         assert len(stack.mock["summary_inputs"]) == 1
+
+
+async def test_streaming_request_answered_while_summary_is_written(make_stack):
+    """opencode gives up when response headers take too long: they go out at once, keep-alives follow
+    while the summary is written, then the real answer streams."""
+    import time
+
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0, compaction_idle_update=False)
+    stack.mock["extra_models"] = ["small-model"]
+    stack.mock["summary_delay"] = 0.5  # 2.5 s per summary
+    async with httpx.AsyncClient(base_url=stack.url, timeout=60) as c:
+        await setup_alias(c, stack, compact_model="mock-model")
+        payload = {"model": "sum", "messages": conversation(14), "stream": True}
+        start = time.monotonic()
+        async with c.stream("POST", "/v1/chat/completions", headers={**stack.headers, **SESSION}, json=payload) as r:
+            headers_after = time.monotonic() - start
+            assert r.status_code == 200 and r.headers["x-queuerouter-compacting"] == "summary"
+            chunks = []
+            seen_compacting = False
+            async for chunk in r.aiter_text():
+                chunks.append(chunk)
+                if not seen_compacting:
+                    live = (await c.get("/admin/api/stats")).json()["inflight"]
+                    seen_compacting = any(row["stage"] == "compacting" for row in live)
+        text = "".join(chunks)
+    assert headers_after < 1.5  # not after the summary
+    assert seen_compacting
+    assert text.startswith(": compacting the conversation") and "data: [DONE]" in text
+    assert len(stack.mock["summary_inputs"]) == 1
+    assert json.loads(stack.mock["last_body"])["messages"][1]["content"].endswith("summary 1")

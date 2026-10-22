@@ -1131,6 +1131,9 @@ v0.26.0: Requests page "Now" table — queued and running requests live with the
 the finished list refreshes in place). Compaction: conversations recognised by structure (tool results by call id),
 so an agent clearing old tool output keeps its summary; background summaries at low priority; summaries up to
 8,000 tokens with a ~2,500-word guide.
+v0.26.1: a streaming request that must wait for a summary is answered at once (headers, then SSE keep-alive
+comments) and served when the summary is ready — opencode gave up waiting for headers and retried; the waiting
+request shows as "compacting" in the Now table.
 
 ### Later (agreed, not scheduled)
 
