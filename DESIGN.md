@@ -1121,18 +1121,42 @@ pinned upstreams); model IDs are unchanged.
   the Models page (also fixes wrong reported values); (3) rewrite every provider's overflow error into the
   standard 400 `context_length_exceeded`, so opencode compacts and retries. Verify on opencode 2.1.2 that it
   compacts on that error (it does compact on token usage).
-- **Compaction in QueueRouter (opt-in per alias/model).** When a conversation is bigger than the chosen
-  model (e.g. 800k history after switching from a 1M model to a 200k one), QueueRouter shrinks it itself:
-  first trim old tool outputs and middle messages; or summarise the old part with a big-context
-  "compaction model" (opencode's own compaction would use the small model and overflow too). The summary
-  is cached per session by a hash of the replaced message prefix (history is append-only), so later
-  turns reuse it instead of summarising again. Shown on the Requests page (compacted: 800k -> 150k).
-  "Virtual context": such an alias can advertise a big context to opencode (e.g. 1M, or the biggest model
-  used) while each request is compacted to fit the model it actually goes to, so you keep working across
-  models without opencode compacting. Rolling summaries: each compaction reads only the previous summary +
-  the newly-old part, so the compaction model never needs the whole history. Compact in steps (at ~80% of
-  the target model, down to ~50%) so the prefix stays stable between compactions and provider prompt
-  caching keeps working. Needs a body limit big enough for the full history (1M tokens is several MB).
+- **Compaction in QueueRouter (opt-in per alias/model).** Agreed design (from discussion, 2026-10-22):
+  - *Why here:* after switching e.g. from a 1M model to a 200k one with 800k of history, opencode's own
+    compaction would use the small model and overflow too; QueueRouter can use another model.
+  - *When:* decided per request, on the whole request (history + current message + system prompt + tools
+    + room for the answer) against the limit of the model it is about to go to. Compact at ~80% of that
+    limit down to ~50%, in steps, so the start of the request stays the same between compactions and
+    provider prompt caching keeps working. The same conversation goes in full to a model it fits.
+  - *Kept in full:* the current message, system prompt, tool definitions and the last few turns. If the
+    current message alone doesn't fit: the alias's fallback to a bigger model, else the standard
+    `context_length_exceeded` error. Single oversized old messages (giant logs) are trimmed (start + end).
+  - *Modes:* "trim" (old tool outputs first, then old middle messages, with a marker; no model calls, no
+    cache needed) and "summarise" with a chosen "compaction model". The summary is general (what was done,
+    decisions, files changed, open problems), not tailored to the current question, so it can be reused.
+  - *Rolling + chunked:* each update reads the previous summary + the newly-old part only. A compaction
+    model smaller than the history works by reading it in chunks that fit (~150k for a 200k model), one
+    after another with the running summary (not in parallel: chunks summarised blind muddle decisions).
+    Only the first compaction of a big history is slow (a 1M history = ~6-7 calls); later ones are small.
+  - *Cache:* per session, keyed by a hash of the summarised message prefix (history is append-only);
+    hits swap the summary in with no model call. Undo/edit/revert or opencode's own compaction: reuse the
+    longest prefix that still matches, summarise the rest. Not caching (or a 10 s cache) would summarise
+    on most of the 10-30 requests one agent message makes: slow, costly, a shifting past, no prompt
+    caching. Default: in memory only, idle timeout ~1 h (configurable, resets on each request), least
+    recently used dropped first; a "saved" option keeps them in the DB encrypted, with retention, deleted
+    with the client. (Memory-only vs saved: a setting; default memory.)
+  - *Idle update:* when a session has been quiet ~30-60 s after its last answer and is above ~70% of its
+    model's limit, update (not replace) the summary in the background so the next message doesn't wait.
+    Low-priority lane only, once per idle period, only recently active sessions, recent turns untouched.
+    Skipped below ~70%: moving the summary boundary early would reset provider prompt caching for nothing.
+  - *Virtual context:* such an alias can advertise a big context to opencode so it doesn't compact early;
+    each request is fitted to the model it actually goes to. Recommended: the biggest real model's size
+    (1M). Bigger (e.g. 5M) works technically with rolling summaries but opencode uploads the full history
+    every message (5M tokens = 20 MB+), the model still only sees summary + recent turns, and opencode
+    itself slows down; past the virtual size, opencode compacts on its own with the 1M alias.
+  - *Shown:* Requests page "compacted 800k -> 150k" (mode, cache hit/miss); opencode's own token and
+    cost numbers will show the full history. Needs a body limit big enough (MAX_BODY_MB, default 20).
+  - *Depends on* the automatic context sizes item above (it must know each model's real limit).
 
 ---
 
