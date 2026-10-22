@@ -1183,6 +1183,19 @@ so an agent clearing old tool output keeps its summary; background summaries at 
   - *Shown:* Requests page "compacted 800k -> 150k" (mode, cache hit/miss); opencode's own token and
     cost numbers will show the full history. Needs a body limit big enough (MAX_BODY_MB, default 20).
   - *Depends on* the automatic context sizes item above (it must know each model's real limit).
+- **Model council (alias mode).** Agreed design (2026-10-22), not scheduled:
+  - *What:* an alias sends one request to several member models at once (non-streaming), then a judge
+    model decides; the answer goes back in the normal format, so the app (opencode) doesn't know.
+  - *Modes:* "pick" (the judge only names the best candidate: fast, and works for tool calls, which can't
+    be merged meaningfully) and "combine" (the judge writes a merged answer: for plans and explanations).
+  - *Only on planning steps:* the first step after a user message, or opencode's plan agent (tags it already
+    sends, e.g. #agent:plan); ordinary tool steps (read a file, run a command) go to one model as usual.
+  - *Members across providers* (e.g. ArliAI + OpenCode + Gemini), so a council doesn't take all of one
+    account's slots (3 members + judge = 4 calls per step); member calls go through the normal queue
+    (internal requests, like summaries), tagged "council".
+  - *Costs:* you wait for the slowest member plus the judge, nothing streams meanwhile (keep-alive comments
+    hold the connection); several times the tokens.
+  - *Shown:* the Requests page lists each member's call and the judge's choice.
 
 ---
 
