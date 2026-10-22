@@ -549,14 +549,16 @@ function liveRequests(root) {
       const model = td("Model", r.requested_model || r.model || "—");
       model.classList.add("wrap-any");
       if (r.target_model) model.append(" ", el("span", "muted small", `→ ${r.target_model}`));
-      if (r.compaction) {
+      for (const [key, label] of [["compaction", "compacted"], ["council", "council"]]) {
+        if (!r[key]) continue;
         const line = el("div", "small");
-        line.append(el("span", "badge", `compacted: ${r.compaction}`));
+        line.append(el("span", "badge", `${label}: ${r[key]}`));
         model.append(line);
       }
-      const compacting = r.stage === "compacting"; // waiting for its conversation's summary
-      const queued = r.stage === "queued" || compacting;
-      const status = compacting ? "compacting…" : queued ? `queued${r.position ? ` #${r.position}` : ""}` : "running";
+      // waiting for its conversation's summary, or for its council's members and judge
+      const waiting = r.stage === "compacting" || r.stage === "council";
+      const queued = r.stage === "queued" || waiting;
+      const status = waiting ? `${r.stage}…` : queued ? `queued${r.position ? ` #${r.position}` : ""}` : "running";
       const outcome = td("Outcome", el("strong", queued ? "muted" : "", status));
       if (r.retries) outcome.append(el("span", "muted small", ` · ${r.retries} retries`));
       if (r.error) {

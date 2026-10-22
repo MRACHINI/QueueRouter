@@ -83,6 +83,15 @@ def create_mock(limit: int = 2) -> FastAPI:
             state.setdefault("summary_inputs", []).append(body["messages"][1]["content"])
             body["mock_content"] = f"summary {len(state['summary_inputs'])}"
             body["mock_delay"] = state.get("summary_delay", 0.05)  # per chunk of 5: a slow summariser
+        # Model council: the judge's prompt (pick: answer with a number; combine: an answer), and members
+        # that say who they are.
+        last_message = (body.get("messages") or [{}])[-1]
+        if str(last_message.get("content", "")).startswith("[QueueRouter council]"):
+            state.setdefault("judge_inputs", []).append(last_message["content"])
+            picking = "number of the best" in last_message["content"]
+            body["mock_content"] = state.get("judge_answer", "2") if picking else "combined answer"
+        elif state.get("echo_model"):
+            body.setdefault("mock_content", f"answer from {body.get('model')}")
         if body.get("mock_status"):
             return JSONResponse({"error": {"message": "forced"}}, status_code=body["mock_status"])
         key = body.get("mock_key")
@@ -108,7 +117,7 @@ def create_mock(limit: int = 2) -> FastAPI:
             return JSONResponse({"error": {"message": "Request blocked by content policy"}}, status_code=400)
         refuse = model in body.get("mock_refuse_models", [])
         messages = body.get("messages") or [{}]
-        if body.get("tools") and messages[-1].get("role") == "user":
+        if body.get("tools") and body.get("tool_choice") != "none" and messages[-1].get("role") == "user":
             return _tool_call(body)  # agents: call the first tool
         if messages[-1].get("role") == "tool":
             tag = f"tool said {messages[-1].get('content')}"

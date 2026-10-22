@@ -375,6 +375,14 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE limit_pools ADD COLUMN embedding_concurrency INTEGER;
     """,
+    # 24: model council per alias (off / pick / combine, members, judge, when) and what it did per request
+    """
+    ALTER TABLE aliases ADD COLUMN council TEXT NOT NULL DEFAULT 'off';
+    ALTER TABLE aliases ADD COLUMN council_members TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE aliases ADD COLUMN council_judge TEXT NOT NULL DEFAULT '';
+    ALTER TABLE aliases ADD COLUMN council_when TEXT NOT NULL DEFAULT 'planning';
+    ALTER TABLE requests ADD COLUMN council TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -418,6 +426,7 @@ REQUEST_COLUMNS = (
     "user_agent",
     "sent_user_agent",
     "compaction",
+    "council",
 )
 
 
@@ -506,6 +515,10 @@ class Alias:
     compact: str = "off"  # off / trim / summarise: shrink conversations too big for the model (app/compaction.py)
     compact_model: str = ""  # writes the summaries ("summarise"); blank = the target model
     virtual_context: int | None = None  # context size told to apps (opencode); None = the real one
+    council: str = "off"  # off / pick / combine: several models answer, a judge decides (app/council.py)
+    council_members: tuple[str, ...] = ()
+    council_judge: str = ""  # blank = the target model
+    council_when: str = "planning"  # planning / always
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -1029,8 +1042,8 @@ class Store:
                         f"INSERT OR IGNORE INTO requests ({', '.join(REQUEST_COLUMNS)}) VALUES ({placeholders})",
                         tuple(int(row[c]) if c == "stream" else row.get(c) for c in REQUEST_COLUMNS),
                     )
-                if row.get("outcome") == "refused":  # turned away before any work: logged, not usage
-                    continue
+                if row.get("outcome") == "refused" or row.get("council"):
+                    continue  # turned away before any work, or a council (its members and judge are usage)
                 day = time.strftime("%Y-%m-%d", time.gmtime(row["ts"]))
                 db.execute(
                     "INSERT INTO usage_daily (day, client, model, upstream, requests, errors, prompt_tokens, "
@@ -1204,6 +1217,10 @@ class Store:
                 r["compact"] or "off",
                 r["compact_model"] or "",
                 r["virtual_context"],
+                r["council"] or "off",
+                tuple(json.loads(r["council_members"] or "[]")),
+                r["council_judge"] or "",
+                r["council_when"] or "planning",
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1221,11 +1238,16 @@ class Store:
         compact: str = "off",
         compact_model: str = "",
         virtual_context: int | None = None,
+        council: str = "off",
+        council_members: tuple[str, ...] = (),
+        council_judge: str = "",
+        council_when: str = "planning",
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
                 "INSERT INTO aliases (name, target_model, upstream_ids, notes, params, fallbacks, fallback_on, "
-                "compact, compact_model, virtual_context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "compact, compact_model, virtual_context, council, council_members, council_judge, council_when, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     target_model,
@@ -1237,6 +1259,10 @@ class Store:
                     compact,
                     compact_model,
                     virtual_context,
+                    council,
+                    json.dumps(list(council_members)),
+                    council_judge,
+                    council_when,
                     time.time(),
                 ),
             )
@@ -1249,11 +1275,19 @@ class Store:
         return cur.lastrowid
 
     def update_alias(self, alias_id: int, actor: str, **fields: object) -> None:
-        for name in ("upstream_ids", "fallbacks", "fallback_on"):
+        for name in ("upstream_ids", "fallbacks", "fallback_on", "council_members"):
             if name in fields:
                 fields[name] = json.dumps(list(fields[name]))
         allowed = {"target_model", "upstream_ids", "enabled", "notes", "params", "fallbacks", "fallback_on"}
-        allowed |= {"compact", "compact_model", "virtual_context"}
+        allowed |= {
+            "compact",
+            "compact_model",
+            "virtual_context",
+            "council",
+            "council_members",
+            "council_judge",
+            "council_when",
+        }
         self._update("aliases", alias_id, allowed, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)
 
