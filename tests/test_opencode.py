@@ -45,7 +45,10 @@ async def test_opencode_config(make_stack):
         await add_alias(c, "smart", "mock-model")
         models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
         assert models["mock-model"]["limit"]["context"] == 32_768
-        assert models["smart"] == {"name": "smart → mock-model", "limit": {"context": 32_768, "output": 16_384}}
+        assert models["smart"] == {
+            "name": "smart → mock-model · upstream",
+            "limit": {"context": 32_768, "output": 16_384},
+        }
 
         # only allowed models are offered
         await set_policy(c, stack, allowed_models="smart")
@@ -119,3 +122,20 @@ async def test_config_etag_for_live_refresh(make_stack):
         changed = await c.get("/v1/opencode-config", headers={**stack.headers, "If-None-Match": tag})
         assert changed.status_code == 200 and changed.headers["etag"] != tag
         assert "fresh" in changed.json()["provider"]["queuerouter"]["models"]
+
+
+async def test_model_names_show_providers(make_stack, make_mock):
+    from tests.test_upstreams import add_upstream
+
+    stack = make_stack(bootstrap=OWNER)
+    second_url, _ = make_mock()
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await add_upstream(c, "second", second_url)
+        second = next(u for u in stack.app.state.store.list_upstreams() if u.name == "second")
+        await add_alias(c, "pinned", "mock-model", upstream_ids=(second.id,))
+        await add_alias(c, "ghost", "not-served")
+        models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
+    assert models["mock-model"]["name"] == "mock-model · upstream, second"  # the ID itself is unchanged
+    assert models["pinned"]["name"] == "pinned → mock-model · second"
+    assert models["ghost"]["name"] == "ghost → not-served · upstream, second"  # where it would be sent

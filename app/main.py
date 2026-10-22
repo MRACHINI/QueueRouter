@@ -1135,26 +1135,41 @@ def create_app(
             await asyncio.gather(*(refresh_catalog(t) for t in stale))
         entries: dict[str, dict] = {}
         caps: dict[str, list[int | None]] = {}
+        offered_by: dict[str, list[str]] = {}  # model -> upstream names, shown in opencode's model list
         for target in targets:
             for model in catalogs.models(target.id):
                 entries.setdefault(model["id"], model)
                 caps.setdefault(model["id"], []).append(target.pool.context_cap)
+                offered_by.setdefault(model["id"], []).append(target.upstream.name)
         allowed = client.policy.allowed_models
         result: dict[str, dict] = {}
         for model_id, entry in sorted(entries.items()):
             if not allowed or model_id in allowed:
                 limits = model_limits(entry, caps[model_id])
-                result[model_id] = {"name": model_id, **({"limit": limits} if limits else {})}
+                name = with_providers(model_id, offered_by[model_id])
+                result[model_id] = {"name": name, **({"limit": limits} if limits else {})}
         for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
             if allowed and alias.name not in allowed and alias.target_model not in allowed:
                 continue
             pinned = [t for t in targets if not alias.upstream_ids or t.id in alias.upstream_ids]
             limits = model_limits(entries.get(alias.target_model), [t.pool.context_cap for t in pinned])
             result[alias.name] = {
-                "name": f"{alias.name} → {alias.target_model}",
+                "name": with_providers(
+                    f"{alias.name} → {alias.target_model}",
+                    [t.upstream.name for t in pinned if t.upstream.name in offered_by.get(alias.target_model, [])]
+                    or [t.upstream.name for t in pinned],
+                ),
                 **({"limit": limits} if limits else {}),
             }
         return result
+
+    def with_providers(label: str, upstreams: list[str]) -> str:
+        """``model · nvidia, arliai``: which upstreams serve it (the model ID itself stays as it is)."""
+        names = list(dict.fromkeys(upstreams))
+        if not names:
+            return label
+        shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
+        return f"{label} · {shown}"
 
     @app.get("/v1/opencode-config")
     async def opencode_config(request: Request):

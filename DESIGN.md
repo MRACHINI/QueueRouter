@@ -1103,6 +1103,8 @@ with {original} {client} {priority} {model} {upstream} {version}; client overrid
 replacement, one ASCII line, max 500 chars). Allowed-apps checks still use the app's own User-Agent.
 v0.21.1: the User-Agent actually sent upstream is recorded (requests.sent_user_agent, only when a rule changed
 it) and shown under the app's own on the Requests page; both copy to the clipboard on click.
+v0.21.2: opencode model names show which upstreams serve them (`model · nvidia, arliai`, aliases by their
+pinned upstreams); model IDs are unchanged.
 
 ### Later (agreed, not scheduled)
 
