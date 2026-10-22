@@ -755,6 +755,16 @@ def create_app(
                     "error": f["error"],
                     "user_agent": f["user_agent"],
                     "sent_user_agent": f["sent_user_agent"],
+                    # the rest is for the Requests page's live "Now" table (same columns as its list)
+                    "ts": time.time() - elapsed,
+                    "priority": f["priority"],
+                    "requested_model": f["model"],
+                    "target_model": f["target_model"],
+                    "tags": f["tags"],
+                    "compaction": f["compaction"],
+                    "position": f["position"],
+                    "estimate": f.get("estimate"),
+                    "path": f["path"],
                 }
             )
         rows.sort(key=lambda r: -r["elapsed_ms"])
@@ -1559,7 +1569,7 @@ def create_app(
                 if key not in summarising:  # one background update per conversation
                     summarising.add(key)
                     asyncio.ensure_future(
-                        background_summary(key, client, session, payload, context, output, alias, step_model, priority)
+                        background_summary(key, client, session, payload, context, output, alias, step_model, "low")
                     )
                 after = estimate_prompt_tokens(current)
                 return compaction_mod.Result(current, before, after, "summarise", previous is not None, "updating")

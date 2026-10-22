@@ -18,10 +18,22 @@
   <a href="/admin/requests">reset</a>
 </form>
 
+<section id="requests-live" data-stream="/admin/api/live">
+<h2>Now <span class="badge" id="now-count">0</span> <span class="small muted">queued and running, live</span></h2>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Upstream</th><th>Status</th><th>Queue ms</th><th>First byte ms</th><th>Upstream ms</th><th>In tokens</th><th>Out tokens</th><th>Finish</th></tr></thead>
+  <tbody id="now-requests"><tr><td colspan="11" class="muted">Loading…</td></tr></tbody>
+</table>
+</div>
+</section>
+
+<h2>Finished</h2>
+
 <div class="table-wrap">
 <table class="cards">
   <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Upstream</th><th>Outcome</th><th>Queue ms</th><th>First byte ms</th><th>Upstream ms</th><th>In tokens</th><th>Out tokens</th><th>Finish</th></tr></thead>
-  <tbody>
+  <tbody id="finished-requests">
   {% for r in rows %}
   <tr>
     <td data-label="Time"><time data-ts="{{ r.ts }}">{{ r.ts | int }}</time></td>

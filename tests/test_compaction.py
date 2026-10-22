@@ -153,3 +153,22 @@ def test_estimate_calibration():
     stats.learn_ratio("m", 500, 5_000)  # too small to judge
     stats.learn_ratio("other", 10_000, 8_000)
     assert stats.ratio("other") == 1.0  # never trusted to be pessimistic
+
+
+async def test_requests_page_lists_queued_and_running(make_stack):
+    stack = make_stack(limit=1, bootstrap=OWNER)
+    slow = {"model": "mock-model", "messages": [{"role": "user", "content": "hi"}], "mock_delay": 0.4}
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        tasks = [
+            asyncio.ensure_future(c.post("/v1/chat/completions", headers=stack.headers, json=slow)) for _ in range(2)
+        ]
+        await asyncio.sleep(0.5)
+        await login(c, stack.url)
+        page = (await c.get("/admin/requests")).text
+        assert 'id="requests-live" data-stream="/admin/api/live"' in page and 'id="finished-requests"' in page
+        live = (await c.get("/admin/api/stats")).json()["inflight"]
+        assert sorted(r["stage"] for r in live) == ["queued", "running"]
+        row = live[0]
+        assert row["requested_model"] == "mock-model" and row["priority"] and row["ts"] > 0
+        assert row["path"] == "/v1/chat/completions" and row["estimate"] is not None
+        await asyncio.gather(*tasks)
