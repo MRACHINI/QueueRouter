@@ -73,6 +73,61 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
   <div class="align-end"><button type="submit">Add alias</button></div>
 </form>
 
+<h2 id="contexts">Context sizes</h2>
+<p class="muted small">How many tokens each model accepts. QueueRouter checks requests against it before queuing,
+and opencode is told it (so it compacts in time). It comes from the provider's model list; when a provider doesn't
+say, QueueRouter <strong>learns</strong> it from the provider's own "too long" error. Set it here by hand to fill a gap
+or correct a wrong value (applies on every upstream; a plan's context cap still applies on top).</p>
+<form method="post" action="/admin/model-limits" class="card row wrap">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input name="model" required list="model-ids" placeholder="model id" aria-label="Model" class="grow">
+  <input type="number" name="context" min="1024" placeholder="context tokens" aria-label="Context tokens">
+  <input type="number" name="output" min="1" placeholder="max output (optional)" aria-label="Max output tokens">
+  <button type="submit" class="secondary">Set</button>
+</form>
+{% set unknown = contexts | selectattr("context", "none") | list %}
+<details class="card" {% if contexts | selectattr("manual") | list %}open{% endif %}>
+  <summary><strong>{{ contexts | length }} models</strong>
+    {% if unknown %}<span class="badge">{{ unknown | length }} unknown</span>{% endif %}</summary>
+  <div class="table-wrap">
+  <table class="cards">
+    <thead><tr><th>Model</th><th>In use</th><th>Per upstream</th><th>Manual</th></tr></thead>
+    <tbody>
+    {% for c in contexts %}
+    <tr>
+      <td data-label="Model" class="mono small wrap-any">{{ c.model }}</td>
+      <td data-label="In use">{{ "{:,}".format(c.context) if c.context else "unknown" }}</td>
+      <td data-label="Per upstream" class="small">
+        {% for u in c.upstreams %}<div>{{ u.name }}:
+          {% if u.reported %}reports {{ "{:,}".format(u.reported) }}{% else %}<span class="muted">not reported</span>{% endif %}
+          {% if u.learned %}· <strong>learned {{ "{:,}".format(u.learned) }}</strong>
+            <form method="post" action="/admin/model-limits/forget" class="inline">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="upstream_id" value="{{ u.id }}">
+              <input type="hidden" name="model" value="{{ c.model }}">
+              <button type="submit" class="ghost small" title="Forget the learned size">forget</button>
+            </form>{% endif %}
+          {% if u.cap %}· plan cap {{ "{:,}".format(u.cap) }}{% endif %}</div>
+        {% endfor %}</td>
+      <td data-label="Manual">
+        <form method="post" action="/admin/model-limits" class="row wrap">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="model" value="{{ c.model }}">
+          <input type="number" name="context" min="1024" value="{{ c.manual.context if c.manual and c.manual.context else '' }}" placeholder="context" aria-label="Context tokens" class="price">
+          <input type="number" name="output" min="1" value="{{ c.manual.output if c.manual and c.manual.output else '' }}" placeholder="output" aria-label="Max output tokens" class="price">
+          <button type="submit" class="secondary">Save</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">No models loaded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="small muted">Empty both fields and Save to remove a manual size.</p>
+</details>
+
 <h2 id="pricing">Reference prices</h2>
 <p class="muted small">What your tokens would cost at official API prices (USD per million tokens), used for the
 cost and savings figures on the Usage page. Prices come from <a href="https://models.dev" rel="noopener">models.dev</a>:

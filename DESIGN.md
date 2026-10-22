@@ -1105,6 +1105,10 @@ v0.21.1: the User-Agent actually sent upstream is recorded (requests.sent_user_a
 it) and shown under the app's own on the Requests page; both copy to the clipboard on click.
 v0.21.2: opencode model names show which upstreams serve them (`model · nvidia, arliai`, aliases by their
 pinned upstreams); model IDs are unchanged.
+v0.22.0: context sizes learned from providers' overflow errors (per upstream + model) and set by hand per model
+(Models page > Context sizes); overflow errors from any provider rewritten to OpenAI's form (400
+context_length_exceeded, "maximum context length is N tokens"), which opencode 2.x compacts on (checked in
+its source); an overflow can also trigger an alias's "context" fallback.
 
 ### Later (agreed, not scheduled)
 
@@ -1114,7 +1118,7 @@ pinned upstreams); model IDs are unchanged.
   needlessly. Plan: an optional `embedding_concurrency` per pool (blank = shared with chat, as now),
   a second SlotQueue per pool for `/v1/embeddings`, shown on the dashboard/metrics; plan presets fill
   it (ArliAI 2). opencode itself doesn't use embeddings (it searches with grep/LSP tools).
-- **Automatic context sizes + overflow errors opencode understands.** Many providers (NVIDIA, Gemini's
+- **Automatic context sizes + overflow errors opencode understands** (done: v0.22.0). Many providers (NVIDIA, Gemini's
   OpenAI endpoint...) don't report a context size, so QueueRouter skips its check and opencode assumes
   131,072. Plan: (1) learn the limit from the provider's own "too long" error ("maximum context length is
   N", "...allowed (N)") and store it per upstream + model; (2) a manual context/output override per model on
