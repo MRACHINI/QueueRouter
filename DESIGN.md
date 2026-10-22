@@ -1127,6 +1127,10 @@ v0.25.2: compaction fixes from real use — the cut may reach into the current a
 messages; the user's latest message moves next to the task), summarise mode doesn't wait below 90% (the request
 goes out at once, the summary is extended alongside), and sizes are judged in the provider's tokens (per model
 ratio of reported prompt tokens to the estimate, learned from finished requests).
+v0.26.0: Requests page "Now" table — queued and running requests live with the list's columns (filters apply,
+the finished list refreshes in place). Compaction: conversations recognised by structure (tool results by call id),
+so an agent clearing old tool output keeps its summary; background summaries at low priority; summaries up to
+8,000 tokens with a ~2,500-word guide.
 
 ### Later (agreed, not scheduled)
 

@@ -52,7 +52,18 @@ def shorten(text: str) -> str:
 
 
 def _hash(messages: list) -> str:
-    return hashlib.sha256(json.dumps(messages, sort_keys=True, default=str).encode()).hexdigest()[:24]
+    """Identifies the start of a conversation. Tool results count by their call id only: agents clear old
+    tool output from their history ("[Old tool result content cleared]" in opencode) once it has been
+    used, and that must not make a summary of that part look like it belongs to another conversation."""
+    shape = [
+        {"role": m.get("role"), "id": m.get("tool_call_id")}
+        if isinstance(m, dict) and m.get("role") == "tool"
+        else {k: v for k, v in m.items() if k != "cache_control"}
+        if isinstance(m, dict)
+        else m
+        for m in messages
+    ]
+    return hashlib.sha256(json.dumps(shape, sort_keys=True, default=str).encode()).hexdigest()[:24]
 
 
 @dataclass
@@ -118,7 +129,7 @@ def _apply(payload: dict, plan: Plan, note_first_user: bool = True) -> dict:
     for i, message in enumerate(messages):
         if plan.cut_from <= i < plan.cut_to:
             continue
-        if i in plan.shortened and (text := _text(message.get("content"))) is not None:
+        if i in plan.shortened and (text := _text(message.get("content"))) is not None and len(text) > LONG_OUTPUT:
             message = {**message, "content": shorten(text)}
         out.append(message)
     dropped = plan.cut_to - plan.cut_from
@@ -245,14 +256,16 @@ def compact(payload: dict, context: int, output: int, plans: Plans, key: str | N
 # update reads the previous summary plus the part that has become old since, in chunks that fit the
 # summarising model, one after another, so that model never needs the whole history.
 
-SUMMARY_TOKENS = 4_000  # the summariser's answer, and the room kept for the summary in the request
+SUMMARY_TOKENS = 8_000  # the summariser's answer at most, and the room kept for the summary in the request
 SUMMARY_PROMPT = (
     "You compact the history of a conversation between a user and an AI coding agent so the work can "
     "continue with less context. Merge the summary so far with the next part of the conversation into one "
     "updated summary. Keep: the user's goals, requirements and preferences; decisions made and why; files "
     "read, created or changed (exact paths) and what changed; commands run and important results or errors; "
     "the current state; open problems and next steps. Leave out greetings, repetition and raw tool output "
-    "that no longer matters. Write in the user's language, as compact notes. Output only the summary."
+    "that no longer matters. Keep it under about 2,500 words: when the summary so far is long, condense its "
+    "older details rather than dropping recent ones. "
+    "Write in the user's language, as compact notes. Output only the summary."
 )
 IDLE_START_AT = 0.70  # idle updates only for conversations above this share of the model's context
 

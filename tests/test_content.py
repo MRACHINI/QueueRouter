@@ -97,7 +97,7 @@ async def test_content_logging(make_stack):
 
         # reading needs the content permission, and is audited
         assert (await c.get(f"/admin/requests/{plain_id}/content")).status_code == 403
-        assert "/content" not in (await c.get("/admin/requests")).text.split("<tbody>")[1]
+        assert "/content" not in (await c.get("/admin/requests")).text.split('id="finished-requests"')[1]
         owner = store.get_admin(username="owner")
         store.update_admin(owner.id, "test", can_view_content=True)
         page = await c.get(f"/admin/requests/{plain_id}/content")

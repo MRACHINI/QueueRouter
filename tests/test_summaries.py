@@ -161,3 +161,29 @@ async def test_summary_written_in_the_background(make_stack):
         await asyncio.sleep(0.3)
         label, sent = await send(c, stack, turns, 1_000)
         assert label.endswith("(reused)") and sent["messages"][1]["content"].endswith("summary 1")
+    for _ in range(50):  # request rows are written in batches
+        rows = await asyncio.to_thread(stack.app.state.store.list_requests, 20)
+        if any(r["priority"] == "low" and "compaction" in (r["tags"] or "") for r in rows):
+            break
+        await asyncio.sleep(0.1)
+    assert any(r["priority"] == "low" and "compaction" in (r["tags"] or "") for r in rows)  # behind real work
+
+
+async def test_summary_survives_cleared_tool_output(make_stack):
+    """opencode clears old tool output from its history after a turn: the summary still applies."""
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0, compaction_idle_update=False)
+    stack.mock["extra_models"] = ["small-model"]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=60) as c:
+        await setup_alias(c, stack, compact_model="mock-model")
+        label, _ = await send(c, stack, 14)
+        assert label.endswith("(new summary)")
+        messages = conversation(15)
+        for m in messages[:20]:
+            if m["role"] == "tool":
+                m["content"] = "[Old tool result content cleared]"
+        r = await c.post(
+            "/v1/chat/completions", headers={**stack.headers, **SESSION}, json={"model": "sum", "messages": messages}
+        )
+        assert r.status_code == 200
+        assert "new summary" not in r.headers.get("x-queuerouter-compacted", "")
+        assert len(stack.mock["summary_inputs"]) == 1

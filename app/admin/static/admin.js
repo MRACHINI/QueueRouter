@@ -63,11 +63,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Local times for <time data-ts="unix seconds">.
-  document.querySelectorAll("time[data-ts]").forEach((el) => {
-    const date = new Date(Number(el.dataset.ts) * 1000);
-    el.textContent = date.toLocaleString();
-    el.title = date.toISOString();
-  });
+  localTimes(document);
 
   // Upstream forms: a preset fills the base URL; an ArliAI plan fills parallel + context cap.
   document.querySelectorAll("[data-preset-select]").forEach((select) => {
@@ -108,6 +104,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const dashboard = document.getElementById("dashboard");
   if (dashboard) liveDashboard(dashboard);
+  const liveRequestsRoot = document.getElementById("requests-live");
+  if (liveRequestsRoot) liveRequests(liveRequestsRoot);
   const usage = document.getElementById("usage-live");
   if (usage) liveUsage(usage);
   const playground = document.getElementById("playground");
@@ -477,5 +475,145 @@ function liveUsage(root) {
   };
   source.onerror = () => {
     if (status) status.textContent = "Live updates paused — reconnecting…";
+  };
+}
+
+// Local times for <time data-ts="unix seconds">.
+function localTimes(scope) {
+  scope.querySelectorAll("time[data-ts]").forEach((el) => {
+    const date = new Date(Number(el.dataset.ts) * 1000);
+    el.textContent = date.toLocaleString();
+    el.title = date.toISOString();
+  });
+}
+
+// Requests page: a live "Now" table (queued and running requests, same columns as the list below,
+// filtered the same way), and the finished list refreshed in place as requests finish.
+function liveRequests(root) {
+  if (!window.EventSource || !root.dataset.stream) return;
+  const body = document.getElementById("now-requests");
+  const count = document.getElementById("now-count");
+  const filters = new URLSearchParams(window.location.search);
+  const want = (key) => filters.get(key) || "";
+  const matches = (r) =>
+    !want("outcome") &&
+    (!want("client") || r.client === want("client")) &&
+    (!want("model") || r.requested_model === want("model") || r.target_model === want("model")) &&
+    (!want("upstream") || r.upstream === want("upstream")) &&
+    (!want("tag") || (r.tags || "").split(",").includes(want("tag")));
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  const td = (label, ...children) => {
+    const cell = el("td");
+    cell.dataset.label = label;
+    cell.append(...children);
+    return cell;
+  };
+  const copyLine = (text, prefix, title) => {
+    const line = el("div", "small muted mono");
+    const button = el("button", "copy-text", prefix + text);
+    button.type = "button";
+    button.dataset.copyText = text;
+    button.title = title;
+    line.append(button);
+    return line;
+  };
+  const seconds = (ms) => (ms === null || ms === undefined ? "—" : String(Math.round(ms)));
+  let started = 0; // performance.now() when the last update arrived
+  let rows = [];
+
+  function render() {
+    const now = performance.now();
+    const shown = rows.filter(matches);
+    if (count) count.textContent = String(shown.length);
+    if (!shown.length) {
+      const empty = el("tr");
+      const cell = el("td", "muted", "Nothing queued or running.");
+      cell.colSpan = 11;
+      empty.append(cell);
+      body.replaceChildren(empty);
+      return;
+    }
+    body.replaceChildren(...shown.map((r) => {
+      const tr = el("tr");
+      const time = el("time");
+      time.dataset.ts = String(r.ts);
+      const client = td("Client", r.client || "—", " ", el("span", `badge ${r.priority || ""}`, r.priority || ""));
+      if (r.user_agent) client.append(copyLine(r.user_agent, "", "App's User-Agent — click to copy"));
+      if (r.sent_user_agent) client.append(copyLine(r.sent_user_agent, "→ sent: ", "User-Agent sent to the provider — click to copy"));
+      if (r.tags) client.append(el("div", "small muted", r.tags.split(",").map((t) => `#${t}`).join(" ")));
+      const model = td("Model", r.requested_model || r.model || "—");
+      model.classList.add("wrap-any");
+      if (r.target_model) model.append(" ", el("span", "muted small", `→ ${r.target_model}`));
+      if (r.compaction) {
+        const line = el("div", "small");
+        line.append(el("span", "badge", `compacted: ${r.compaction}`));
+        model.append(line);
+      }
+      const queued = r.stage === "queued";
+      const status = queued ? `queued${r.position ? ` #${r.position}` : ""}` : "running";
+      const outcome = td("Outcome", el("strong", queued ? "muted" : "", status));
+      if (r.retries) outcome.append(el("span", "muted small", ` · ${r.retries} retries`));
+      if (r.error) {
+        outcome.title = r.error;
+        outcome.append(el("div", "small muted wrap-any", r.error));
+      }
+      const elapsed = r.elapsed_ms + (now - started);
+      const queueMs = td("Queue ms", seconds(queued ? elapsed : r.queue_ms));
+      const upstreamMs = td("Upstream ms", queued ? "—" : seconds(elapsed - (r.queue_ms || 0)));
+      if (queued) queueMs.dataset.tick = String(r.elapsed_ms);
+      else upstreamMs.dataset.tick = String(r.elapsed_ms - (r.queue_ms || 0));
+      const ttft = td("First byte ms", r.ttft_ms !== null && r.ttft_ms !== undefined ? seconds(r.ttft_ms) : queued ? "—" : "waiting…");
+      const input = td("In tokens", r.estimate ? `~${Number(r.estimate).toLocaleString()}` : "—");
+      if (r.estimate) input.title = "QueueRouter's estimate; the provider's count arrives when it finishes";
+      tr.append(
+        td("Time", time), client, model, td("Upstream", r.upstream || "—"), outcome, queueMs, ttft, upstreamMs,
+        input, td("Out tokens", "—"), td("Finish", r.stream ? "streaming…" : "—"),
+      );
+      return tr;
+    }));
+    localTimes(body);
+  }
+
+  // Elapsed times tick between updates.
+  setInterval(() => {
+    const extra = performance.now() - started;
+    body.querySelectorAll("[data-tick]").forEach((cell) => {
+      cell.textContent = String(Math.round(Number(cell.dataset.tick) + extra));
+    });
+  }, 500);
+
+  // The finished list: reloaded in place (same filters) when new requests have been written.
+  let version = null;
+  let timer = null;
+  const reload = async () => {
+    timer = null;
+    try {
+      const response = await fetch(window.location.href, { credentials: "same-origin" });
+      if (!response.ok || response.redirected) return;
+      const page = new DOMParser().parseFromString(await response.text(), "text/html");
+      const fresh = page.getElementById("finished-requests");
+      const current = document.getElementById("finished-requests");
+      if (fresh && current) {
+        current.replaceChildren(...fresh.childNodes);
+        localTimes(current);
+      }
+    } catch (_) {
+      /* next update tries again */
+    }
+  };
+
+  const source = new EventSource(root.dataset.stream);
+  source.onmessage = (event) => {
+    const state = JSON.parse(event.data);
+    rows = state.inflight || [];
+    started = performance.now();
+    render();
+    if (version !== null && state.usage_version !== version && !timer) timer = setTimeout(reload, 1000);
+    version = state.usage_version;
   };
 }
