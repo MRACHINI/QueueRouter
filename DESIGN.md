@@ -1114,6 +1114,19 @@ pinned upstreams); model IDs are unchanged.
   needlessly. Plan: an optional `embedding_concurrency` per pool (blank = shared with chat, as now),
   a second SlotQueue per pool for `/v1/embeddings`, shown on the dashboard/metrics; plan presets fill
   it (ArliAI 2). opencode itself doesn't use embeddings (it searches with grep/LSP tools).
+- **Automatic context sizes + overflow errors opencode understands.** Many providers (NVIDIA, Gemini's
+  OpenAI endpoint...) don't report a context size, so QueueRouter skips its check and opencode assumes
+  131,072. Plan: (1) learn the limit from the provider's own "too long" error ("maximum context length is
+  N", "...allowed (N)") and store it per upstream + model; (2) a manual context/output override per model on
+  the Models page (also fixes wrong reported values); (3) rewrite every provider's overflow error into the
+  standard 400 `context_length_exceeded`, so opencode compacts and retries. Verify on opencode 2.1.2 that it
+  compacts on that error (it does compact on token usage).
+- **Compaction in QueueRouter (opt-in per alias/model).** When a conversation is bigger than the chosen
+  model (e.g. 800k history after switching from a 1M model to a 200k one), QueueRouter shrinks it itself:
+  first trim old tool outputs and middle messages; or summarise the old part with a big-context
+  "compaction model" (opencode's own compaction would use the small model and overflow too). The summary
+  is cached per session by a hash of the replaced message prefix (history is append-only), so later
+  turns reuse it instead of summarising again. Shown on the Requests page (compacted: 800k -> 150k).
 
 ---
 
