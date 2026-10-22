@@ -197,6 +197,10 @@ TUNABLES: dict[str, type] = {
     "content_log_max_kb": int,
     "structured_repair": bool,
     "unknown_model_check": bool,
+    "compaction_idle_update": bool,
+    "compaction_idle_minutes": int,
+    "compaction_saved": bool,
+    "compaction_keep_days": int,
     "metrics_token": str,
     "otel_endpoint": str,
     "otel_headers": str,
@@ -255,6 +259,10 @@ class Settings:
     content_log_max_kb: int = 256  # per request and per reply; longer ones are cut
     structured_repair: bool = True  # fix broken JSON replies (JSON mode, tool-call arguments)
     unknown_model_check: bool = True  # 404 for models no upstream lists (when every list is known)
+    compaction_idle_update: bool = True  # update a summary in the background while a conversation is idle
+    compaction_idle_minutes: int = 60  # summaries are forgotten after this long unused
+    compaction_saved: bool = False  # also keep summaries in the database (encrypted), so they survive restarts
+    compaction_keep_days: int = 7  # saved summaries are deleted after this long unused
     metrics_token: str = ""  # /metrics needs "Authorization: Bearer <token>"; empty = /metrics is off
     otel_endpoint: str = ""  # OTLP/HTTP collector base URL (traces go to <it>/v1/traces); empty = off
     otel_headers: str = ""  # extra headers for the collector, "key=value,key2=value2"

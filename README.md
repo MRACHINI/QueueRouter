@@ -61,6 +61,11 @@ from a **web admin UI**.
   end, then old middle messages are dropped. The system prompt, the task, the current message and the
   last turns are always kept; the same cut is reused while it fits, so provider prompt caching keeps
   working. Shown on the Requests page ("compacted: trim 180k -> 95k").
+  **Summarise** mode replaces the old part with a summary written by a model you choose (any size: long
+  histories are read in parts, each building on the summary so far); the summary is kept per conversation
+  (in memory, or saved encrypted) and extended rather than rewritten, and updated in the background when a
+  conversation near its limit goes quiet. An alias can also tell apps a bigger context than the model has
+  (e.g. 1M), so opencode keeps the whole conversation while each request is fitted to the real model.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
 - **Operating modes**: running, paused, draining, maintenance.
