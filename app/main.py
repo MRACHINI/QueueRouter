@@ -60,6 +60,7 @@ from .upstream import (
     FAILURE_STATUS,
     RETRYABLE_ERRORS,
     UsageSniffer,
+    client_identity,
     describe_429,
     finish_reason_from_body,
     outgoing_user_agent,
@@ -129,6 +130,7 @@ class RequestLog:
             "sent_user_agent": None,  # what the provider saw instead, when changed by a User-Agent rule
             "compaction": None,  # e.g. "trim 812k -> 402k": the conversation was shrunk to fit (app/compaction.py)
             "council": None,  # e.g. "pick 2/3: GLM-4.7": what a model council did (app/council.py)
+            "client_headers": None,  # what the app sent about itself (app/upstream.py client_identity)
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -600,7 +602,11 @@ def create_app(
         if not client.policy.allows_app(user_agent):
             # Recorded with the User-Agent that was used; the caller isn't told which one is expected.
             rlog = RequestLog(f"qr-{uuid.uuid4().hex[:12]}", request.method, request.url.path, ip)
-            rlog.fields.update(client=client.name, user_agent=user_agent[:300] or None)
+            rlog.fields.update(
+                client=client.name,
+                user_agent=user_agent[:300] or None,
+                client_headers=client_identity(request.headers, None),
+            )
             rlog.finish(stats, outcome="refused", status=403, error="app not allowed for this key (see User-Agent)")
             return None, error_response("this key can't be used from this app", 403, "app_not_allowed")
         return client, None
@@ -765,6 +771,7 @@ def create_app(
                     "tags": f["tags"],
                     "compaction": f["compaction"],
                     "council": f.get("council"),
+                    "client_headers": f.get("client_headers"),
                     "position": f["position"],
                     "estimate": f.get("estimate"),
                     "path": f["path"],
@@ -1611,6 +1618,7 @@ def create_app(
         rlog.fields.update(
             client=client.name,
             user_agent=(request_headers.get("user-agent") or "")[:300] or None,
+            client_headers=client_identity(request_headers, payload),
             priority=priority,
             model=alias.name,
             tags=",".join([*tags, "council"]),
@@ -2505,6 +2513,7 @@ def create_app(
         rlog.fields.update(
             client=client.name,
             user_agent=(request_headers.get("user-agent") or "")[:300] or None,
+            client_headers=client_identity(request_headers, payload),
             priority=LANE_NAMES[lane],
             session=session and session[:8],
             position=position,

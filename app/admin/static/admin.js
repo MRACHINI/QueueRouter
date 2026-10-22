@@ -524,6 +524,7 @@ function liveRequests(root) {
   };
   const seconds = (ms) => (ms === null || ms === undefined ? "—" : String(Math.round(ms)));
   let started = 0; // performance.now() when the last update arrived
+  const openIds = new Set();
   let rows = [];
 
   function render() {
@@ -546,6 +547,28 @@ function liveRequests(root) {
       if (r.user_agent) client.append(copyLine(r.user_agent, "", "App's User-Agent — click to copy"));
       if (r.sent_user_agent) client.append(copyLine(r.sent_user_agent, "→ sent: ", "User-Agent sent to the provider — click to copy"));
       if (r.tags) client.append(el("div", "small muted", r.tags.split(",").map((t) => `#${t}`).join(" ")));
+      let ids = {};
+      try {
+        ids = JSON.parse(r.client_headers || "{}");
+      } catch (_) {
+        ids = {};
+      }
+      const names = Object.keys(ids);
+      if (names.length) {
+        const details = el("details", "small ids");
+        details.open = openIds.has(r.id); // stays open across live updates
+        details.addEventListener("toggle", () => (details.open ? openIds.add(r.id) : openIds.delete(r.id)));
+        details.append(el("summary", "muted", `${names.length} identifiers`));
+        for (const name of names) {
+          const line = el("div", "mono");
+          const button = el("button", "copy-text inline", ids[name]);
+          button.type = "button";
+          button.dataset.copyText = ids[name];
+          line.append(el("span", "muted", `${name}: `), button);
+          details.append(line);
+        }
+        client.append(details);
+      }
       const model = td("Model", r.requested_model || r.model || "—");
       model.classList.add("wrap-any");
       if (r.target_model) model.append(" ", el("span", "muted small", `→ ${r.target_model}`));

@@ -253,6 +253,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     sessions = Sessions(store, bootstrap)
     templates = Jinja2Templates(directory=os.path.join(HERE, "templates"))
     templates.env.filters["expiry_date"] = _expiry_date
+    templates.env.filters["fromjson"] = _from_json
     login_guard = AuthGuard(limit_per_minute=5, block_s=300)
     pending_2fa: dict[str, tuple[int, float, str]] = {}  # ticket -> (user id, expires, next)
     pending_setup: dict[str, tuple[str, float]] = {}  # session -> (new TOTP secret, expires)
@@ -1819,3 +1820,11 @@ def _ua_fields(form: dict) -> dict:
     if mode == "template" and not template:
         raise ValueError("ua_template")
     return {"ua_mode": mode, "ua_template": template}
+
+
+def _from_json(text: str | None) -> dict:
+    try:
+        value = json.loads(text or "{}")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}

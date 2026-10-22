@@ -286,7 +286,9 @@ async def test_high_priority_client_goes_first(make_stack):
     stack = make_stack(limit=1, access_keys=KEYS)
     async with httpx.AsyncClient(timeout=30) as c:
         url = f"{stack.url}/v1/chat/completions"
-        blocker = asyncio.create_task(c.post(url, headers=auth("k-batch"), json=chat("blocker", mock_delay=0.1)))
+        blocker = asyncio.create_task(
+            c.post(url, headers=auth("k-batch"), json=chat("blocker", mock_delay=0.4))
+        )  # ~2 s: still busy on a slow machine
         await eventually(lambda: stack.mock["active"] == 1)
         batch = asyncio.create_task(c.post(url, headers=auth("k-batch"), json=chat("batch")))
         await asyncio.sleep(0.1)
@@ -300,7 +302,9 @@ async def test_priority_header_can_only_lower(make_stack):
     stack = make_stack(limit=1, access_keys=KEYS)
     async with httpx.AsyncClient(timeout=30) as c:
         url = f"{stack.url}/v1/chat/completions"
-        blocker = asyncio.create_task(c.post(url, headers=auth("k-chat"), json=chat("blocker", mock_delay=0.1)))
+        blocker = asyncio.create_task(
+            c.post(url, headers=auth("k-chat"), json=chat("blocker", mock_delay=0.4))
+        )  # ~2 s: still busy on a slow machine
         await eventually(lambda: stack.mock["active"] == 1)
         # batch asks for "high" (ignored: it's a low client); chat asks for "low" (honoured)
         batch = asyncio.create_task(
@@ -322,7 +326,9 @@ async def test_queue_hints(make_stack):
         assert first.headers["X-QueueRouter-Position"] == "0"
         assert first.headers["X-QueueRouter-Slots"] == "0/1"
 
-        blocker = asyncio.create_task(c.post(url, headers=stack.headers, json=chat("blocker", mock_delay=0.1)))
+        blocker = asyncio.create_task(
+            c.post(url, headers=stack.headers, json=chat("blocker", mock_delay=0.4))
+        )  # ~2 s: still busy on a slow machine
         await eventually(lambda: stack.mock["active"] == 1)
         q = (await c.get(f"{stack.url}/v1/queue", headers=stack.headers)).json()
         assert q["active"] == 1 and q["max_concurrency"] == 1

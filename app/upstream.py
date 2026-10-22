@@ -197,3 +197,48 @@ def outgoing_user_agent(
         result = result.replace("{" + name + "}", values.get(name) or "")
     result = " ".join(result.split()).encode("ascii", "replace").decode()[:500]
     return result or None
+
+
+# What a client sends about itself (shown on the Requests page): every request header except credentials,
+# connection plumbing and our own controls, plus the identifying fields of the body. Kept as a short JSON.
+_NOT_IDENTITY = {
+    "host",
+    "content-length",
+    "content-type",
+    "connection",
+    "keep-alive",
+    "accept",
+    "accept-encoding",
+    "te",
+    "transfer-encoding",
+    "upgrade",
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-forwarded-port",
+    "x-forwarded-server",
+    "x-real-ip",
+    "user-agent",  # has its own column
+}
+_SECRET_NAME = re.compile(r"key|token|auth|secret|cookie|passw|signature|credential", re.I)
+_BODY_IDS = ("user", "safety_identifier", "prompt_cache_key", "metadata")
+
+
+def client_identity(headers: Mapping[str, str], payload: object) -> str | None:
+    """The headers (and body fields) that tell which app sent a request, as JSON; None if there are none."""
+    found: dict[str, str] = {}
+    for name, value in headers.items():
+        lowered = name.lower()
+        if lowered in _NOT_IDENTITY or lowered.startswith("x-queuerouter-") or _SECRET_NAME.search(lowered):
+            continue
+        found[lowered] = str(value)[:300]
+        if len(found) >= 40:
+            break
+    if isinstance(payload, dict):
+        for field in _BODY_IDS:
+            value = payload.get(field)
+            if value not in (None, "", {}):
+                text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+                found[f"body.{field}"] = text[:300]
+    return json.dumps(found, ensure_ascii=False, sort_keys=True)[:6000] if found else None

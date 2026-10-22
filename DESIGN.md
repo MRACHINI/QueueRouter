@@ -1138,6 +1138,9 @@ v0.27.0: model council per alias (app/council.py): pick / combine, 2-5 members, 
 planning steps or every request; members and judge are internal requests through the queue (tag council), the
 client's own row records the decision and isn't usage; a council with no answering member falls back to the
 target; streaming answers start at once.
+v0.27.1: every request's identifiers recorded (requests.client_headers: all headers except credentials, connection
+plumbing and our own, plus body user / safety_identifier / prompt_cache_key / metadata) and shown on the Requests
+page and in the Now table, click to copy.
 
 ### Later (agreed, not scheduled)
 
