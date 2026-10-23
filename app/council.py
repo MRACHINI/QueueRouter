@@ -20,8 +20,9 @@ import uuid
 
 MODES = ("off", "pick", "combine")
 WHEN = ("planning", "always")
-MAX_MEMBERS = 5
-CANDIDATE_CHARS = 12_000  # per candidate shown to the judge
+MIN_MEMBERS, MAX_MEMBERS = 1, 64
+CANDIDATE_CHARS = 12_000  # per candidate shown to the judge, at most...
+JUDGE_READS = 120_000  # ...and all of them together (with many members each answer gets its share)
 
 JUDGE_MARK = "[QueueRouter council]"
 PICK_PROMPT = (
@@ -66,7 +67,7 @@ def message_of(body: bytes) -> dict | None:
     return message
 
 
-def render(message: dict) -> str:
+def render(message: dict, limit: int = CANDIDATE_CHARS) -> str:
     parts = []
     if isinstance(message.get("content"), str) and message["content"].strip():
         parts.append(message["content"].strip())
@@ -74,13 +75,14 @@ def render(message: dict) -> str:
         function = (call.get("function") or {}) if isinstance(call, dict) else {}
         parts.append(f"[tool call] {function.get('name')}({function.get('arguments', '')})")
     text = "\n".join(parts)
-    if len(text) > CANDIDATE_CHARS:
-        text = text[:CANDIDATE_CHARS] + "\n[... cut ...]"
+    if len(text) > limit:
+        text = text[:limit] + "\n[... cut ...]"
     return text
 
 
 def judge_payload(payload: dict, model: str, mode: str, candidates: list[tuple[str, dict]]) -> dict:
-    listing = "\n\n".join(f"### Answer {i}\n{render(message)}" for i, (_, message) in enumerate(candidates, 1))
+    limit = max(1_000, min(CANDIDATE_CHARS, JUDGE_READS // max(1, len(candidates))))
+    listing = "\n\n".join(f"### Answer {i}\n{render(message, limit)}" for i, (_, message) in enumerate(candidates, 1))
     prompt = PICK_PROMPT if mode == "pick" else COMBINE_PROMPT
     judged = {
         **payload,

@@ -1735,7 +1735,7 @@ def create_app(
             if not answered:
                 rlog.fields["council"] = f"no member answered: {alias.target_model} alone"
                 return None, None
-            if len(answered) == 1:
+            if len(answered) == 1 and alias.council == "pick":  # nothing to choose between
                 rlog.fields["council"] = f"only {answered[0][0]} answered"
                 return answered[0][2], None
             judge = alias.council_judge or alias.target_model
