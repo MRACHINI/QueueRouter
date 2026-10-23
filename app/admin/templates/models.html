@@ -10,102 +10,37 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
 <datalist id="model-ids">
   {% for name, ids in models.items() %}{% for m in ids %}<option value="{{ m }}">{{ name }}</option>{% endfor %}{% endfor %}
 </datalist>
+<p><a class="button" href="/admin/aliases/new">Add alias</a></p>
 <div class="table-wrap">
 <table class="cards">
-  <thead><tr><th>Alias</th><th>Settings</th><th></th></tr></thead>
+  <thead><tr><th>Alias</th><th>Sends to</th><th>Extras</th><th></th></tr></thead>
   <tbody>
   {% for a in aliases %}
-  <tr>
-    <td data-label="Alias"><strong><code>{{ a.name }}</code></strong>{% if not a.enabled %} <span class="badge">disabled</span>{% endif %}
-      <div class="small muted">→ <code>{{ a.target_model }}</code>{% for fb in a.fallbacks %} → <code>{{ fb }}</code>{% endfor %}{% if a.compact != "off" %} <span class="badge" title="Conversations too big for the model are shrunk">{{ a.compact }}{% if a.compact_model %} with {{ a.compact_model }}{% endif %}</span>{% endif %}{% if a.virtual_context %} <span class="badge" title="Context size told to apps">{{ "{:,}".format(a.virtual_context) }} context</span>{% endif %}{% if a.council != "off" %} <span class="badge" title="Members: {{ a.council_members | join(', ') }}">council {{ a.council }} ({{ a.council_members | length }})</span>{% endif %}
-        {% if a.upstream_ids %} on {% for uid in a.upstream_ids %}{{ upstream_names.get(uid, uid) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %} on any upstream{% endif %}</div>
+  <tr id="alias-{{ a.name }}">
+    <td data-label="Alias"><a href="/admin/aliases/{{ a.id }}"><strong><code>{{ a.name }}</code></strong></a>{% if not a.enabled %} <span class="badge">disabled</span>{% endif %}
       {% if a.notes %}<div class="small muted">{{ a.notes }}</div>{% endif %}</td>
-    <td data-label="">
-      <form method="post" action="/admin/aliases/{{ a.id }}" class="row wrap">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input name="target_model" value="{{ a.target_model }}" list="model-ids" required aria-label="Target model" class="grow">
-        {% for u in upstreams %}
-        <label class="check"><input type="checkbox" name="upstream_{{ u.id }}" value="{{ u.id }}" {% if u.id in a.upstream_ids %}checked{% endif %}> {{ u.name }}</label>
-        {% endfor %}
-        <input name="notes" value="{{ a.notes }}" placeholder="notes" aria-label="Notes">
-        <textarea name="params" rows="1" class="rules grow" aria-label="Parameter rules" placeholder='parameter rules (JSON), e.g. {"defaults": {"temperature": 0.6}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}'>{{ a.params }}</textarea>
-        <input name="fallbacks" value="{{ a.fallbacks | join(', ') }}" list="model-ids" placeholder="fallback models, in order" aria-label="Fallback models" class="grow">
-        {% for t in triggers %}<label class="check small"><input type="checkbox" name="on_{{ t }}" {% if t in a.fallback_on %}checked{% endif %}> {{ t }}</label>{% endfor %}
-        <label class="inline-field">Compaction <select name="compact">
-          {% for m in compact_modes %}<option value="{{ m }}" {% if a.compact == m %}selected{% endif %}>{{ m }}</option>{% endfor %}
-        </select></label>
-        <input name="compact_model" value="{{ a.compact_model }}" list="model-ids" placeholder="summary model (blank = this one)" aria-label="Summary model">
-        <label class="inline-field">Context told to apps <input type="number" name="virtual_context" min="1024" value="{{ a.virtual_context or '' }}" placeholder="real"></label>
-        <label class="inline-field">Council <select name="council">
-          {% for m in council_modes %}<option value="{{ m }}" {% if a.council == m %}selected{% endif %}>{{ m }}</option>{% endfor %}
-        </select></label>
-        <input name="council_members" value="{{ a.council_members | join(', ') }}" list="model-ids" placeholder="council members, comma-separated" aria-label="Council members" class="grow">
-        <input name="council_judge" value="{{ a.council_judge }}" list="model-ids" placeholder="judge (blank = target)" aria-label="Council judge">
-        <label class="inline-field">on <select name="council_when">
-          {% for w in council_when %}<option value="{{ w }}" {% if a.council_when == w %}selected{% endif %}>{{ "planning steps" if w == "planning" else "every request" }}</option>{% endfor %}
-        </select></label>
-        <label class="check"><input type="checkbox" name="enabled" {% if a.enabled %}checked{% endif %}> enabled</label>
-        <button type="submit" class="secondary">Save</button>
-      </form>
-    </td>
-    <td data-label="">
+    <td data-label="Sends to" class="small"><code>{{ a.target_model }}</code>{% for fb in a.fallbacks %} → <code>{{ fb }}</code>{% endfor %}
+      <div class="muted">{% if a.upstream_ids %}on {% for uid in a.upstream_ids %}{{ upstream_names.get(uid, uid) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}on any upstream{% endif %}</div></td>
+    <td data-label="Extras" class="small">
+      {% if a.compact != "off" %}<span class="badge" title="Conversations too big for the model are shrunk">{{ a.compact }}{% if a.compact_model %} with {{ a.compact_model }}{% endif %}</span>{% endif %}
+      {% if a.virtual_context %}<span class="badge" title="Context size told to apps">{{ "{:,}".format(a.virtual_context) }} context</span>{% endif %}
+      {% if a.council != "off" %}<span class="badge" title="Members: {{ a.council_members | join(', ') }}">council {{ a.council }} ({{ a.council_members | length }})</span>{% endif %}
+      {% if a.params %}<span class="badge" title="{{ a.params }}">rules</span>{% endif %}
+      {% if a.compact == "off" and not a.virtual_context and a.council == "off" and not a.params %}<span class="muted">—</span>{% endif %}</td>
+    <td data-label=""><div class="row wrap">
+      <a class="button secondary" href="/admin/aliases/{{ a.id }}">Edit</a>
       <form method="post" action="/admin/aliases/{{ a.id }}/delete" data-confirm="Delete alias {{ a.name }}? Apps using it will get errors.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button type="submit" class="danger">Delete</button>
-      </form>
+      </form></div>
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="3" class="muted">No aliases yet.</td></tr>
+  <tr><td colspan="4" class="muted">No aliases yet.</td></tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
-
-<h2>Add alias</h2>
-<form method="post" action="/admin/aliases" class="card grid">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>Alias <input name="name" required placeholder="smart" pattern="[A-Za-z0-9][A-Za-z0-9._:/\-]{0,127}" autocomplete="off"></label>
-  <label>Target model <input name="target_model" required list="model-ids" placeholder="pick or type a model id" autocomplete="off"></label>
-  <fieldset class="span-all plain">
-    <legend class="small muted">Only on these upstreams (none = any)</legend>
-    <div class="row wrap">
-    {% for u in upstreams %}
-      <label class="check"><input type="checkbox" name="upstream_{{ u.id }}" value="{{ u.id }}"> {{ u.name }}</label>
-    {% endfor %}
-    </div>
-  </fieldset>
-  <label>Notes <input name="notes" maxlength="300" placeholder="optional"></label>
-  <label class="span-all">Fallback models <small class="muted">comma-separated, tried in order when the target fails</small>
-    <input name="fallbacks" list="model-ids" placeholder="e.g. GLM-4.6, Qwen3-235B-A22B-Instruct-2507"></label>
-  <fieldset class="span-all plain"><legend class="small muted">Fall back when</legend><div class="row wrap">
-    {% for t in triggers %}<label class="check"><input type="checkbox" name="on_{{ t }}" {% if t in default_triggers %}checked{% endif %}> {{ t }}</label>{% endfor %}
-  </div></fieldset>
-  <label>Compaction
-    <select name="compact">{% for m in compact_modes %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select>
-    <small class="muted">When a conversation is too big for the model: trim = shorten old tool outputs, then drop old
-    messages; summarise = replace old messages with a summary (kept and extended). The task, the current message and
-    recent turns are always kept.</small></label>
-  <label>Summary model <input name="compact_model" list="model-ids" placeholder="blank = the target model" autocomplete="off">
-    <small class="muted">Writes the summaries (summarise mode). Any size works: long histories are read in parts.</small></label>
-  <label>Context told to apps <input type="number" name="virtual_context" min="1024" placeholder="blank = the model's real one">
-    <small class="muted">e.g. 1000000: opencode keeps the whole conversation and QueueRouter compacts each request to
-    fit the model it goes to. Use with compaction on.</small></label>
-  <fieldset class="span-all plain"><legend class="small muted">Model council: several models answer, a judge decides</legend>
-    <div class="row wrap">
-      <label class="inline-field">Mode <select name="council">{% for m in council_modes %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select></label>
-      <input name="council_members" list="model-ids" placeholder="members, comma-separated (1-64; mix providers)" aria-label="Council members" class="grow">
-      <input name="council_judge" list="model-ids" placeholder="judge (blank = the target model)" aria-label="Council judge">
-      <label class="inline-field">on <select name="council_when">{% for w in council_when %}<option value="{{ w }}">{{ "planning steps" if w == "planning" else "every request" }}</option>{% endfor %}</select></label>
-    </div>
-    <small class="muted">pick = the judge chooses the best answer (fast; fine for tool calls); combine = the judge writes the
-    answer from them. Planning steps = the first step after your message or opencode's plan agent; tool steps use the
-    target model alone. Members' and the judge's requests are tagged #council.</small>
-  </fieldset>
-  <label class="span-all">Parameter rules <small class="muted">optional JSON: defaults / overrides / clamps / strip</small>
-    <textarea name="params" rows="2" class="rules" placeholder='{"defaults": {"temperature": 0.6}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}'></textarea></label>
-  <div class="align-end"><button type="submit">Add alias</button></div>
-</form>
 
 <h2 id="contexts">Context sizes</h2>
 <p class="muted small">How many tokens each model accepts. QueueRouter checks requests against it before queuing,

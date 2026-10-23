@@ -70,7 +70,7 @@ async def test_rules_reach_the_upstream(make_stack):
             "/admin/aliases",
             data={"csrf": csrf, "name": "bad", "target_model": "x", "params": '{"overrides": {"model": "y"}}'},
         )
-        assert "e=rules_invalid" in bad.headers["location"]
+        assert bad.status_code == 200 and "rules" in bad.text.lower()  # shown again in the editor, with the error
         await set_policy(c, stack, params=json.dumps({"clamps": {"max_tokens": {"max": 100}}}))
 
         body = {

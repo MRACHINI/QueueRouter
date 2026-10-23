@@ -840,6 +840,24 @@ def create_app(
     def models_by_upstream() -> dict[str, list[str]]:
         return {t.upstream.name: sorted(catalogs.ids(t.id) or []) for t in snapshot.upstreams.values()}
 
+    def model_choices() -> list[dict]:
+        """Every model the upstreams list (hidden ones too: aliases may use them) and every alias, for the
+        alias editor's pickers: id, the upstreams offering it, its context, hidden, alias."""
+        rows: dict[str, dict] = {}
+        for target in snapshot.upstreams.values():
+            for model in catalogs.models(target.id, raw=True):
+                row = rows.setdefault(
+                    model["id"], {"id": model["id"], "upstreams": [], "context": None, "hidden": True, "alias": False}
+                )
+                row["upstreams"].append(target.upstream.name)
+                row["hidden"] = row["hidden"] and not catalogs.offered(target.id, model["id"])
+                known = model_limits(context_sizes.apply(model["id"], target.id, model), [target.pool.context_cap])
+                if known:
+                    row["context"] = max(row["context"] or 0, known["context"])
+        for alias in snapshot.aliases.values():
+            rows[alias.name] = {"id": alias.name, "upstreams": [], "context": None, "hidden": False, "alias": True}
+        return sorted(rows.values(), key=lambda r: (r["alias"], r["id"].lower()))
+
     async def upstream_models(upstream_id: int) -> list[str] | None:
         """Every model the upstream lists, hidden ones too (Upstreams page > choose models); None if its
         list can't be fetched."""
@@ -922,6 +940,7 @@ def create_app(
             live_signature,
             context_table,
             upstream_models,
+            model_choices,
         ),
     )
 

@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}{% if new %}New alias{% else %}Alias {{ a.name }}{% endif %}{% endblock %}
+{% macro picker(name, values, kind, placeholder, ordered=False) -%}
+<div class="picker" data-picker="{{ kind }}"{% if ordered %} data-ordered{% endif %}>
+  <input type="hidden" name="{{ name }}" value="{{ values | join(', ') if values is not string else values }}">
+  <div class="picker-box">
+    <span class="picker-chips"></span>
+    <input type="search" class="picker-search" placeholder="{{ placeholder }}" autocomplete="off" aria-label="{{ placeholder }}">
+  </div>
+  <ul class="picker-menu" role="listbox" hidden></ul>
+</div>
+{%- endmacro %}
+{% block content %}
+<p class="small"><a href="/admin/models">← Models &amp; aliases</a></p>
+<h1>{% if new %}New alias{% else %}Alias <code>{{ a.name }}</code>{% endif %}</h1>
+<p class="muted small">Pick models by typing part of a name: the list shows each model's providers and context size
+(hidden ones too: an alias may use a model hidden from the lists). Press Enter or click to add; × removes; drag to
+reorder where order matters. A name no provider lists can be typed and added with Enter.</p>
+<script type="application/json" id="model-choices">{{ choices | tojson }}</script>
+
+<form method="post" action="{% if new %}/admin/aliases{% else %}/admin/aliases/{{ a.id }}{% endif %}" class="alias-editor">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+
+  <fieldset class="card">
+    <legend>Model</legend>
+    {% if new %}
+    <label>Alias name <input name="name" value="{{ a.name }}" required placeholder="e.g. coder" pattern="[A-Za-z0-9][A-Za-z0-9._:/\-]{0,127}" autocomplete="off">
+      <small class="muted">The name apps use, e.g. in opencode's model list.</small></label>
+    {% endif %}
+    <label>Target model {{ picker("target_model", a.target_model, "single", "Search models…") }}
+      <small class="muted">Where requests go (and, with a council on planning steps, the model for every other step).</small></label>
+    <fieldset class="plain"><legend class="small muted">Only on these upstreams (none ticked = any)</legend>
+      <div class="row wrap">{% for u in upstreams %}
+        <label class="check"><input type="checkbox" name="upstream_{{ u.id }}" value="{{ u.id }}" {% if u.id in a.upstream_ids %}checked{% endif %}> {{ u.name }}</label>
+      {% endfor %}</div></fieldset>
+    <label>Notes <input name="notes" value="{{ a.notes }}" maxlength="300" placeholder="optional"></label>
+    {% if not new %}<label class="check"><input type="checkbox" name="enabled" {% if a.enabled %}checked{% endif %}> enabled</label>{% endif %}
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>Fallbacks</legend>
+    <label>Fallback models, tried in order {{ picker("fallbacks", a.fallbacks, "multi", "Add a fallback model…", True) }}</label>
+    <fieldset class="plain"><legend class="small muted">Move on to the next one when</legend>
+      <div class="row wrap">{% for t in triggers %}
+        <label class="check"><input type="checkbox" name="on_{{ t }}" {% if t in a.fallback_on %}checked{% endif %}> {{ t }}</label>
+      {% endfor %}</div></fieldset>
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>Compaction</legend>
+    <label>Mode <select name="compact">
+      {% for m in compact_modes %}<option value="{{ m }}" {% if a.compact == m %}selected{% endif %}>{{ m }}</option>{% endfor %}
+    </select>
+      <small class="muted">When a conversation is too big for the model: trim = shorten old tool outputs, then drop old
+      messages; summarise = replace old messages with a summary (kept and extended).</small></label>
+    <label>Summary model {{ picker("compact_model", a.compact_model, "single", "blank = the target model") }}
+      <small class="muted">Writes the summaries. Prefer a fast model, ideally on another provider (it uses a slot).</small></label>
+    <label>Context told to apps <input type="number" name="virtual_context" min="1024" value="{{ a.virtual_context or '' }}" placeholder="blank = the model's real one">
+      <small class="muted">e.g. 1000000: opencode keeps the whole conversation, and each request is fitted to the real model.</small></label>
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>Model council</legend>
+    <label>Mode <select name="council">
+      {% for m in council_modes %}<option value="{{ m }}" {% if a.council == m %}selected{% endif %}>{{ m }}</option>{% endfor %}
+    </select>
+      <small class="muted">pick = the judge chooses the best answer (fast; fine for tool calls); combine = the judge writes
+      the answer from them (with one member: reviews it).</small></label>
+    <label>Members (1–{{ council_max }}) {{ picker("council_members", a.council_members, "multi", "Add a member…") }}
+      <small class="muted">They answer at once; mix providers so they don't wait for each other's slots.</small></label>
+    <label>Judge {{ picker("council_judge", a.council_judge, "single", "blank = the target model") }}</label>
+    <label>On <select name="council_when">
+      {% for w in council_when %}<option value="{{ w }}" {% if a.council_when == w %}selected{% endif %}>{{ "planning steps (first step after your message, or the plan agent)" if w == "planning" else "every request" }}</option>{% endfor %}
+    </select></label>
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>Parameter rules</legend>
+    <label>Optional JSON <textarea name="params" rows="4" class="rules" placeholder='{"defaults": {"temperature": 0.6}, "overrides": {"chat_template_kwargs": {"enable_thinking": false}}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}'>{{ a.params }}</textarea>
+      <small class="muted">defaults (only when the app didn't set it) / overrides (always) / clamps / strip.</small></label>
+  </fieldset>
+
+  <div class="row">
+    <button type="submit">{% if new %}Add alias{% else %}Save{% endif %}</button>
+    <a href="/admin/models">Cancel</a>
+  </div>
+</form>
+
+{% if not new %}
+<form method="post" action="/admin/aliases/{{ a.id }}/delete" class="row" data-confirm="Delete alias {{ a.name }}? Apps using it will get errors.">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" class="danger">Delete alias</button>
+</form>
+{% endif %}
+{% endblock %}

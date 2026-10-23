@@ -122,7 +122,7 @@ async def test_members_fail_falls_back_and_validation(make_stack):
         assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "answer from mock-model"
         csrf = csrf_of((await c.get("/admin/models")).text)
         form = {"csrf": csrf, "name": "solo", "target_model": "mock-model", "council": "pick", "council_members": ""}
-        assert "m=created" not in (await c.post("/admin/aliases", data=form)).headers["location"]  # needs a member
+        assert "A council needs 1 to 64 members" in (await c.post("/admin/aliases", data=form)).text
 
 
 async def test_council_context_and_self_target(make_stack):
@@ -134,10 +134,10 @@ async def test_council_context_and_self_target(make_stack):
         config = (await c.get("/v1/opencode-config", headers=stack.headers)).json()
         assert config["provider"]["queuerouter"]["models"]["team"]["limit"]["context"] == 100_000  # the smallest
         form = {"csrf": csrf, "name": "loop", "target_model": "loop"}
-        assert "m=created" not in (await c.post("/admin/aliases", data=form)).headers["location"]
+        assert "Choose the model this alias sends to" in (await c.post("/admin/aliases", data=form)).text
         team = next(a for a in stack.app.state.store.list_aliases() if a.name == "team")
         r = await c.post(f"/admin/aliases/{team.id}", data={"csrf": csrf, "target_model": "team", "enabled": "on"})
-        assert "m=saved" not in r.headers["location"]
+        assert r.status_code == 200 and "Choose the model this alias sends to" in r.text
 
 
 async def test_leaving_mid_council_leaves_nothing_behind(make_stack):

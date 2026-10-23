@@ -250,3 +250,19 @@ details.ids { margin-top: 2px; }
 details.ids > div { overflow-wrap: anywhere; }
 ul.picker { margin: 12px 0; padding: 0; list-style: none; }
 ul.picker li[hidden] { display: none; }
+
+/* Alias editor: search-and-pick chips */
+.alias-editor fieldset.card { display: grid; gap: 12px; margin-bottom: 16px; }
+.alias-editor legend { font-weight: 600; }
+.picker { position: relative; }
+.picker-box { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.picker-chips { display: contents; }
+.picker-search { flex: 1 1 12em; min-width: 8em; border: 0; padding: 4px; background: transparent; }
+.picker-search:focus { outline: none; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 0.9em; cursor: default; }
+.chip[draggable="true"] { cursor: grab; }
+.chip.unknown { border-style: dashed; }
+.chip button { border: 0; background: none; padding: 0 4px; color: var(--muted); cursor: pointer; font-size: 1.1em; line-height: 1; }
+.picker-menu { position: absolute; z-index: 20; left: 0; right: 0; max-height: 18em; overflow-y: auto; margin: 4px 0 0; padding: 4px 0; list-style: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.picker-menu li { padding: 6px 10px; cursor: pointer; overflow-wrap: anywhere; }
+.picker-menu li.active, .picker-menu li:hover { background: var(--bg); }
