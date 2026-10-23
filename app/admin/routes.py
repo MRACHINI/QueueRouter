@@ -1380,6 +1380,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "council_members": members,
             "council_judge": judge,
             "council_when": when,
+            "council_instructions": str(form.get("council_instructions", "")).strip()[:4000],
         }
 
     def alias_from_form(form: dict, existing=None) -> SimpleNamespace:
@@ -1404,6 +1405,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             council_members=items("council_members"),
             council_judge=str(form.get("council_judge", "")).strip(),
             council_when=str(form.get("council_when", "planning")),
+            council_instructions=str(form.get("council_instructions", "")),
             enabled=form.get("enabled") == "on" if existing else True,
         )
 
@@ -1437,7 +1439,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         empty = SimpleNamespace(
             id=None, name="", target_model="", upstream_ids=(), notes="", params="", fallbacks=[],
             fallback_on=DEFAULT_TRIGGERS, compact="off", compact_model="", virtual_context=None, council="off",
-            council_members=[], council_judge="", council_when="planning", enabled=True,
+            council_members=[], council_judge="", council_when="planning", council_instructions="", enabled=True,
         )  # fmt: skip
         return alias_page(request, session, empty)
 

@@ -80,10 +80,19 @@ def render(message: dict, limit: int = CANDIDATE_CHARS) -> str:
     return text
 
 
-def judge_payload(payload: dict, model: str, mode: str, candidates: list[tuple[str, dict]]) -> dict:
+def judge_payload(
+    payload: dict, model: str, mode: str, candidates: list[tuple[str, dict]], instructions: str = ""
+) -> dict:
+    """The judge's request: the conversation, then the built-in instruction, the administrator's own
+    ``instructions`` (alias setting) and the answers. In pick mode the reply format is repeated last, so
+    added instructions can't change it (the answer must stay a number QueueRouter can read)."""
     limit = max(1_000, min(CANDIDATE_CHARS, JUDGE_READS // max(1, len(candidates))))
     listing = "\n\n".join(f"### Answer {i}\n{render(message, limit)}" for i, (_, message) in enumerate(candidates, 1))
     prompt = PICK_PROMPT if mode == "pick" else COMBINE_PROMPT
+    if instructions.strip():
+        prompt += f"\n\nAlso follow these instructions from the administrator:\n{instructions.strip()}"
+    if mode == "pick":
+        listing += "\n\nReply with only the number of the best answer."
     judged = {
         **payload,
         "model": model,

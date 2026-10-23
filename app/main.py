@@ -1762,7 +1762,7 @@ def create_app(
             if alias.council == "pick":
                 verdict = await internal_completion(
                     client,
-                    council_mod.judge_payload(payload, judge, "pick", candidates),
+                    council_mod.judge_payload(payload, judge, "pick", candidates, alias.council_instructions),
                     priority,
                     "council",
                     request_headers,
@@ -1775,7 +1775,7 @@ def create_app(
                     "" if verdict else " (no verdict)"
                 )
                 return answered[index][2], None
-            judged = council_mod.judge_payload(payload, judge, "combine", candidates)
+            judged = council_mod.judge_payload(payload, judge, "combine", candidates, alias.council_instructions)
             judge_headers = {
                 **request_headers,
                 "x-queuerouter-tags": ",".join([*tags, "council"]),
