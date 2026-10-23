@@ -17,6 +17,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
@@ -62,6 +63,16 @@ from .security import (
 log = logging.getLogger("queuerouter")
 TWO_FA_COOKIE, TWO_FA_TTL_S = "qr_2fa", 300
 ENABLED_COMPACT_MODES = ("off", "trim", "summarise")
+ALIAS_ERRORS = {  # what was wrong in the alias editor
+    "name": "An alias name uses letters, digits and . _ : / - (up to 128 characters, starting with a letter or digit).",
+    "target_model": "Choose the model this alias sends to (not the alias itself).",
+    "fallbacks": "Up to 10 fallback models.",
+    "compact": "Unknown compaction mode.",
+    "compact_model": "The summary model name is too long.",
+    "virtual_context": "Context told to apps: from 1,024 to 100,000,000 tokens, or blank.",
+    "council": "Unknown council setting.",
+    "council_members": "A council needs 1 to 64 members.",
+}
 PRICING_DAYS = 30  # the price table lists models used this recently (plus offered and manually priced ones)
 LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes / send anyway
 HERE = os.path.dirname(__file__)
@@ -245,6 +256,7 @@ class AdminContext:
     live_signature: Callable[[], tuple]
     context_table: Callable[[], list[dict]]
     upstream_models: Callable[[int], Awaitable[list[str] | None]]
+    model_choices: Callable[[], list[dict]]
 
 
 class NeedLogin(Exception):
@@ -1370,6 +1382,73 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "council_when": when,
         }
 
+    def alias_from_form(form: dict, existing=None) -> SimpleNamespace:
+        """What was submitted, to show the editor again after an error (nothing is saved)."""
+
+        def items(key: str) -> list[str]:
+            return [m.strip() for m in str(form.get(key, "")).replace("\n", ",").split(",") if m.strip()]
+
+        return SimpleNamespace(
+            id=existing.id if existing else None,
+            name=existing.name if existing else str(form.get("name", "")).strip(),
+            target_model=str(form.get("target_model", "")).strip(),
+            upstream_ids=tuple(int(v) for k, v in form.items() if k.startswith("upstream_") and str(v).isdigit()),
+            notes=str(form.get("notes", "")),
+            params=str(form.get("params", "")),
+            fallbacks=items("fallbacks"),
+            fallback_on=tuple(t for t in TRIGGERS if form.get(f"on_{t}") == "on"),
+            compact=str(form.get("compact", "off")),
+            compact_model=str(form.get("compact_model", "")).strip(),
+            virtual_context=str(form.get("virtual_context", "")).strip() or None,
+            council=str(form.get("council", "off")),
+            council_members=items("council_members"),
+            council_judge=str(form.get("council_judge", "")).strip(),
+            council_when=str(form.get("council_when", "planning")),
+            enabled=form.get("enabled") == "on" if existing else True,
+        )
+
+    def alias_page(request: Request, session: AdminSession, alias, error: str | None = None) -> HTMLResponse:
+        return page(
+            request,
+            "alias_edit.html",
+            session,
+            a=alias,
+            new=alias.id is None,
+            error=error,
+            triggers=TRIGGERS,
+            compact_modes=[m for m in COMPACT_MODES if m in ENABLED_COMPACT_MODES],
+            council_modes=COUNCIL_MODES,
+            council_when=COUNCIL_WHEN,
+            council_max=COUNCIL_MAX,
+            upstreams=store.list_upstreams(),
+            choices=ctx.model_choices(),
+        )
+
+    def alias_error(exc: Exception) -> str:
+        if isinstance(exc, RulesError):
+            return MESSAGES["rules_invalid"]
+        if isinstance(exc, sqlite3.IntegrityError):
+            return MESSAGES["exists"]
+        return ALIAS_ERRORS.get(str(exc), MESSAGES["invalid"])
+
+    @app.get("/admin/aliases/new")
+    async def alias_new(request: Request):
+        session = require(request, "admin")
+        empty = SimpleNamespace(
+            id=None, name="", target_model="", upstream_ids=(), notes="", params="", fallbacks=[],
+            fallback_on=DEFAULT_TRIGGERS, compact="off", compact_model="", virtual_context=None, council="off",
+            council_members=[], council_judge="", council_when="planning", enabled=True,
+        )  # fmt: skip
+        return alias_page(request, session, empty)
+
+    @app.get("/admin/aliases/{alias_id}")
+    async def alias_edit(alias_id: int, request: Request):
+        session = require(request, "admin")
+        alias = next((a for a in store.list_aliases() if a.id == alias_id), None)
+        if alias is None:
+            return back("/admin/models", error="invalid")
+        return alias_page(request, session, alias)
+
     @app.post("/admin/aliases")
     async def aliases_create(request: Request):
         session, form = await require_post(request, "admin")
@@ -1380,27 +1459,26 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             fields = alias_fields(form, name)
             target_model, upstream_ids = fields.pop("target_model"), fields.pop("upstream_ids")
             store.create_alias(name, target_model, upstream_ids, session.user.username, **fields)
-        except RulesError:
-            return back("/admin/models", error="rules_invalid")
-        except ValueError:
-            return back("/admin/models", error="invalid")
-        except sqlite3.IntegrityError:
-            return back("/admin/models", error="exists")
+        except (RulesError, ValueError, sqlite3.IntegrityError) as exc:
+            return alias_page(request, session, alias_from_form(form), alias_error(exc))
         ctx.reload()
         return back("/admin/models", "created")
 
     @app.post("/admin/aliases/{alias_id}")
     async def aliases_update(alias_id: int, request: Request):
         session, form = await require_post(request, "admin")
-        name = next((a.name for a in store.list_aliases() if a.id == alias_id), "")
+        existing = next((a for a in store.list_aliases() if a.id == alias_id), None)
+        if existing is None:
+            return back("/admin/models", error="invalid")
         try:
             store.update_alias(
-                alias_id, session.user.username, enabled=form.get("enabled") == "on", **alias_fields(form, name)
+                alias_id,
+                session.user.username,
+                enabled=form.get("enabled") == "on",
+                **alias_fields(form, existing.name),
             )
-        except RulesError:
-            return back("/admin/models", error="rules_invalid")
-        except (ValueError, KeyError):
-            return back("/admin/models", error="invalid")
+        except (RulesError, ValueError, KeyError) as exc:
+            return alias_page(request, session, alias_from_form(form, existing), alias_error(exc))
         ctx.reload()
         return back("/admin/models", "saved")
 

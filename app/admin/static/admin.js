@@ -105,6 +105,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const dashboard = document.getElementById("dashboard");
   if (dashboard) liveDashboard(dashboard);
   document.querySelectorAll("[data-model-picker]").forEach(modelPicker);
+  const choicesData = document.getElementById("model-choices");
+  if (choicesData) {
+    const choices = JSON.parse(choicesData.textContent || "[]");
+    document.querySelectorAll("[data-picker]").forEach((root) => chipPicker(root, choices));
+  }
   const liveRequestsRoot = document.getElementById("requests-live");
   if (liveRequestsRoot) liveRequests(liveRequestsRoot);
   const usage = document.getElementById("usage-live");
@@ -674,4 +679,135 @@ function modelPicker(form) {
   form.querySelector("[data-picker-all]")?.addEventListener("click", setAll(true));
   form.querySelector("[data-picker-none]")?.addEventListener("click", setAll(false));
   form.addEventListener("change", update);
+}
+
+// Alias editor: search-and-pick chips for model fields. The hidden input keeps the value as the server
+// reads it ("a, b, c"; one name for single pickers).
+function chipPicker(root, choices) {
+  const single = root.dataset.picker === "single";
+  const ordered = root.hasAttribute("data-ordered");
+  const hidden = root.querySelector('input[type="hidden"]');
+  const chips = root.querySelector(".picker-chips");
+  const search = root.querySelector(".picker-search");
+  const menu = root.querySelector(".picker-menu");
+  const byId = new Map(choices.map((c) => [c.id, c]));
+  let values = hidden.value.split(",").map((v) => v.trim()).filter(Boolean);
+  let shown = [];
+  let active = 0;
+  let dragged = null;
+
+  const describe = (c) => {
+    if (!c) return "not listed by any upstream";
+    if (c.alias) return "alias";
+    const size = c.context ? ` · ${c.context >= 1000 ? Math.round(c.context / 1000) + "k" : c.context}` : "";
+    return `${c.upstreams.join(", ")}${size}${c.hidden ? " · hidden" : ""}`;
+  };
+  const save = () => {
+    hidden.value = values.join(", ");
+    renderChips();
+  };
+  const add = (id) => {
+    id = id.trim();
+    if (!id) return;
+    values = single ? [id] : values.includes(id) ? values : [...values, id];
+    search.value = "";
+    save();
+    close();
+  };
+  function renderChips() {
+    chips.replaceChildren(...values.map((id, i) => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.title = describe(byId.get(id));
+      if (!byId.has(id)) chip.classList.add("unknown");
+      chip.textContent = (ordered && values.length > 1 ? `${i + 1}. ` : "") + id;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", `Remove ${id}`);
+      remove.addEventListener("click", () => {
+        values = values.filter((v) => v !== id);
+        save();
+      });
+      chip.append(remove);
+      if (ordered && !single) {
+        chip.draggable = true;
+        chip.addEventListener("dragstart", () => { dragged = i; });
+        chip.addEventListener("dragover", (event) => event.preventDefault());
+        chip.addEventListener("drop", (event) => {
+          event.preventDefault();
+          if (dragged === null || dragged === i) return;
+          const moved = values.splice(dragged, 1)[0];
+          values.splice(i, 0, moved);
+          dragged = null;
+          save();
+        });
+      }
+      return chip;
+    }));
+    search.placeholder = single && values.length ? "Change…" : search.getAttribute("aria-label");
+  }
+  function open() {
+    const words = search.value.toLowerCase().split(/\s+/).filter(Boolean);
+    shown = choices
+      .filter((c) => single || !values.includes(c.id))
+      .filter((c) => words.every((w) => c.id.toLowerCase().includes(w) || describe(c).toLowerCase().includes(w)))
+      .slice(0, 60);
+    active = 0;
+    menu.replaceChildren(...shown.map((c, i) => {
+      const item = document.createElement("li");
+      item.setAttribute("role", "option");
+      item.className = i === active ? "active" : "";
+      const name = document.createElement("span");
+      name.className = "mono";
+      name.textContent = c.id;
+      const meta = document.createElement("span");
+      meta.className = "muted small";
+      meta.textContent = ` ${describe(c)}`;
+      item.append(name, meta);
+      item.addEventListener("mousedown", (event) => {
+        event.preventDefault(); // keep focus in the search box
+        add(c.id);
+      });
+      return item;
+    }));
+    if (!shown.length && search.value.trim()) {
+      const item = document.createElement("li");
+      item.className = "muted small";
+      item.textContent = `Enter: add "${search.value.trim()}" (not listed by any upstream)`;
+      menu.append(item);
+    }
+    menu.hidden = !menu.children.length;
+  }
+  function close() {
+    menu.hidden = true;
+  }
+  const highlight = () => [...menu.children].forEach((li, i) => li.classList.toggle("active", i === active));
+
+  search.addEventListener("focus", open);
+  search.addEventListener("input", open);
+  search.addEventListener("blur", () => setTimeout(close, 100));
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (menu.hidden) open();
+      active = Math.max(0, Math.min(shown.length - 1, active + (event.key === "ArrowDown" ? 1 : -1)));
+      highlight();
+      menu.children[active]?.scrollIntoView({ block: "nearest" });
+    } else if (event.key === "Enter") {
+      event.preventDefault(); // never submit the form from here
+      if (!menu.hidden && shown[active]) add(shown[active].id);
+      else add(search.value);
+    } else if (event.key === "Escape") {
+      close();
+    } else if (event.key === "Backspace" && !search.value && values.length) {
+      values = values.slice(0, -1);
+      save();
+    }
+  });
+  // a name typed but not added (no Enter) still counts when the form is sent
+  root.closest("form")?.addEventListener("submit", () => {
+    if (search.value.trim()) add(search.value);
+  });
+  renderChips();
 }

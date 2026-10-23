@@ -1154,6 +1154,10 @@ v0.28.3: requests QueueRouter makes for another one (council members and judge, 
 served (requests.role / parent); request ids shown on the Requests page.
 v0.28.4: a council takes 1 to 64 members (one member + combine = the judge reviews it; pick needs no judge for one
 answer); the judge reads at most ~120k characters of answers in all, shared between them.
+v0.29.0: alias editor — one page per alias (and for a new one) with sections (model, fallbacks, compaction,
+council, parameter rules) and search-and-pick chips for every model field (providers, context, hidden models; drag
+to reorder fallbacks; unlisted names can be typed); errors are shown on the page with what was typed; the Models
+page lists aliases compactly.
 
 ### Later (agreed, not scheduled)
 
@@ -1219,6 +1223,13 @@ answer); the judge reads at most ~120k characters of answers in all, shared betw
   - *Costs:* you wait for the slowest member plus the judge, nothing streams meanwhile (keep-alive comments
     hold the connection); several times the tokens.
   - *Shown:* the Requests page lists each member's call and the judge's choice.
+- **Orchestrator (alias mode, later; requested 2026-10-24).** Unlike the council (members answer the same
+  request at once, the judge only reads the results), an orchestrator model directs the work: it decides what
+  to ask each member (or splits the task between them), reads their answers and may ask again, then writes the
+  final answer. More powerful for big tasks (research, large refactors, reviews), but several rounds before
+  anything reaches the app and more slot use, so not for ordinary coding steps. Would need: a round limit and
+  time budget, the orchestrator's instructions per alias, each round's calls shown on the Requests page
+  (role + parent, as for council members), and keep-alives to the app while it works.
 - **Choose which models an upstream offers** (done: v0.28.0; aliases may use hidden models). When adding or editing an
   upstream, pick which of its models are offered (all by default; a checklist from its model list, with
   search and select all / none, since some providers list 100+). Hidden models don't appear in /v1/models,

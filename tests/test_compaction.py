@@ -76,7 +76,8 @@ async def test_alias_compacts_before_sending(make_stack):
         await c.post("/admin/model-limits", data={"csrf": csrf, "model": "small-model", "context": "12000"})
         form = {"csrf": csrf, "name": "lean", "target_model": "small-model", "compact": "trim"}
         assert "m=created" in (await c.post("/admin/aliases", data=form)).headers["location"]
-        assert 'value="trim" selected' in (await c.get("/admin/models")).text
+        lean = next(a for a in stack.app.state.store.list_aliases() if a.name == "lean")
+        assert 'value="trim" selected' in (await c.get(f"/admin/aliases/{lean.id}")).text
 
         payload = {"model": "lean", "messages": conversation(14, 4_000)}  # ~14k tokens: over the 12k limit
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=payload)

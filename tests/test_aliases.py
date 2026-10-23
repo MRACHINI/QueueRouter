@@ -40,7 +40,7 @@ async def test_alias_rewrites_model_and_appears_in_models(make_stack):
         assert (recent["model"], recent["target_model"]) == ("smart", "mock-model")
 
         dup = await add_alias(c, "smart", "other")
-        assert "e=exists" in dup.headers["location"]
+        assert dup.status_code == 200 and "already taken" in dup.text  # shown again with the error
 
 
 async def test_alias_pinned_to_upstream(make_stack, make_mock):
@@ -77,4 +77,34 @@ async def test_alias_permissions_and_disable(make_stack):
         assert r.status_code == 404 and r.json()["error"]["type"] == "model_not_found"
 
         bad = await add_alias(c, "bad name!", "x")
-        assert "e=invalid" in bad.headers["location"]
+        assert bad.status_code == 200 and "An alias name uses letters" in bad.text and "bad name!" in bad.text
+
+
+async def test_alias_editor_pages(make_stack):
+    """Each alias has its own editor with model pickers (search-and-pick chips); errors keep what was typed."""
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["extra_models"] = ["small-model"]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await c.get("/v1/models", headers=stack.headers)
+        await login(c, stack.url)
+        new = (await c.get("/admin/aliases/new")).text
+        assert (
+            'action="/admin/aliases"' in new
+            and 'data-picker="single"' in new
+            and 'data-picker="multi" data-ordered' in new
+        )
+        assert '"id": "small-model"' in new and '"upstreams": ["upstream"]' in new  # the choices the pickers offer
+        csrf = csrf_of(new)
+        form = {"csrf": csrf, "name": "team", "target_model": "mock-model", "fallbacks": "small-model, mock-model",
+                "council": "combine", "council_members": "", "on_errors": "on"}  # fmt: skip
+        bad = await c.post("/admin/aliases", data=form)
+        assert "A council needs 1 to 64 members" in bad.text and 'value="small-model, mock-model"' in bad.text
+        form["council_members"] = "small-model"
+        assert "m=created" in (await c.post("/admin/aliases", data=form)).headers["location"]
+        alias = next(a for a in stack.app.state.store.list_aliases() if a.name == "team")
+        assert alias.fallbacks == ("small-model", "mock-model") and alias.council_members == ("small-model",)
+        listing = (await c.get("/admin/models")).text
+        assert f'href="/admin/aliases/{alias.id}"' in listing and 'href="/admin/aliases/new"' in listing
+        edit = (await c.get(f"/admin/aliases/{alias.id}")).text
+        assert 'name="fallbacks" value="small-model, mock-model"' in edit and "Delete alias" in edit
+        assert (await c.get("/admin/aliases/999")).status_code in (303, 307)
