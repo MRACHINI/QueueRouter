@@ -160,3 +160,24 @@ async def test_leaving_mid_council_leaves_nothing_behind(make_stack):
         assert live["inflight"] == [] and live["active"] == 0
         quick = {"model": "mock-model", "messages": ASK}  # the slot is free again
         assert (await c.post("/v1/chat/completions", headers=stack.headers, json=quick)).status_code == 200
+
+
+async def test_members_carry_the_apps_identity_and_their_role(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    store = stack.app.state.store
+    app_headers = {**stack.headers, "User-Agent": "opencode/2.1.4", "x-opencode-session-id": "ses_9"}
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack)
+        r = await c.post("/v1/chat/completions", headers=app_headers, json={"model": "team", "messages": ASK})
+        assert r.status_code == 200
+        assert stack.mock["last_headers"]["user-agent"] == "opencode/2.1.4"  # what the provider sees
+        assert stack.mock["last_headers"]["authorization"] == "Bearer upstream-secret"  # the upstream key, not ours
+        assert not any(k.startswith("x-queuerouter-") for k in stack.mock["last_headers"])
+        rows = await rows_with(store, lambda row: row["role"] == "council judge")
+        council = next(row for row in rows if row["council"])
+        helpers = [row for row in rows if row["role"]]
+        assert sorted(row["role"] for row in helpers) == ["council judge", "council member 1/2", "council member 2/2"]
+        assert all(row["parent"] == council["id"] and row["user_agent"] == "opencode/2.1.4" for row in helpers)
+        assert all("x-opencode-session-id" in (row["client_headers"] or "") for row in helpers)
+        page = (await c.get("/admin/requests")).text
+        assert f"for {council['id']}" in page and "council member 1/2" in page
