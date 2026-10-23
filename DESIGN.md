@@ -1158,6 +1158,8 @@ v0.29.0: alias editor — one page per alias (and for a new one) with sections (
 council, parameter rules) and search-and-pick chips for every model field (providers, context, hidden models; drag
 to reorder fallbacks; unlisted names can be typed); errors are shown on the page with what was typed; the Models
 page lists aliases compactly.
+v0.29.1: judge instructions per council alias (aliases.council_instructions), added after the built-in instruction;
+in pick mode the reply format is repeated last so they can't change it.
 
 ### Later (agreed, not scheduled)
 

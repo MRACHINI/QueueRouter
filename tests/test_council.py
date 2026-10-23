@@ -195,3 +195,35 @@ async def test_one_member_and_many(make_stack):
     many = [(f"m{i}", {"content": "x" * 20_000}) for i in range(64)]
     judged = judge_payload({"messages": ASK}, "judge", "pick", many)["messages"][-1]["content"]
     assert judged.count("### Answer") == 64 and len(judged) < 140_000  # each answer gets its share
+
+
+async def test_judge_instructions(make_stack):
+    from app.council import judge_payload
+
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack)
+        team = next(a for a in stack.app.state.store.list_aliases() if a.name == "team")
+        page = (await c.get(f"/admin/aliases/{team.id}")).text
+        form = {
+            "csrf": csrf_of(page),
+            "target_model": "mock-model",
+            "council": "pick",
+            "enabled": "on",
+            "council_members": "mock-model, small-model",
+            "council_instructions": "Prefer the shortest answer.",
+        }
+        assert "m=saved" in (await c.post(f"/admin/aliases/{team.id}", data=form)).headers["location"]
+        assert "Prefer the shortest answer." in (await c.get(f"/admin/aliases/{team.id}")).text
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.status_code == 200
+        judged = stack.mock["judge_inputs"][-1]
+        assert "instructions from the administrator:\nPrefer the shortest answer." in judged
+        assert judged.rstrip().endswith("Reply with only the number of the best answer.")  # the format stays last
+    combine = judge_payload({"messages": ASK}, "j", "combine", [("a", {"content": "x"})], "Be brief.")
+    text = combine["messages"][-1]["content"]
+    assert "Be brief." in text and not text.rstrip().endswith("number of the best answer.")
+    assert (
+        "administrator"
+        not in judge_payload({"messages": ASK}, "j", "pick", [("a", {"content": "x"})])["messages"][-1]["content"]
+    )

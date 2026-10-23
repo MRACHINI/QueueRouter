@@ -69,6 +69,9 @@ reorder where order matters. A name no provider lists can be typed and added wit
     <label>Members (1–{{ council_max }}) {{ picker("council_members", a.council_members, "multi", "Add a member…") }}
       <small class="muted">They answer at once; mix providers so they don't wait for each other's slots.</small></label>
     <label>Judge {{ picker("council_judge", a.council_judge, "single", "blank = the target model") }}</label>
+    <label>Judge instructions <textarea name="council_instructions" rows="3" maxlength="4000" placeholder="optional, e.g. Prefer the smallest change that fixes the problem. Reject answers that skip tests. Answer in Arabic.">{{ a.council_instructions }}</textarea>
+      <small class="muted">Added to the built-in instruction (pick: choose the best answer by number; combine: write the
+      best reply from them). In pick mode the judge still answers with a number.</small></label>
     <label>On <select name="council_when">
       {% for w in council_when %}<option value="{{ w }}" {% if a.council_when == w %}selected{% endif %}>{{ "planning steps (first step after your message, or the plan agent)" if w == "planning" else "every request" }}</option>{% endfor %}
     </select></label>
