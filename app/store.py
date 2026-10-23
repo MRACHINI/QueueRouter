@@ -392,6 +392,12 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE upstreams ADD COLUMN model_filter TEXT NOT NULL DEFAULT '';
     """,
+    # 27: requests QueueRouter makes for another one (council members and judge, summaries): their role and
+    # the request they served
+    """
+    ALTER TABLE requests ADD COLUMN role TEXT;
+    ALTER TABLE requests ADD COLUMN parent TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -437,6 +443,8 @@ REQUEST_COLUMNS = (
     "compaction",
     "council",
     "client_headers",
+    "role",
+    "parent",
 )
 
 

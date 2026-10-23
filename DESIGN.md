@@ -1149,6 +1149,9 @@ v0.28.1: an alias can't point at itself; a council alias tells apps the smallest
 members (opencode showed 128k, its default, for a council whose target was its own name).
 v0.28.2: a request shows in the Now list only once its work starts, and a stream passed on (council judge,
 answer after a summary) is closed when the app leaves — abandoned council answers stayed listed as queued for hours.
+v0.28.3: requests QueueRouter makes for another one (council members and judge, summaries) carry the app's identity
+(its headers minus credentials: User-Agent, session ids) and are labelled with their role and the request they
+served (requests.role / parent); request ids shown on the Requests page.
 
 ### Later (agreed, not scheduled)
 

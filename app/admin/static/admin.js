@@ -579,6 +579,12 @@ function liveRequests(root) {
         line.append(el("span", "badge", `${label}: ${r[key]}`));
         model.append(line);
       }
+      if (r.role) { // made by QueueRouter for another request (council member or judge, summary)
+        const line = el("div", "small");
+        line.append(el("span", "badge", r.role));
+        if (r.parent) line.append(" ", el("span", "muted mono", `for ${r.parent}`));
+        model.append(line);
+      }
       // waiting for its conversation's summary, or for its council's members and judge
       const waiting = r.stage === "compacting" || r.stage === "council";
       const queued = r.stage === "queued" || waiting;
@@ -598,7 +604,7 @@ function liveRequests(root) {
       const input = td("In tokens", r.estimate ? `~${Number(r.estimate).toLocaleString()}` : "—");
       if (r.estimate) input.title = "QueueRouter's estimate; the provider's count arrives when it finishes";
       tr.append(
-        td("Time", time), client, model, td("Upstream", r.upstream || "—"), outcome, queueMs, ttft, upstreamMs,
+        td("Time", time, el("div", "small muted mono", r.id || "")), client, model, td("Upstream", r.upstream || "—"), outcome, queueMs, ttft, upstreamMs,
         input, td("Out tokens", "—"), td("Finish", r.stream ? "streaming…" : "—"),
       );
       return tr;

@@ -74,6 +74,8 @@ log = logging.getLogger("queuerouter")
 
 HEALTH_INTERVAL_S = 30
 IDLE_AFTER_S = 45  # a conversation this quiet gets its summary updated in the background (summarise mode)
+# Headers of the original request not passed on to the requests QueueRouter makes for it.
+_NOT_INHERITED = {"authorization", "x-api-key", "cookie", "host", "content-length", "content-type", "accept-encoding"}
 HISTORY_POINTS, HISTORY_EVERY_S = 1800, 1  # dashboard chart: 30 minutes, one point per second
 QUOTA_BLOCK_S = 3600  # how long an upstream whose quota ran out is skipped for that model (unless it says)
 ADMIN_MAX_BODY = 4 * 1024 * 1024  # admin forms and the Playground (the restore upload has its own limit)
@@ -131,6 +133,8 @@ class RequestLog:
             "compaction": None,  # e.g. "trim 812k -> 402k": the conversation was shrunk to fit (app/compaction.py)
             "council": None,  # e.g. "pick 2/3: GLM-4.7": what a model council did (app/council.py)
             "client_headers": None,  # what the app sent about itself (app/upstream.py client_identity)
+            "role": None,  # e.g. "council member 1/2", "council judge", "summary": made by QueueRouter for...
+            "parent": None,  # ...this request (its id)
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -779,6 +783,8 @@ def create_app(
                     "compaction": f["compaction"],
                     "council": f.get("council"),
                     "client_headers": f.get("client_headers"),
+                    "role": f.get("role"),
+                    "parent": f.get("parent"),
                     "position": f["position"],
                     "estimate": f.get("estimate"),
                     "path": f["path"],
@@ -1520,10 +1526,18 @@ def create_app(
     # -- compaction: summarise mode (see app/compaction.py) ---------------------------------
 
     async def internal_completion(
-        client: ClientKey, payload: dict, priority: str, tag: str = "compaction"
+        client: ClientKey,
+        payload: dict,
+        priority: str,
+        tag: str = "compaction",
+        origin: Mapping[str, str] | None = None,
+        role: str | None = None,
+        parent: str | None = None,
     ) -> bytes | None:
         """A chat completion through the normal pipeline (queue, limits, Requests page) as ``client``;
-        the answer's body, or None if it failed."""
+        the answer's body, or None if it failed. ``origin``: the headers of the request it is made for,
+        so it identifies as the same app (User-Agent, session ids; never credentials), on the Requests
+        page and at the provider; ``role`` and ``parent`` label it there."""
         scope = {
             "type": "http",
             "method": "POST",
@@ -1537,11 +1551,15 @@ def create_app(
             "root_path": "",
             "http_version": "1.1",
         }
-        headers = {
-            "content-type": "application/json",
-            "x-queuerouter-priority": priority,
-            "x-queuerouter-tags": tag,
-        }
+        headers = {k.lower(): v for k, v in (origin or {}).items() if k.lower() not in _NOT_INHERITED}
+        headers = {k: v for k, v in headers.items() if not k.startswith("x-queuerouter-")}
+        headers.update(
+            {"content-type": "application/json", "x-queuerouter-priority": priority, "x-queuerouter-tags": tag}
+        )
+        if role:
+            headers["x-queuerouter-role"] = role
+        if parent:
+            headers["x-queuerouter-parent"] = parent
         try:
             response = await serve(
                 Request(scope, _never_disconnects),
@@ -1596,6 +1614,7 @@ def create_app(
         model: str,
         context: int | None,
         priority: str,
+        origin: Mapping[str, str] | None = None,
     ) -> tuple[str | None, bool]:
         """(summary of messages[cut_from:cut_to], whether an earlier summary was extended). Rolling: an
         earlier summary of a shorter stretch is extended with just the newly old part, in chunks that fit
@@ -1606,7 +1625,8 @@ def create_app(
         budget = (context or 131_072) * 0.6 - compaction_mod.SUMMARY_TOKENS - 1_000
         size = max(int(budget * CHARS_PER_TOKEN), 8_000)
         for part in compaction_mod.chunks(messages[begin:cut_to], size):
-            body = await internal_completion(client, compaction_mod.summary_payload(model, text, part), priority)
+            summary_request = compaction_mod.summary_payload(model, text, part)
+            body = await internal_completion(client, summary_request, priority, "compaction", origin, "summary")
             if body is None or (text := compaction_mod.summary_text(body) or "") == "":
                 return None, extended
         return text or None, extended
@@ -1623,6 +1643,7 @@ def create_app(
         start_at: float = compaction_mod.START_AT,
         background: bool = False,
         write: bool = True,
+        origin: Mapping[str, str] | None = None,
     ) -> compaction_mod.Result | None:
         """Summarise mode: reuse the conversation's summary while the request stays under ``start_at`` of
         the context, else extend it (down to about half). With ``background``, a request that still fits
@@ -1646,7 +1667,9 @@ def create_app(
                 if key not in summarising:  # one background update per conversation
                     summarising.add(key)
                     asyncio.ensure_future(
-                        background_summary(key, client, session, payload, context, output, alias, step_model, "low")
+                        background_summary(
+                            key, client, session, payload, context, output, alias, step_model, "low", origin
+                        )
                     )
                 after = estimate_prompt_tokens(current)
                 return compaction_mod.Result(current, before, after, "summarise", previous is not None, "updating")
@@ -1655,7 +1678,7 @@ def create_app(
                 return None
             model, model_ctx = summariser(alias, step_model)
             text, extended = await write_summary(
-                client, messages, cut.cut_from, cut.cut_to, previous, model, model_ctx, priority
+                client, messages, cut.cut_from, cut.cut_to, previous, model, model_ctx, priority, origin
             )
             if text is None:
                 return None
@@ -1679,6 +1702,8 @@ def create_app(
             client=client.name,
             user_agent=(request_headers.get("user-agent") or "")[:300] or None,
             client_headers=client_identity(request_headers, payload),
+            role=(request_headers.get("x-queuerouter-role") or "")[:80] or None,
+            parent=(request_headers.get("x-queuerouter-parent") or "")[:40] or None,
             priority=priority,
             model=alias.name,
             tags=",".join([*tags, "council"]),
@@ -1691,7 +1716,18 @@ def create_app(
             base = {k: v for k, v in payload.items() if k not in ("stream", "stream_options")}
             members = alias.council_members[: council_mod.MAX_MEMBERS]
             bodies = await asyncio.gather(
-                *(internal_completion(client, {**base, "model": m}, priority, "council") for m in members)
+                *(
+                    internal_completion(
+                        client,
+                        {**base, "model": m},
+                        priority,
+                        "council",
+                        request_headers,
+                        f"council member {i}/{len(members)}",
+                        rlog.fields["id"],
+                    )
+                    for i, m in enumerate(members, 1)
+                )
             )
             answered = [
                 (m, msg, b) for m, b in zip(members, bodies, strict=True) if b and (msg := council_mod.message_of(b))
@@ -1706,7 +1742,13 @@ def create_app(
             candidates = [(m, msg) for m, msg, _ in answered]
             if alias.council == "pick":
                 verdict = await internal_completion(
-                    client, council_mod.judge_payload(payload, judge, "pick", candidates), priority, "council"
+                    client,
+                    council_mod.judge_payload(payload, judge, "pick", candidates),
+                    priority,
+                    "council",
+                    request_headers,
+                    "council judge",
+                    rlog.fields["id"],
                 )
                 said = (council_mod.message_of(verdict) or {}).get("content") if verdict else None
                 index = council_mod.parse_pick(said, len(answered))
@@ -1715,7 +1757,12 @@ def create_app(
                 )
                 return answered[index][2], None
             judged = council_mod.judge_payload(payload, judge, "combine", candidates)
-            judge_headers = {**request_headers, "x-queuerouter-tags": ",".join([*tags, "council"])}
+            judge_headers = {
+                **request_headers,
+                "x-queuerouter-tags": ",".join([*tags, "council"]),
+                "x-queuerouter-role": "council judge",
+                "x-queuerouter-parent": rlog.fields["id"],
+            }
             response = await serve(
                 request,
                 client,
@@ -1848,9 +1895,13 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-QueueRouter-Compacting": "summary"},
         )
 
-    async def background_summary(key, client, session, payload, context, output, alias, step_model, priority) -> None:
+    async def background_summary(
+        key, client, session, payload, context, output, alias, step_model, priority, origin=None
+    ) -> None:
         try:
-            result = await summarise_request(client, session, payload, context, output, alias, step_model, priority)
+            result = await summarise_request(
+                client, session, payload, context, output, alias, step_model, priority, origin=origin
+            )
             if result is not None and not result.reused:
                 log.info(json.dumps({"event": "summary_background", "client": client.name, "result": result.label}))
         except Exception as exc:
@@ -1869,11 +1920,12 @@ def create_app(
         output: int
         alias: object
         step_model: str
+        origin: Mapping[str, str] | None = None
         seen: float = dataclasses.field(default_factory=time.monotonic)
 
     idle_watch: dict[str, IdleWatch] = {}
 
-    def watch_idle(client, session, payload, result, context, output, alias, step_model) -> None:
+    def watch_idle(client, session, payload, result, context, output, alias, step_model, origin=None) -> None:
         """Remember a conversation whose request (after compaction) is above ~70% of its model's context,
         for an idle update of its summary; others are forgotten."""
         key = compaction_mod.conversation_key(client.name, session, payload.get("messages"))
@@ -1886,7 +1938,7 @@ def create_app(
             idle_watch.pop(key, None)
             return
         idle_watch.pop(key, None)
-        idle_watch[key] = IdleWatch(client, session, payload, context, output, alias, step_model)
+        idle_watch[key] = IdleWatch(client, session, payload, context, output, alias, step_model, origin)
         while len(idle_watch) > 50:  # each holds a whole conversation: keep only the most recent
             idle_watch.pop(next(iter(idle_watch)))
 
@@ -1918,6 +1970,7 @@ def create_app(
                         watch.step_model,
                         "low",
                         compaction_mod.IDLE_START_AT,
+                        origin=watch.origin,
                     )
                     if result is not None and not result.reused:
                         log.info(
@@ -2497,6 +2550,7 @@ def create_app(
                             alias,
                             step_model,
                             priority,
+                            origin=request_headers,
                         )
                         return deferred_response(request, client, path, body, headers, query, write, model, priority)
                     result = await summarise_request(
@@ -2510,8 +2564,9 @@ def create_app(
                         priority,
                         background=True,
                         write=allow_defer or not step_payload.get("stream"),
+                        origin=request_headers,
                     )
-                    watch_idle(client, session, full, result, context, output, alias, step_model)
+                    watch_idle(client, session, full, result, context, output, alias, step_model, request_headers)
                 if result is None:  # trim mode, or a summary couldn't be written: trim instead
                     plans.idle_s = cfg().compaction_idle_minutes * 60
                     key = f"{client.name}:{session}:{step_model}" if session else None
@@ -2581,6 +2636,8 @@ def create_app(
             client=client.name,
             user_agent=(request_headers.get("user-agent") or "")[:300] or None,
             client_headers=client_identity(request_headers, payload),
+            role=(request_headers.get("x-queuerouter-role") or "")[:80] or None,
+            parent=(request_headers.get("x-queuerouter-parent") or "")[:40] or None,
             priority=LANE_NAMES[lane],
             session=session and session[:8],
             position=position,
