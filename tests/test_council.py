@@ -138,3 +138,25 @@ async def test_council_context_and_self_target(make_stack):
         team = next(a for a in stack.app.state.store.list_aliases() if a.name == "team")
         r = await c.post(f"/admin/aliases/{team.id}", data={"csrf": csrf, "target_model": "team", "enabled": "on"})
         assert "m=saved" not in r.headers["location"]
+
+
+async def test_leaving_mid_council_leaves_nothing_behind(make_stack):
+    """The app gives up while members answer, or while the judge streams: no row stays in the Now list
+    and no slot stays taken."""
+    stack = make_stack(limit=1, bootstrap=OWNER, models_cache_s=0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack, mode="combine", judge="small-model")
+        slow = {"model": "team", "messages": ASK, "stream": True, "mock_delay": 0.3, "mock_chunks": 20}
+        for wait_for in (b": council", b"data:"):  # leave during the members, then during the judge's stream
+            async with c.stream("POST", "/v1/chat/completions", headers=stack.headers, json=slow) as s:
+                async for chunk in s.aiter_bytes():
+                    if wait_for in chunk:
+                        break
+        for _ in range(100):
+            live = (await c.get("/admin/api/stats")).json()
+            if not live["inflight"] and live["active"] == 0:
+                break
+            await asyncio.sleep(0.1)
+        assert live["inflight"] == [] and live["active"] == 0
+        quick = {"model": "mock-model", "messages": ASK}  # the slot is free again
+        assert (await c.post("/v1/chat/completions", headers=stack.headers, json=quick)).status_code == 200

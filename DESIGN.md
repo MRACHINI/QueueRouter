@@ -1147,6 +1147,8 @@ upstream opens its choice); the provider's error text on every failed request (r
 streaming or not, connection errors); dashboard per-client tokens split into in / out.
 v0.28.1: an alias can't point at itself; a council alias tells apps the smallest context of its target, judge and
 members (opencode showed 128k, its default, for a council whose target was its own name).
+v0.28.2: a request shows in the Now list only once its work starts, and a stream passed on (council judge,
+answer after a summary) is closed when the app leaves — abandoned council answers stayed listed as queued for hours.
 
 ### Later (agreed, not scheduled)
 

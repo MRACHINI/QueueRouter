@@ -1767,6 +1767,8 @@ def create_app(
                 log.warning(json.dumps({"event": "council_failed", "error": repr(exc)[:200]}))
                 content, response = None, None
             finally:
+                if not task.done():  # the app went away while members answered: stop the council
+                    task.cancel()
                 finish(ok)
             if content is not None:
                 yield council_mod.as_stream(content, alias.target_model)
@@ -1774,8 +1776,10 @@ def create_app(
             if response is None:
                 response = await fallback()
             if isinstance(response, StreamingResponse):
-                async for chunk in response.body_iterator:
-                    yield chunk if isinstance(chunk, bytes) else chunk.encode()
+                # closed with us: when the app goes away mid-answer, its slot is released at once
+                async with contextlib.aclosing(response.body_iterator) as chunks:
+                    async for chunk in chunks:
+                        yield chunk if isinstance(chunk, bytes) else chunk.encode()
             elif response.status_code >= 400:
                 yield b"data: " + bytes(response.body).replace(b"\n", b" ") + b"\n\n"
             else:
@@ -1829,8 +1833,10 @@ def create_app(
                 task.result()
             response = await serve(request, client, path, body, headers, query, allow_defer=False)
             if isinstance(response, StreamingResponse):
-                async for chunk in response.body_iterator:
-                    yield chunk if isinstance(chunk, bytes) else chunk.encode()
+                # closed with us: when the app goes away mid-answer, its slot is released at once
+                async with contextlib.aclosing(response.body_iterator) as chunks:
+                    async for chunk in chunks:
+                        yield chunk if isinstance(chunk, bytes) else chunk.encode()
             elif response.status_code >= 400:  # headers are sent: an error goes out as a stream event
                 yield b"data: " + bytes(response.body).replace(b"\n", b" ") + b"\n\n"
             else:
@@ -2567,7 +2573,6 @@ def create_app(
                     )
         position = queue.predict_position(client.name, lane, session)
         rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies))
-        inflight[request_id] = rlog  # shown live on the dashboard until it finishes
         if cfg().otel_endpoint:  # tracing: continue the caller's trace, hand ours to the provider
             trace = tracing.start(request_headers.get("traceparent"))
             rlog.fields["trace"] = trace
@@ -2644,6 +2649,7 @@ def create_app(
 
     async def nonstream_flow(adm: Admission) -> Response:
         rlog = adm.rlog
+        inflight[adm.request_id] = rlog  # shown live (dashboard, Requests > Now) until it finishes
         outcome, status = "error", 500
         remaining = adm.deadline - time.monotonic() if adm.deadline else None
         try:
@@ -2713,6 +2719,7 @@ def create_app(
 
     async def stream_flow(adm: Admission) -> AsyncIterator[bytes]:
         rlog = adm.rlog
+        inflight[adm.request_id] = rlog  # only once the stream is read: an unread one never shows
         outcome, status = "error", 200
         response = None
         sniffer = UsageSniffer()
