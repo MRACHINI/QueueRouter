@@ -94,7 +94,7 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
   <fieldset class="span-all plain"><legend class="small muted">Model council: several models answer, a judge decides</legend>
     <div class="row wrap">
       <label class="inline-field">Mode <select name="council">{% for m in council_modes %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select></label>
-      <input name="council_members" list="model-ids" placeholder="members, comma-separated (2-5; mix providers)" aria-label="Council members" class="grow">
+      <input name="council_members" list="model-ids" placeholder="members, comma-separated (1-64; mix providers)" aria-label="Council members" class="grow">
       <input name="council_judge" list="model-ids" placeholder="judge (blank = the target model)" aria-label="Council judge">
       <label class="inline-field">on <select name="council_when">{% for w in council_when %}<option value="{{ w }}">{{ "planning steps" if w == "planning" else "every request" }}</option>{% endfor %}</select></label>
     </div>

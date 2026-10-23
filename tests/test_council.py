@@ -121,8 +121,8 @@ async def test_members_fail_falls_back_and_validation(make_stack):
         r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
         assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "answer from mock-model"
         csrf = csrf_of((await c.get("/admin/models")).text)
-        form = {"csrf": csrf, "name": "solo", "target_model": "mock-model", "council": "pick", "council_members": "x"}
-        assert "m=created" not in (await c.post("/admin/aliases", data=form)).headers["location"]  # needs two
+        form = {"csrf": csrf, "name": "solo", "target_model": "mock-model", "council": "pick", "council_members": ""}
+        assert "m=created" not in (await c.post("/admin/aliases", data=form)).headers["location"]  # needs a member
 
 
 async def test_council_context_and_self_target(make_stack):
@@ -181,3 +181,17 @@ async def test_members_carry_the_apps_identity_and_their_role(make_stack):
         assert all("x-opencode-session-id" in (row["client_headers"] or "") for row in helpers)
         page = (await c.get("/admin/requests")).text
         assert f"for {council['id']}" in page and "council member 1/2" in page
+
+
+async def test_one_member_and_many(make_stack):
+    from app.council import judge_payload
+
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack, mode="combine", members="small-model", judge="mock-model")  # a second opinion
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "combined answer"
+        assert stack.mock["models"] == ["small-model", "mock-model"]  # the member, then the judge
+    many = [(f"m{i}", {"content": "x" * 20_000}) for i in range(64)]
+    judged = judge_payload({"messages": ASK}, "judge", "pick", many)["messages"][-1]["content"]
+    assert judged.count("### Answer") == 64 and len(judged) < 140_000  # each answer gets its share

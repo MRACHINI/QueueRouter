@@ -35,6 +35,7 @@ from ..catalog import make_filter, parse_filter
 from ..compaction import MODES as COMPACT_MODES
 from ..config import ON_LIMIT, PRIORITIES, SECRET_TUNABLES, TUNABLES, Bootstrap, ClientPolicy, Settings
 from ..council import MAX_MEMBERS as COUNCIL_MAX
+from ..council import MIN_MEMBERS as COUNCIL_MIN
 from ..council import MODES as COUNCIL_MODES
 from ..council import WHEN as COUNCIL_WHEN
 from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
@@ -1351,8 +1352,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             raise ValueError("council")
         if any(len(m) > 200 for m in members) or len(members) > COUNCIL_MAX:
             raise ValueError("council_members")
-        if council != "off" and len(members) < 2:
-            raise ValueError("council_members")  # a council needs at least two answers to compare
+        if council != "off" and len(members) < COUNCIL_MIN:
+            raise ValueError("council_members")
         return {
             "target_model": target,
             "upstream_ids": upstream_ids,

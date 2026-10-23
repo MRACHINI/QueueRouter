@@ -1152,6 +1152,8 @@ answer after a summary) is closed when the app leaves — abandoned council answ
 v0.28.3: requests QueueRouter makes for another one (council members and judge, summaries) carry the app's identity
 (its headers minus credentials: User-Agent, session ids) and are labelled with their role and the request they
 served (requests.role / parent); request ids shown on the Requests page.
+v0.28.4: a council takes 1 to 64 members (one member + combine = the judge reviews it; pick needs no judge for one
+answer); the judge reads at most ~120k characters of answers in all, shared between them.
 
 ### Later (agreed, not scheduled)
 
