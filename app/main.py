@@ -1309,6 +1309,14 @@ def create_app(
             context = min(lim["context"] for lim in known)
             return {"context": context, "output": min(min(lim["output"] for lim in known), context)}
 
+        def size_of(name: str, on: list[Target]) -> dict[str, int] | None:
+            """A model's or an alias's limits (an alias: its target, on its pinned upstreams)."""
+            other = snapshot.aliases.get(name)
+            if other is None:
+                return limits_on(name, on)
+            pinned_to = [t for t in on if not other.upstream_ids or t.id in other.upstream_ids]
+            return limits_on(other.target_model, pinned_to)
+
         offered_by = {m: [t.upstream.name for t, _ in pairs] for m, pairs in listed.items()}  # shown in opencode
         allowed = client.policy.allowed_models
         result: dict[str, dict] = {}
@@ -1323,6 +1331,12 @@ def create_app(
                 continue
             pinned = [t for t in targets if not alias.upstream_ids or t.id in alias.upstream_ids]
             limits = limits_on(alias.target_model, pinned)
+            if alias.council != "off":  # every member and the judge must take the conversation: the smallest counts
+                names = [alias.target_model, alias.council_judge or alias.target_model, *alias.council_members]
+                sizes = [s for s in (size_of(n, targets) for n in names) if s]
+                if sizes:
+                    context = min(s["context"] for s in sizes)
+                    limits = {"context": context, "output": min(min(s["output"] for s in sizes), context)}
             if alias.virtual_context:  # told a bigger context than the model has; compaction makes it fit
                 output = limits["output"] if limits else DEFAULT_OUTPUT
                 limits = {"context": alias.virtual_context, "output": min(output, alias.virtual_context)}

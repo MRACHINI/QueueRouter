@@ -1321,9 +1321,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         store.audit(session.user.username, "prices.refresh", "models.dev", {"ok": ok})
         return back("/admin/models#pricing", "saved" if ok else None, None if ok else "refresh_failed")
 
-    def alias_fields(form: dict) -> dict:
+    def alias_fields(form: dict, name: str) -> dict:
         target = str(form.get("target_model", "")).strip()
-        if not target or len(target) > 200:
+        if not target or len(target) > 200 or target == name:  # an alias pointing at itself reaches no model
             raise ValueError("target_model")
         known = {u.id for u in store.list_upstreams()}
         upstream_ids = tuple(int(v) for k, v in form.items() if k.startswith("upstream_") and int(v) in known)
@@ -1376,7 +1376,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         try:
             if not ALIAS_NAME.fullmatch(name):
                 raise ValueError("name")
-            fields = alias_fields(form)
+            fields = alias_fields(form, name)
             target_model, upstream_ids = fields.pop("target_model"), fields.pop("upstream_ids")
             store.create_alias(name, target_model, upstream_ids, session.user.username, **fields)
         except RulesError:
@@ -1391,9 +1391,10 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     @app.post("/admin/aliases/{alias_id}")
     async def aliases_update(alias_id: int, request: Request):
         session, form = await require_post(request, "admin")
+        name = next((a.name for a in store.list_aliases() if a.id == alias_id), "")
         try:
             store.update_alias(
-                alias_id, session.user.username, enabled=form.get("enabled") == "on", **alias_fields(form)
+                alias_id, session.user.username, enabled=form.get("enabled") == "on", **alias_fields(form, name)
             )
         except RulesError:
             return back("/admin/models", error="rules_invalid")

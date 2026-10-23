@@ -1145,6 +1145,8 @@ v0.28.0: per-upstream model choice (upstreams.model_filter, Catalogs filters: hi
 aren't routed there, except for aliases, summary models and council members; "offer new models" switch; adding an
 upstream opens its choice); the provider's error text on every failed request (retried 5xx, passed-through 4xx/5xx,
 streaming or not, connection errors); dashboard per-client tokens split into in / out.
+v0.28.1: an alias can't point at itself; a council alias tells apps the smallest context of its target, judge and
+members (opencode showed 128k, its default, for a council whose target was its own name).
 
 ### Later (agreed, not scheduled)
 

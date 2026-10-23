@@ -123,3 +123,18 @@ async def test_members_fail_falls_back_and_validation(make_stack):
         csrf = csrf_of((await c.get("/admin/models")).text)
         form = {"csrf": csrf, "name": "solo", "target_model": "mock-model", "council": "pick", "council_members": "x"}
         assert "m=created" not in (await c.post("/admin/aliases", data=form)).headers["location"]  # needs two
+
+
+async def test_council_context_and_self_target(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack)  # members mock-model (262,144) and small-model (size not reported)
+        csrf = csrf_of((await c.get("/admin/models")).text)
+        await c.post("/admin/model-limits", data={"csrf": csrf, "model": "small-model", "context": "100000"})
+        config = (await c.get("/v1/opencode-config", headers=stack.headers)).json()
+        assert config["provider"]["queuerouter"]["models"]["team"]["limit"]["context"] == 100_000  # the smallest
+        form = {"csrf": csrf, "name": "loop", "target_model": "loop"}
+        assert "m=created" not in (await c.post("/admin/aliases", data=form)).headers["location"]
+        team = next(a for a in stack.app.state.store.list_aliases() if a.name == "team")
+        r = await c.post(f"/admin/aliases/{team.id}", data={"csrf": csrf, "target_model": "team", "enabled": "on"})
+        assert "m=saved" not in r.headers["location"]
