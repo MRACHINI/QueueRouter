@@ -73,6 +73,10 @@ from a **web admin UI**.
   one; tool steps use the alias's model alone. Mix providers so a council doesn't take all of one account's
   slots. Streaming apps get their response at once (keep-alives while members work); the Requests page shows
   "council: pick 2/3: GLM-4.7", and the members' and judge's requests are tagged `#council`.
+- **Web search for council members**: with a search provider set up (Settings > Web search: Tavily, Brave or
+  your own SearXNG), council members can search before the judge decides. QueueRouter runs the searches,
+  gives each member its results and asks it again (up to a per-alias limit), and the judge sees every member's
+  sources. opencode never sees this tool. Queries that look like they contain secrets are refused.
 - **Choose which models each upstream offers** (Upstreams > "N models"): untick models to hide them from
   opencode, `/v1/models`, the Models page and the Playground; aliases can still use them. A switch decides
   whether models the provider adds later appear automatically.

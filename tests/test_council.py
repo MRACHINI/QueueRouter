@@ -227,3 +227,93 @@ async def test_judge_instructions(make_stack):
         "administrator"
         not in judge_payload({"messages": ASK}, "j", "pick", [("a", {"content": "x"})])["messages"][-1]["content"]
     )
+
+
+def test_verdict_reading():
+    from app.council import verdict
+
+    assert verdict("2", 3) == 1 and verdict(" 3.", 3) == 2
+    assert verdict("<think>Answer 1 misses tests, so not 1.</think>2", 3) == 1  # thinking left inline
+    assert verdict("Answer 2 is the best.", 3) == 1 and verdict("The best one is 3", 3) == 2
+    assert verdict("", 3) is None and verdict("I cannot decide", 3) is None and verdict("7", 3) is None
+    assert verdict("<think>still thinking when the limit hit", 3) is None
+
+
+def test_search_queries_are_checked():
+    import pytest
+
+    from app.websearch import SearchError, check_query
+
+    assert check_query("  python   3.14 release notes ") == "python 3.14 release notes"
+    for secret in ("sk-abcdefghijklmnopqrstuvwxyz123456", "api_key=abc", "-----BEGIN RSA PRIVATE KEY", "a" * 60):
+        with pytest.raises(SearchError):
+            check_query(f"docs {secret}")
+
+
+async def search_setup(c, stack, members, **settings):
+    store = stack.app.state.store
+    store.set_tunables({"search_provider": "searxng", "search_url": stack.mock["url"], **settings}, "t")
+    stack.app.state.reload()
+    await setup(c, stack, mode="combine", members=members, judge="mock-model")
+    team = next(a for a in store.list_aliases() if a.name == "team")
+    page = (await c.get(f"/admin/aliases/{team.id}")).text
+    assert "not set up yet" not in page
+    form = {
+        "csrf": csrf_of(page),
+        "target_model": "mock-model",
+        "council": "combine",
+        "council_members": members,
+        "council_judge": "mock-model",
+        "council_search": "on",
+        "council_search_max": "1",
+        "enabled": "on",
+    }
+    assert "m=saved" in (await c.post(f"/admin/aliases/{team.id}", data=form)).headers["location"]
+
+
+async def test_members_search_the_web(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["searching_models"] = ["mock-model"]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await search_setup(c, stack, "mock-model, small-model")
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "combined answer"
+        assert stack.mock["searches"] == ["latest benchmarks"]  # run by QueueRouter, once
+        judged = stack.mock["judge_inputs"][-1]
+        assert "answer from mock-model citing Results for" in judged  # the member answered with the results
+        assert "[Web search results this member used]" in judged and "https://example.com/1" in judged
+        assert "[This member ran no web search" in judged  # small-model didn't search
+        judge_tools = [t["function"]["name"] for t in json.loads(stack.mock["last_body"]).get("tools") or []]
+        assert "queuerouter_web_search" not in judge_tools  # the app's tools only
+        assert "web search" in (await c.get("/admin/models")).text
+    rows = await rows_with(stack.app.state.store, lambda row: row["council"])
+    council = next(row for row in rows if row["council"])
+    assert council["council"].endswith("1 searches")
+    assert any(row["role"] == "council member 1/2 · after search" for row in rows)
+
+
+async def test_search_limit_and_failures(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock.update(searching_models=["mock-model"], always_search=True, search_status=403)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await search_setup(c, stack, "mock-model, small-model")
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.status_code == 200  # the member that never stops searching is dropped; the other one counts
+        assert len(stack.mock["searches"]) == 1  # the limit (1) held
+        assert "Search failed: searxng returned HTTP 403" not in stack.mock["judge_inputs"][-1]  # dropped member
+    rows = await rows_with(stack.app.state.store, lambda row: row["council"])
+    council = next(row for row in rows if row["council"])
+    assert council["error"].startswith("web search: searxng returned HTTP 403")
+
+
+async def test_pick_judge_may_think(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack)
+        stack.mock["judge_answer"] = "<think>Answer 1 is weaker.</think>2"
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.headers["x-queuerouter-council"] == "pick 2/2: small-model"
+        assert json.loads(stack.mock["last_body"])["max_tokens"] == 4000  # room to think
+        stack.mock["judge_answer"] = "hmm, both are fine"
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.headers["x-queuerouter-council"] == "pick 1/2: mock-model (unclear verdict: took answer 1)"

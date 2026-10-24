@@ -48,6 +48,7 @@ from ..slots import STRATEGIES
 from ..state import MODES
 from ..store import ROLES, Store
 from ..upstream import UA_MODES
+from ..websearch import PROVIDERS as SEARCH_PROVIDERS
 from .charts import usage_charts
 from .security import (
     AdminSession,
@@ -72,6 +73,8 @@ ALIAS_ERRORS = {  # what was wrong in the alias editor
     "virtual_context": "Context told to apps: from 1,024 to 100,000,000 tokens, or blank.",
     "council": "Unknown council setting.",
     "council_members": "A council needs 1 to 64 members.",
+    "council_search_max": "Searches per member: 1 to 10.",
+    "council_search_results": "Results per search: 1 to 10.",
 }
 PRICING_DAYS = 30  # the price table lists models used this recently (plus offered and manually priced ones)
 LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes / send anyway
@@ -106,7 +109,7 @@ MESSAGES = {
     "and can set it up again.",
 }
 
-SETTING_CHOICES: dict[str, tuple[str, ...]] = {"lb_strategy": STRATEGIES}
+SETTING_CHOICES: dict[str, tuple[str, ...]] = {"lb_strategy": STRATEGIES, "search_provider": SEARCH_PROVIDERS}
 
 SETTING_HELP: dict[str, tuple[str, str, str]] = {
     # name: (section, label, help)
@@ -174,6 +177,22 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Compaction",
         "Keep saved summaries (days)",
         "Saved summaries unused this long are deleted.",
+    ),
+    "search_provider": (
+        "Web search",
+        "Provider",
+        "Lets council members search the web before the judge decides (per alias: Council > members can search). "
+        "SearXNG runs on your own server, so queries stay there.",
+    ),
+    "search_key": (
+        "Web search",
+        "API key",
+        "Tavily or Brave key (stored encrypted; leave blank to keep the current one). Each search uses credits.",
+    ),
+    "search_url": (
+        "Web search",
+        "SearXNG address",
+        "Only for SearXNG, e.g. http://searxng:8080 (its JSON output must be enabled).",
     ),
     "structured_repair": (
         "Upstream",
@@ -1381,6 +1400,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "council_judge": judge,
             "council_when": when,
             "council_instructions": str(form.get("council_instructions", "")).strip()[:4000],
+            "council_search": form.get("council_search") == "on",
+            "council_search_max": int_field(form, "council_search_max", 1, 10, 3),
+            "council_search_results": int_field(form, "council_search_results", 1, 10, 5),
         }
 
     def alias_from_form(form: dict, existing=None) -> SimpleNamespace:
@@ -1406,6 +1428,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             council_judge=str(form.get("council_judge", "")).strip(),
             council_when=str(form.get("council_when", "planning")),
             council_instructions=str(form.get("council_instructions", "")),
+            council_search=form.get("council_search") == "on",
+            council_search_max=str(form.get("council_search_max", "3")),
+            council_search_results=str(form.get("council_search_results", "5")),
             enabled=form.get("enabled") == "on" if existing else True,
         )
 
@@ -1424,6 +1449,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             council_max=COUNCIL_MAX,
             upstreams=store.list_upstreams(),
             choices=ctx.model_choices(),
+            search_on=store.get_tunables().get("search_provider", "off") not in ("", "off"),
         )
 
     def alias_error(exc: Exception) -> str:
@@ -1439,7 +1465,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         empty = SimpleNamespace(
             id=None, name="", target_model="", upstream_ids=(), notes="", params="", fallbacks=[],
             fallback_on=DEFAULT_TRIGGERS, compact="off", compact_model="", virtual_context=None, council="off",
-            council_members=[], council_judge="", council_when="planning", council_instructions="", enabled=True,
+            council_members=[], council_judge="", council_when="planning", council_instructions="",
+            council_search=False, council_search_max=3, council_search_results=5, enabled=True,
         )  # fmt: skip
         return alias_page(request, session, empty)
 

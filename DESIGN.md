@@ -1160,6 +1160,11 @@ to reorder fallbacks; unlisted names can be typed); errors are shown on the page
 page lists aliases compactly.
 v0.29.1: judge instructions per council alias (aliases.council_instructions), added after the built-in instruction;
 in pick mode the reply format is repeated last so they can't change it.
+v0.30.0: web search for council members (app/websearch.py: Tavily / Brave / SearXNG; per alias on/off, searches per
+member, results per search; members re-asked with the results, the judge sees each member's sources, the tool is
+never passed to the app; secret-looking queries refused; search count and errors on the council row). Pick judge:
+4,000 output tokens so thinking models can reason, verdict read from the final answer (inline <think> skipped),
+unclear verdicts marked.
 
 ### Later (agreed, not scheduled)
 

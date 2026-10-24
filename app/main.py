@@ -27,7 +27,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from . import __version__, anthropic_api, content_log, metrics, responses_api, structured, tracing
+from . import __version__, anthropic_api, content_log, metrics, responses_api, structured, tracing, websearch
 from . import compaction as compaction_mod
 from . import council as council_mod
 from . import cron as cron_mod
@@ -1730,27 +1730,63 @@ def create_app(
             stage="council",
         )
         inflight[rlog.fields["id"]] = rlog  # "council…" in the Now table while members and judge work
+        search_count, search_errors = [0], []  # web searches run for the members (app/websearch.py)
 
         async def work() -> tuple[bytes | None, Response | None]:
             base = {k: v for k, v in payload.items() if k not in ("stream", "stream_options")}
             members = alias.council_members[: council_mod.MAX_MEMBERS]
-            bodies = await asyncio.gather(
-                *(
-                    internal_completion(
-                        client,
-                        {**base, "model": m},
-                        priority,
-                        "council",
-                        request_headers,
-                        f"council member {i}/{len(members)}",
-                        rlog.fields["id"],
+            s = cfg()
+            searching = alias.council_search and s.search_provider not in ("", "off")
+
+            async def member(i: int, model: str) -> tuple[bytes | None, list[str]]:
+                """One member's answer; with web search on, its searches run here and it is asked again
+                with the results, until it answers without searching (or reaches the limit)."""
+                role = f"council member {i}/{len(members)}"
+                messages, sources, used = list(base["messages"]), [], 0
+                tools = [*(base.get("tools") or []), websearch.TOOL] if searching else base.get("tools")
+                while True:
+                    asked = {**base, "model": model, "messages": messages, **({"tools": tools} if tools else {})}
+                    body = await internal_completion(
+                        client, asked, priority, "council", request_headers, role, rlog.fields["id"]
                     )
-                    for i, m in enumerate(members, 1)
-                )
-            )
-            answered = [
-                (m, msg, b) for m, b in zip(members, bodies, strict=True) if b and (msg := council_mod.message_of(b))
-            ]
+                    message = council_mod.message_of(body) if body else None
+                    calls = (message or {}).get("tool_calls") or []
+                    wanted = [c for c in calls if (c.get("function") or {}).get("name") == websearch.TOOL_NAME]
+                    if not searching or not wanted:
+                        return body, sources
+                    results = []
+                    for call in wanted:
+                        query = websearch.call_query(call)
+                        if used >= alias.council_search_max:
+                            text = "Search limit reached: answer now with what you have."
+                        else:
+                            used += 1
+                            search_count[0] += 1
+                            try:
+                                found = await websearch.search(
+                                    app.state.client, s.search_provider, s.search_key, s.search_url, query,
+                                    alias.council_search_results,
+                                )  # fmt: skip
+                                text = websearch.results_text(query, found)
+                                sources.append(text)
+                            except websearch.SearchError as exc:
+                                text = f"Search failed: {exc}. Do not present unverified facts as found."
+                                search_errors.append(str(exc))
+                        results.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": text})
+                    if used >= alias.council_search_max and all(
+                        r["content"].startswith("Search limit") for r in results
+                    ):
+                        # it keeps searching past the limit: take what it says, without the search calls
+                        return council_mod.without_calls(body, websearch.TOOL_NAME), sources
+                    assistant = {"role": "assistant", "content": message.get("content") or "", "tool_calls": wanted}
+                    messages = [*messages, assistant, *results]
+                    role = f"council member {i}/{len(members)} · after search"
+
+            replies = await asyncio.gather(*(member(i, m) for i, m in enumerate(members, 1)))
+            answered = []
+            for m, (b, sources) in zip(members, replies, strict=True):
+                if b and (msg := council_mod.message_of(b)):
+                    answered.append((m, {**msg, "_sources": sources} if searching else msg, b))
             if not answered:
                 rlog.fields["council"] = f"no member answered: {alias.target_model} alone"
                 return None, None
@@ -1770,10 +1806,18 @@ def create_app(
                     rlog.fields["id"],
                 )
                 said = (council_mod.message_of(verdict) or {}).get("content") if verdict else None
-                index = council_mod.parse_pick(said, len(answered))
-                rlog.fields["council"] = f"pick {index + 1}/{len(answered)}: {answered[index][0]}" + (
-                    "" if verdict else " (no verdict)"
+                chosen = council_mod.verdict(said, len(answered))
+                index = chosen if chosen is not None else 0
+                note = (
+                    ""
+                    if chosen is not None
+                    else " (no verdict)"
+                    if not verdict
+                    else " (unclear verdict: took answer 1)"
                 )
+                if chosen is None and said:
+                    rlog.fields["error"] = f"council judge's reply wasn't a clear number: {said[:200]}"
+                rlog.fields["council"] = f"pick {index + 1}/{len(answered)}: {answered[index][0]}{note}"
                 return answered[index][2], None
             judged = council_mod.judge_payload(payload, judge, "combine", candidates, alias.council_instructions)
             judge_headers = {
@@ -1798,6 +1842,10 @@ def create_app(
         def finish(ok: bool) -> None:
             inflight.pop(rlog.fields["id"], None)
             rlog.fields["target_model"] = alias.target_model
+            if search_count[0]:
+                rlog.fields["council"] = f"{rlog.fields['council'] or ''} · {search_count[0]} searches".lstrip(" ·")
+            if search_errors and not rlog.fields["error"]:
+                rlog.fields["error"] = f"web search: {search_errors[0]}"[:500]
             rlog.finish(stats, outcome="done" if ok else "error", status=200 if ok else 502)
 
         async def fallback() -> Response:  # no member answered: the alias's own model, as without a council

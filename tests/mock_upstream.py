@@ -44,6 +44,18 @@ def create_mock(limit: int = 2) -> FastAPI:
         extra = [{"id": m, "object": "model"} for m in state.get("extra_models", [])]  # no size reported
         return {"object": "list", "data": [{"id": "mock-model", "object": "model", "max_model_len": 262144}, *extra]}
 
+    @app.get("/search")
+    async def searxng(request: Request):
+        """A SearXNG-style search (format=json), for QueueRouter's web search."""
+        query = request.query_params.get("q", "")
+        state.setdefault("searches", []).append(query)
+        if state.get("search_status"):
+            return JSONResponse({"error": "denied"}, status_code=state["search_status"])
+        results = [
+            {"title": f"Result for {query}", "url": "https://example.com/1", "content": f"snippet about {query}"}
+        ]
+        return {"results": results}
+
     @app.post("/v1/embeddings")
     async def embeddings(request: Request):
         """Its own parallel counter (providers like ArliAI limit embeddings separately)."""
@@ -83,6 +95,21 @@ def create_mock(limit: int = 2) -> FastAPI:
             state.setdefault("summary_inputs", []).append(body["messages"][1]["content"])
             body["mock_content"] = f"summary {len(state['summary_inputs'])}"
             body["mock_delay"] = state.get("summary_delay", 0.05)  # per chunk of 5: a slow summariser
+        # Council members that search (QueueRouter's own web search tool): ask first, answer with the results.
+        offered = {(t.get("function") or {}).get("name") for t in body.get("tools") or []}
+        if "queuerouter_web_search" in offered and body.get("model") in state.get("searching_models", []):
+            last = (body.get("messages") or [{}])[-1]
+            if last.get("role") != "tool" or state.get("always_search"):
+                query = state.get("search_query", "latest benchmarks")
+                arguments = json.dumps({"query": query})
+                function = {"name": "queuerouter_web_search", "arguments": arguments}
+                call = {"id": f"s{len(body['messages'])}", "type": "function", "function": function}
+                message = {"role": "assistant", "content": None, "tool_calls": [call]}
+                choice = {"index": 0, "message": message, "finish_reason": "tool_calls"}
+                return {"id": "x", "object": "chat.completion", "model": body.get("model"), "choices": [choice]}
+            body["mock_content"] = (
+                f"answer from {body.get('model')} citing {str(last.get('content', '')).splitlines()[0][:80]}"
+            )
         # Model council: the judge's prompt (pick: answer with a number; combine: an answer), and members
         # that say who they are.
         last_message = (body.get("messages") or [{}])[-1]
@@ -117,7 +144,8 @@ def create_mock(limit: int = 2) -> FastAPI:
             return JSONResponse({"error": {"message": "Request blocked by content policy"}}, status_code=400)
         refuse = model in body.get("mock_refuse_models", [])
         messages = body.get("messages") or [{}]
-        if body.get("tools") and body.get("tool_choice") != "none" and messages[-1].get("role") == "user":
+        real_tools = offered - {"queuerouter_web_search"}  # (QueueRouter's own search tool isn't "an agent's tool")
+        if real_tools and body.get("tool_choice") != "none" and messages[-1].get("role") == "user":
             return _tool_call(body)  # agents: call the first tool
         if messages[-1].get("role") == "tool":
             tag = f"tool said {messages[-1].get('content')}"

@@ -24,7 +24,7 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
     <td data-label="Extras" class="small">
       {% if a.compact != "off" %}<span class="badge" title="Conversations too big for the model are shrunk">{{ a.compact }}{% if a.compact_model %} with {{ a.compact_model }}{% endif %}</span>{% endif %}
       {% if a.virtual_context %}<span class="badge" title="Context size told to apps">{{ "{:,}".format(a.virtual_context) }} context</span>{% endif %}
-      {% if a.council != "off" %}<span class="badge" title="Members: {{ a.council_members | join(', ') }}">council {{ a.council }} ({{ a.council_members | length }})</span>{% endif %}
+      {% if a.council != "off" %}<span class="badge" title="Members: {{ a.council_members | join(', ') }}">council {{ a.council }} ({{ a.council_members | length }}){% if a.council_search %} + web search{% endif %}</span>{% endif %}
       {% if a.params %}<span class="badge" title="{{ a.params }}">rules</span>{% endif %}
       {% if a.compact == "off" and not a.virtual_context and a.council == "off" and not a.params %}<span class="muted">—</span>{% endif %}</td>
     <td data-label=""><div class="row wrap">

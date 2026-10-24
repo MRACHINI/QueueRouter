@@ -402,6 +402,13 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE aliases ADD COLUMN council_instructions TEXT NOT NULL DEFAULT '';
     """,
+    # 29: council members may search the web (QueueRouter runs the searches): on/off, searches per member and
+    # step, results per search
+    """
+    ALTER TABLE aliases ADD COLUMN council_search INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE aliases ADD COLUMN council_search_max INTEGER NOT NULL DEFAULT 3;
+    ALTER TABLE aliases ADD COLUMN council_search_results INTEGER NOT NULL DEFAULT 5;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -543,6 +550,9 @@ class Alias:
     council_judge: str = ""  # blank = the target model
     council_when: str = "planning"  # planning / always
     council_instructions: str = ""  # added to the judge's built-in instruction
+    council_search: bool = False  # members may search the web (app/websearch.py)
+    council_search_max: int = 3  # searches per member per step
+    council_search_results: int = 5  # results per search
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -1248,6 +1258,9 @@ class Store:
                 r["council_judge"] or "",
                 r["council_when"] or "planning",
                 r["council_instructions"] or "",
+                bool(r["council_search"]),
+                r["council_search_max"] or 3,
+                r["council_search_results"] or 5,
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1270,12 +1283,16 @@ class Store:
         council_judge: str = "",
         council_when: str = "planning",
         council_instructions: str = "",
+        council_search: bool = False,
+        council_search_max: int = 3,
+        council_search_results: int = 5,
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
                 "INSERT INTO aliases (name, target_model, upstream_ids, notes, params, fallbacks, fallback_on, "
                 "compact, compact_model, virtual_context, council, council_members, council_judge, council_when, "
-                "council_instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "council_instructions, council_search, council_search_max, council_search_results, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     target_model,
@@ -1292,6 +1309,9 @@ class Store:
                     council_judge,
                     council_when,
                     council_instructions,
+                    int(council_search),
+                    council_search_max,
+                    council_search_results,
                     time.time(),
                 ),
             )
@@ -1317,6 +1337,9 @@ class Store:
             "council_judge",
             "council_when",
             "council_instructions",
+            "council_search",
+            "council_search_max",
+            "council_search_results",
         }
         self._update("aliases", alias_id, allowed, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)
