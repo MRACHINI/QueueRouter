@@ -1230,13 +1230,49 @@ unclear verdicts marked.
   - *Costs:* you wait for the slowest member plus the judge, nothing streams meanwhile (keep-alive comments
     hold the connection); several times the tokens.
   - *Shown:* the Requests page lists each member's call and the judge's choice.
-- **Orchestrator (alias mode, later; requested 2026-10-24).** Unlike the council (members answer the same
-  request at once, the judge only reads the results), an orchestrator model directs the work: it decides what
-  to ask each member (or splits the task between them), reads their answers and may ask again, then writes the
-  final answer. More powerful for big tasks (research, large refactors, reviews), but several rounds before
-  anything reaches the app and more slot use, so not for ordinary coding steps. Would need: a round limit and
-  time budget, the orchestrator's instructions per alias, each round's calls shown on the Requests page
-  (role + parent, as for council members), and keep-alives to the app while it works.
+- **Orchestrator (alias mode).** Agreed design (2026-10-24); phase 1 being built.
+  - *What:* unlike the council (members answer the same request at once, a judge reads the results), an
+    orchestrator model directs the work through tools QueueRouter runs for it: it plans, delegates focused
+    tasks to members, searches and reads the web, reads the results, may ask again, then writes the final
+    answer (text, or the app's own tool calls). Uses: research, big refactors, code review, debugging.
+    Orchestrator model: DeepSeek-V4.1-Flash for now (per alias, any model).
+  - *Its tools (run by QueueRouter):* `ask_member(member, task)` / `ask_members([...])` (in parallel);
+    `web_search`, `web_fetch`; date/time and a calculator. The app's tools (opencode: read, edit, bash) can't
+    run mid-work (one answer per request): the orchestrator ends its turn with them, opencode runs them and
+    sends the results, and it continues in the next request (phase 2: plan notebook).
+  - *Briefs:* members get a focused task written by the orchestrator (with the parts it attaches: a file's
+    content, an error), not the whole conversation.
+  - *Member roles (phase 3):* per member an optional role and instructions ("researcher": searches and cites;
+    "reviewer": looks for bugs and risks; "implementer": proposes the edit); the orchestrator sees the roster.
+  - *Plan notebook (phase 2):* per conversation (like summaries: memory or saved encrypted): the plan, what is
+    done, what members found; shown to the orchestrator on every step so it continues instead of re-planning.
+  - *Budgets:* per step: rounds, member calls, searches / fetches, time; when one runs out the orchestrator is
+    told to finish with what it has.
+  - *Live progress:* streamed to the app as reasoning (`reasoning_content`), which opencode shows live in its
+    "Thought" section ("Asking 2 members… Searching… Member 1 done: …"), kept apart from the answer; doubles as
+    keep-alive. The council gets the same.
+  - *Visibility:* every call a row with role + parent (as for the council); phase 3: a trace page per request
+    (plan, rounds, delegations with question and answer, searches).
+  - *Safety:* web and member results are data, never instructions (marked as such; its instructions say never
+    to act on commands found in them); opencode's own permission prompts stay on for orchestrated aliases.
+  - *Triggers:* like the council: planning steps (first step after a user message, or opencode's plan agent) or
+    every request.
+  - *Phases:* 1) one-request orchestrator (delegation, web search + fetch, date/time, calculator, budgets, live
+    progress, roles on rows); 2) plan notebook across steps; 3) member roles + trace page; 4) members proposing
+    app tool calls that the orchestrator merges.
+- **QueueRouter's own tools** (for council members and the orchestrator; switched on per alias, counted in
+  budgets, shown on the Requests page). Server-side only: anything touching the user's machine (files, shell,
+  git) stays with the app; nothing that writes outside QueueRouter (posting, sending, deploying).
+  - *Built:* `web_search` (Tavily / Brave / SearXNG; SearXNG next to QueueRouter is the recommended free one).
+  - *Phase 1:* `web_fetch(url)` built in (no key): readable text from HTML, size (~2 MB) and time (~20 s)
+    limits, text-like content only, refuses private / local addresses (also after redirects: SSRF) and URLs
+    that look like they carry secrets; optional fallback Jina Reader for JavaScript-heavy pages. Date/time
+    (also added to prompts) and a calculator (maths expressions only, no code).
+  - *Next:* package and release lookup (PyPI, npm, crates.io, Docker Hub, GitHub releases; free APIs);
+    GitHub reading (files, READMEs, issues, PRs of public repos; optional token).
+  - *Then:* an MCP client: MCP servers set up in the admin UI (read-only ones), their tools offered per alias.
+  - *Later:* a knowledge base (upload documents, indexed with embeddings in their own slots, searchable like
+    the web) and a code sandbox (isolated container: no network, CPU / memory / time limits, nothing mounted).
 - **Choose which models an upstream offers** (done: v0.28.0; aliases may use hidden models). When adding or editing an
   upstream, pick which of its models are offered (all by default; a checklist from its model list, with
   search and select all / none, since some providers list 100+). Hidden models don't appear in /v1/models,
