@@ -688,6 +688,15 @@ def create_app(
         order = {uid: i for i, uid in enumerate(snapshot.upstreams)}
         return tuple(Candidate(t.id, t.pool.id, t.upstream.weight, order[t.id]) for t in usable)
 
+    def split_pin(name: str | None) -> tuple[str | None, tuple[int, ...]]:
+        """ "model@upstream" -> ("model", (that upstream's id,)): only that upstream serves it. Split only when
+        the part after the last "@" is exactly an upstream's name, so model ids containing "@" still work."""
+        if not name or "@" not in name:
+            return name, ()
+        bare, _, upstream = name.rpartition("@")
+        target = next((t for t in snapshot.upstreams.values() if t.upstream.name == upstream), None)
+        return (bare, (target.id,)) if target is not None and bare else (name, ())
+
     def embedding_slots(candidates: tuple[Candidate, ...]) -> tuple[Candidate, ...]:
         """Candidates using their pool's embedding slots (pool id negated) where it has its own limit."""
         return tuple(
@@ -847,16 +856,30 @@ def create_app(
         """Every model the upstreams list (hidden ones too: aliases may use them) and every alias, for the
         alias editor's pickers: id, the upstreams offering it, its context, hidden, alias."""
         rows: dict[str, dict] = {}
+        per_upstream: dict[str, list[dict]] = {}  # model -> one pinned choice per upstream ("model@upstream")
         for target in snapshot.upstreams.values():
             for model in catalogs.models(target.id, raw=True):
                 row = rows.setdefault(
                     model["id"], {"id": model["id"], "upstreams": [], "context": None, "hidden": True, "alias": False}
                 )
                 row["upstreams"].append(target.upstream.name)
-                row["hidden"] = row["hidden"] and not catalogs.offered(target.id, model["id"])
+                offered = catalogs.offered(target.id, model["id"])
+                row["hidden"] = row["hidden"] and not offered
                 known = model_limits(context_sizes.apply(model["id"], target.id, model), [target.pool.context_cap])
                 if known:
                     row["context"] = max(row["context"] or 0, known["context"])
+                per_upstream.setdefault(model["id"], []).append(
+                    {
+                        "id": f"{model['id']}@{target.upstream.name}",
+                        "upstreams": [f"only {target.upstream.name}"],
+                        "context": known["context"] if known else None,
+                        "hidden": not offered,
+                        "alias": False,
+                    }
+                )
+        for pinned in per_upstream.values():
+            if len(pinned) > 1:  # offered by several upstreams: let a choice name one of them
+                rows.update({p["id"]: p for p in pinned})
         for alias in snapshot.aliases.values():
             rows[alias.name] = {"id": alias.name, "upstreams": [], "context": None, "hidden": False, "alias": True}
         return sorted(rows.values(), key=lambda r: (r["alias"], r["id"].lower()))
@@ -1341,9 +1364,11 @@ def create_app(
             """A model's or an alias's limits (an alias: its target, on its pinned upstreams)."""
             other = snapshot.aliases.get(name)
             if other is None:
-                return limits_on(name, on)
-            pinned_to = [t for t in on if not other.upstream_ids or t.id in other.upstream_ids]
-            return limits_on(other.target_model, pinned_to)
+                bare, pin = split_pin(name)
+                return limits_on(bare, [t for t in on if not pin or t.id in pin])
+            bare, pin = split_pin(other.target_model)
+            ids = pin or other.upstream_ids
+            return limits_on(bare, [t for t in on if not ids or t.id in ids])
 
         offered_by = {m: [t.upstream.name for t, _ in pairs] for m, pairs in listed.items()}  # shown in opencode
         allowed = client.policy.allowed_models
@@ -1357,8 +1382,10 @@ def create_app(
         for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
             if allowed and alias.name not in allowed and alias.target_model not in allowed:
                 continue
-            pinned = [t for t in targets if not alias.upstream_ids or t.id in alias.upstream_ids]
-            limits = limits_on(alias.target_model, pinned)
+            target, pin = split_pin(alias.target_model)  # "model@upstream" pins it like the upstream ticks
+            ids = pin or alias.upstream_ids
+            pinned = [t for t in targets if not ids or t.id in ids]
+            limits = limits_on(target, pinned)
             if alias.council != "off":  # every member and the judge must take the conversation: the smallest counts
                 names = [alias.target_model, alias.council_judge or alias.target_model, *alias.council_members]
                 sizes = [s for s in (size_of(n, targets) for n in names) if s]
@@ -1371,7 +1398,7 @@ def create_app(
             result[alias.name] = {
                 "name": with_providers(
                     f"{alias.name} → {alias.target_model}",
-                    [t.upstream.name for t in pinned if t.upstream.name in offered_by.get(alias.target_model, [])]
+                    [t.upstream.name for t in pinned if t.upstream.name in offered_by.get(target, [])]
                     or [t.upstream.name for t in pinned],
                 ),
                 **({"limit": limits} if limits else {}),
@@ -1604,9 +1631,9 @@ def create_app(
         """The model that writes summaries (the alias's compaction model, else the step's) and its context."""
         name = alias.compact_model or step_model
         target_alias = snapshot.aliases.get(name)
-        real = target_alias.target_model if target_alias else name
+        real, pin = split_pin(target_alias.target_model if target_alias else name)
         return name, model_context(
-            real, candidates_for(real, target_alias.upstream_ids if target_alias else (), raw=True)
+            real, candidates_for(real, pin or (target_alias.upstream_ids if target_alias else ()), raw=True)
         )
 
     def load_summary(key: str | None) -> compaction_mod.Plan | None:
@@ -2828,10 +2855,12 @@ def create_app(
         model = model if isinstance(model, str) else None
         alias = snapshot.aliases.get(model) if model else None
         target_model = alias.target_model if alias else model
-        if refusal := policy_refusal(client, model, target_model):
+        bare_target, target_pin = split_pin(target_model)
+        if refusal := policy_refusal(client, model, bare_target):
             return refusal
         no_fallbacks = not (alias and alias.fallbacks)  # with fallbacks, a missing target just moves on
-        if cfg().unknown_model_check and no_fallbacks and (missing := unknown_model(target_model, alias)) is not None:
+        checked = cfg().unknown_model_check and no_fallbacks and not target_pin  # a pinned upstream decides
+        if checked and (missing := unknown_model(target_model, alias)) is not None:
             return missing
         if allow_council and alias and alias.council != "off" and isinstance(payload, dict):
             lane = request_lane(request_headers, client)
@@ -2864,17 +2893,17 @@ def create_app(
         session = session_key(request_headers, client.name, payload)
         steps: list[Step] = []
         too_long_for: tuple | None = None
-        for i, step_model in enumerate(chain):
-            step_candidates = candidates_for(
-                step_model, alias.upstream_ids if alias and i == 0 else (), raw=alias is not None
-            )
+        for i, named in enumerate(chain):
+            step_model, pin = split_pin(named)  # "model@upstream": only that upstream
+            only = pin or (alias.upstream_ids if alias and i == 0 else ())
+            step_candidates = candidates_for(step_model, only, raw=alias is not None or bool(pin))
             if not step_candidates:
                 continue
             if not isinstance(payload, dict):  # not JSON: forward as-is, no chain
                 steps.append(Step(step_model, step_candidates, body))
                 break
             step_payload = dict(payload)
-            if alias or i > 0:
+            if alias or i > 0 or pin:
                 step_payload["model"] = step_model  # the upstream gets the real model name
             context = model_context(step_model, step_candidates)
             compaction = None
@@ -2929,7 +2958,7 @@ def create_app(
                 if "context" in triggers:
                     continue  # try a model with a bigger context
                 break
-            unchanged = i == 0 and not alias and not param_changes
+            unchanged = i == 0 and not alias and not param_changes and not pin
             unchanged = unchanged and compaction is None
             step_body = body if unchanged else json.dumps(step_payload).encode()
             estimate = estimate_prompt_tokens(step_payload)

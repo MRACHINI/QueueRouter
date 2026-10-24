@@ -15,7 +15,8 @@
 <h1>{% if new %}New alias{% else %}Alias <code>{{ a.name }}</code>{% endif %}</h1>
 <p class="muted small">Pick models by typing part of a name: the list shows each model's providers and context size
 (hidden ones too: an alias may use a model hidden from the lists). Press Enter or click to add; × removes; drag to
-reorder where order matters. A name no provider lists can be typed and added with Enter.</p>
+reorder where order matters. A name no provider lists can be typed and added with Enter. When several providers offer
+the same model, it is also listed as <code>model@provider</code>: that choice is only sent to that provider.</p>
 <script type="application/json" id="model-choices">{{ choices | tojson }}</script>
 
 <form method="post" action="{% if new %}/admin/aliases{% else %}/admin/aliases/{{ a.id }}{% endif %}" class="alias-editor">
