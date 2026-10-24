@@ -257,6 +257,7 @@ def create_app(
     context_sizes.load(store.list_model_limits())
     plans = Plans()  # trim plans per conversation and model (app/compaction.py)
     summaries = Plans()  # summarise mode: the summary per conversation
+    notebooks = Plans()  # orchestrator: its notebook (plan, findings) per conversation
     summary_locks: collections.defaultdict[str, asyncio.Lock] = collections.defaultdict(asyncio.Lock)
     prices = PriceCatalog(os.path.join(bootstrap.data_dir, "models-dev-prices.json"))
     prices.load_file()
@@ -1618,6 +1619,29 @@ def create_app(
                 summaries.put(key, plan)
         return plan
 
+    def notebook_key(client: ClientKey, headers: Mapping[str, str], payload: dict) -> str | None:
+        """The orchestrator notebook of a conversation (client, session and start), like summaries."""
+        session = session_key(headers, client.name, payload)
+        return compaction_mod.conversation_key(client.name, session, payload.get("messages"))
+
+    def load_notebook(key: str | None) -> str:
+        if not key:
+            return ""
+        notebooks.idle_s = cfg().compaction_idle_minutes * 60
+        text = notebooks.get(key)
+        if text is None and cfg().compaction_saved and (data := store.load_summary(f"notebook:{key}")):
+            text = str(data.get("notebook") or "")
+            notebooks.put(key, text)
+        return text or ""
+
+    def keep_notebook(key: str | None, client: str, text: str) -> None:
+        """Saved like summaries (memory, or encrypted in the database with "Save summaries" on)."""
+        if not key:
+            return
+        notebooks.put(key, text)
+        if cfg().compaction_saved:
+            store.save_summary(f"notebook:{key}", client, {"notebook": text})
+
     def keep_summary(key: str | None, client: str, plan: compaction_mod.Plan) -> None:
         if not key:
             return
@@ -1744,7 +1768,10 @@ def create_app(
             Budgets: rounds, member tasks, time; past them it is told to finish."""
             orchestrator = alias.council_judge or alias.target_model
             roster = list(members)
+            key = notebook_key(client, request_headers, base)
+            notebook = await asyncio.to_thread(load_notebook, key)
             own = [council_mod.ask_tool(roster), tools_mod.CALC_TOOL]
+            own += [council_mod.NOTEBOOK_TOOL] if key else []
             own += [websearch.TOOL] if searching else []
             own += [websearch.FETCH_TOOL] if fetching else []
             own_names = {t["function"]["name"] for t in own}
@@ -1752,10 +1779,13 @@ def create_app(
             prompt = council_mod.orchestration_prompt(
                 roster, alias.orch_rounds, alias.orch_tasks, searching, fetching, today, alias.council_instructions
             )
+            if key:
+                prompt += council_mod.notebook_section(notebook)
             messages = council_mod.with_orchestration(base["messages"], prompt)
             deadline = time.monotonic() + alias.orch_seconds
             rounds, tasks, web_used = 0, [0], [0]
-            progress(f"Orchestrator ({orchestrator}) is planning · team: {', '.join(roster)}")
+            started_from = "continues from its notebook" if notebook else "is planning"
+            progress(f"Orchestrator ({orchestrator}) {started_from} · team: {', '.join(roster)}")
 
             async def run(call: dict, closed: bool) -> dict:
                 name = (call.get("function") or {}).get("name")
@@ -1782,6 +1812,11 @@ def create_app(
                             text = f"{who} didn't answer."
                         else:
                             text = council_mod.render({**message, "_sources": sources} if sources else message)
+                elif name == council_mod.NOTEBOOK_NAME:
+                    text_in = websearch.call_argument(call, "text")[: council_mod.NOTEBOOK_MAX]
+                    await asyncio.to_thread(keep_notebook, key, client.name, text_in)
+                    progress(f"Notebook updated ({len(text_in.splitlines())} lines)")
+                    text = "Notebook saved."
                 elif name == tools_mod.CALC_NAME:
                     text = tools_mod.calculate(websearch.call_argument(call, "expression"))
                     progress(text)
@@ -2731,7 +2766,18 @@ def create_app(
             lane = request_lane(request_headers, client)
             auto = "opencode" if "x-opencode-session-id" in request_headers else None
             tags = parse_tags(client.policy.tags, request_headers.get("x-queuerouter-tags"), auto)
-            if council_mod.applies(alias, payload, tags, lane == LANES["low"]):
+            low = lane == LANES["low"]
+            continues = (  # an orchestrator with a notebook here carries on after the app ran its tools
+                alias.council == "orchestrate"
+                and not low
+                and alias.council_members
+                and isinstance(payload.get("messages"), list)
+                and payload["messages"]
+                and isinstance(payload["messages"][-1], dict)
+                and payload["messages"][-1].get("role") == "tool"
+                and bool(await asyncio.to_thread(load_notebook, notebook_key(client, request_headers, payload)))
+            )
+            if continues or council_mod.applies(alias, payload, tags, low):
                 return await run_council(
                     request, client, alias, payload, request_headers, lane, tags, path, body, query
                 )

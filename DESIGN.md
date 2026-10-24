@@ -1171,6 +1171,9 @@ v0.31.0: orchestrator phase 1 (council mode "orchestrate"): tools ask_member (br
 web_fetch (built in: readable text, private / local addresses and secret-looking URLs refused, redirects checked),
 calculator; today's date in its and members' instructions; budgets (rounds, member tasks, seconds); progress as
 reasoning; rows "orchestrator" / "orchestrator member X". Members (council and orchestrator) may read pages too.
+v0.32.0: orchestrator phase 2 — a notebook per conversation (tool queuerouter_notebook: plan, done, findings, open
+questions; shown in its instructions on every step; memory or saved encrypted with summaries); with a notebook, the
+orchestrator also takes the conversation's tool-result steps, so it carries a turn through the app's tool calls.
 
 ### Later (agreed, not scheduled)
 
@@ -1236,7 +1239,7 @@ reasoning; rows "orchestrator" / "orchestrator member X". Members (council and o
   - *Costs:* you wait for the slowest member plus the judge, nothing streams meanwhile (keep-alive comments
     hold the connection); several times the tokens.
   - *Shown:* the Requests page lists each member's call and the judge's choice.
-- **Orchestrator (alias mode).** Agreed design (2026-10-24); phase 1 done (v0.31.0), phases 2-4 to come.
+- **Orchestrator (alias mode).** Agreed design (2026-10-24); phases 1-2 done (v0.31.0, v0.32.0), 3-4 to come.
   - *What:* unlike the council (members answer the same request at once, a judge reads the results), an
     orchestrator model directs the work through tools QueueRouter runs for it: it plans, delegates focused
     tasks to members, searches and reads the web, reads the results, may ask again, then writes the final

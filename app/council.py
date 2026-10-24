@@ -279,3 +279,29 @@ def with_orchestration(messages: list, prompt: str) -> list:
             messages[0] = {**first, "content": [*content, {"type": "text", "text": prompt}]}
             return messages
     return [{"role": "system", "content": prompt}, *messages]
+
+
+NOTEBOOK_NAME = "queuerouter_notebook"
+NOTEBOOK_MAX = 8_000
+NOTEBOOK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": NOTEBOOK_NAME,
+        "description": (
+            "Rewrite your notebook for this conversation: the plan, what is done, key findings (with sources), open "
+            "questions, next steps. It is shown to you on every following step, including after the app runs tools, "
+            "so you can continue the work. Keep it short and current (it replaces the previous version)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+    },
+}
+
+
+def notebook_section(text: str) -> str:
+    if text.strip():
+        return f"\n\nYour notebook for this conversation (written by you on earlier steps):\n{text.strip()}"
+    return "\n\nYou have no notebook for this conversation yet: start one with queuerouter_notebook when you plan."

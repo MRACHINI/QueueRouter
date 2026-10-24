@@ -173,7 +173,8 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
     "compaction_saved": (
         "Compaction",
         "Save summaries",
-        "Also keep summaries in the database (encrypted), so they survive restarts. They contain your "
+        "Also keep summaries and orchestrator notebooks in the database (encrypted), so they survive restarts. "
+        "They contain your "
         "conversations; they are deleted with the client and after the days below.",
     ),
     "compaction_keep_days": (
