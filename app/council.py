@@ -118,7 +118,13 @@ def judge_payload(
     ``instructions`` (alias setting) and the answers. In pick mode the reply format is repeated last, so
     added instructions can't change it (the answer must stay a number QueueRouter can read)."""
     limit = max(1_000, min(CANDIDATE_CHARS, JUDGE_READS // max(1, len(candidates))))
-    listing = "\n\n".join(f"### Answer {i}\n{render(message, limit)}" for i, (_, message) in enumerate(candidates, 1))
+
+    def header(i: int, message: dict) -> str:  # with the member's role, when it has one
+        return f"### Answer {i}" + (f" ({message['_role']})" if message.get("_role") else "")
+
+    listing = "\n\n".join(
+        f"{header(i, message)}\n{render(message, limit)}" for i, (_, message) in enumerate(candidates, 1)
+    )
     prompt = PICK_PROMPT if mode == "pick" else COMBINE_PROMPT
     if instructions.strip():
         prompt += f"\n\nAlso follow these instructions from the administrator:\n{instructions.strip()}"
@@ -230,7 +236,14 @@ def ask_tool(roster: list[str]) -> dict:
 
 
 def orchestration_prompt(
-    roster: list[str], rounds: int, tasks: int, searching: bool, fetching: bool, today: str, instructions: str
+    roster: list[str],
+    rounds: int,
+    tasks: int,
+    searching: bool,
+    fetching: bool,
+    today: str,
+    instructions: str,
+    team: str = "",
 ) -> str:
     tools = ["queuerouter_ask_member (delegate a task)", "queuerouter_calculate (exact maths)"]
     if searching:
@@ -246,14 +259,14 @@ def orchestration_prompt(
         f"Budget for this step: at most {rounds} rounds of these tools and {tasks} member tasks; when told the "
         "budget is used up, finish with what you have. When you have enough, reply as the assistant in this "
         "conversation: text, or calls to the app's own tools (the app runs those, you cannot). Keep notes short: "
-        f"the user sees your progress. Today is {today}. Team: {', '.join(roster)}."
+        f"the user sees your progress. Today is {today}. Team: {team or ', '.join(roster)}."
     )
     if instructions.strip():
         text += f"\n\nAlso follow these instructions from the administrator:\n{instructions.strip()}"
     return text
 
 
-def member_prompt(searching: bool, fetching: bool, today: str) -> str:
+def member_prompt(searching: bool, fetching: bool, today: str, role: tuple[str, str] = ("", "")) -> str:
     extra = []
     if searching:
         extra.append("search the web")
@@ -262,7 +275,11 @@ def member_prompt(searching: bool, fetching: bool, today: str) -> str:
     can = f" You can {' and '.join(extra)}: cite the sources you used." if extra else ""
     return (
         "You are a member of a team; the team lead gives you one task. Do it thoroughly and answer concisely. "
-        "If information is missing, say exactly what is missing instead of guessing." + can + f" Today is {today}."
+        "If information is missing, say exactly what is missing instead of guessing."
+        + can
+        + f" Today is {today}."
+        + (f" Your role on the team: {role[0]}." if role[0] else "")
+        + (f" {role[1]}" if role[1] else "")
     )
 
 
@@ -305,3 +322,37 @@ def notebook_section(text: str) -> str:
     if text.strip():
         return f"\n\nYour notebook for this conversation (written by you on earlier steps):\n{text.strip()}"
     return "\n\nYou have no notebook for this conversation yet: start one with queuerouter_notebook when you plan."
+
+
+# -- member roles ---------------------------------------------------------------------------------------------
+
+
+def parse_roles(text: str, members: list[str] | tuple[str, ...] = ()) -> dict[str, tuple[str, str]]:
+    """{member: (role, instructions)} from lines "member = role: instructions" (instructions optional). Lines
+    for models that aren't members are ignored when ``members`` is given."""
+    roles: dict[str, tuple[str, str]] = {}
+    for line in (text or "").splitlines():
+        member, sep, rest = line.partition("=")
+        if not sep or not member.strip() or not rest.strip():
+            continue
+        role, _, instructions = rest.partition(":")
+        member = member.strip()
+        if members and member not in members:
+            continue
+        roles[member] = (role.strip()[:60], instructions.strip()[:1000])
+    return roles
+
+
+def roster_text(roster: list[str], roles: dict[str, tuple[str, str]]) -> str:
+    parts = []
+    for member in roster:
+        role, instructions = roles.get(member, ("", ""))
+        parts.append(f"{member} ({role}{': ' + instructions if instructions else ''})" if role else member)
+    return "; ".join(parts)
+
+
+def role_note(role: str, instructions: str) -> str:
+    """For a council member: its role, added to the conversation's system prompt."""
+    return f"{JUDGE_MARK} You answer as part of a council of models. Your role: {role}." + (
+        f" {instructions}" if instructions else ""
+    )

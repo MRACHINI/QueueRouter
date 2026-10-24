@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Trace {{ r.id }}{% endblock %}
+{% block content %}
+<p class="small"><a href="/admin/requests">← Requests</a></p>
+<h1>Trace <code>{{ r.id }}</code></h1>
+<p class="muted">{{ r.client }} · <code>{{ r.model }}</code>{% if r.target_model %} → <code>{{ r.target_model }}</code>{% endif %} ·
+  <time data-ts="{{ r.ts }}">{{ r.ts | int }}</time> · {{ r.outcome }} {{ r.status }}
+  {% if r.total_ms %}· {{ "{:,}".format(r.total_ms) }} ms{% endif %}</p>
+{% if r.council %}<p><span class="badge">{{ r.council }}</span></p>{% endif %}
+{% if r.error %}<p class="small muted">error: {{ r.error }}</p>{% endif %}
+
+<h2>Timeline</h2>
+{% if timeline %}
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>At</th><th>Step</th></tr></thead>
+  <tbody>
+  {% for at, note in timeline %}
+  <tr><td data-label="At" class="mono small">{{ "%.1f" | format(at) }} s</td><td data-label="Step" class="wrap-any">{{ note }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="small muted">Tasks, search queries, page addresses and the orchestrator's notes are shown here only for clients
+with content logging on (Clients page); the app saw them live in its thinking.</p>
+{% else %}
+<p class="muted">No timeline recorded for this request.</p>
+{% endif %}
+
+<h2>Calls made for it <span class="muted small">{{ totals.calls }} · {{ "{:,}".format(totals.prompt) }} in / {{ "{:,}".format(totals.completion) }} out tokens{% if totals.errors %} · {{ totals.errors }} not done{% endif %}</span></h2>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Time</th><th>Role</th><th>Model</th><th>Upstream</th><th>Outcome</th><th>Queue ms</th><th>Upstream ms</th><th>In tokens</th><th>Out tokens</th></tr></thead>
+  <tbody>
+  {% for c in calls %}
+  <tr>
+    <td data-label="Time"><time data-ts="{{ c.ts }}">{{ c.ts | int }}</time><div class="small muted mono">{{ c.id }}</div></td>
+    <td data-label="Role"><span class="badge">{{ c.role or "—" }}</span></td>
+    <td data-label="Model" class="wrap-any">{{ c.model }}</td>
+    <td data-label="Upstream">{{ c.upstream or "—" }}</td>
+    <td data-label="Outcome">{{ c.outcome }} <span class="muted small">{{ c.status }}</span>{% if c.error %}<div class="small muted wrap-any">{{ c.error }}</div>{% endif %}</td>
+    <td data-label="Queue ms">{{ c.queue_ms if c.queue_ms is not none else "—" }}</td>
+    <td data-label="Upstream ms">{{ c.upstream_ms if c.upstream_ms is not none else "—" }}</td>
+    <td data-label="In tokens">{{ "{:,}".format(c.prompt_tokens) if c.prompt_tokens is not none else "—" }}</td>
+    <td data-label="Out tokens">{{ "{:,}".format(c.completion_tokens) if c.completion_tokens is not none else "—" }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="9" class="muted">None recorded (yet: rows are written a few seconds after they finish).</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

@@ -97,7 +97,7 @@ async def test_orchestrator_delegates_uses_tools_and_answers(make_stack, monkeyp
     assert "Orchestrator (mock-model) is planning · team: mock-model, small-model" in notes
     assert "Orchestrator: Plan: ask both members." in notes
     assert "→ mock-model: find where config is loaded" in notes and "✓ small-model answered" in notes
-    assert 'searches the web: "python 3.14 release"' in notes and "reads http" in notes
+    assert 'searches the web: "python 3.14 release"' in notes and "reads a page: http" in notes
     assert "262144*0.8 = 209715.2" in notes and "Orchestrator is answering." in notes
     assert "final from orchestrator" in text and text.rstrip().endswith("data: [DONE]")
 
@@ -188,3 +188,59 @@ async def test_without_a_notebook_tool_steps_go_to_the_target(make_stack):
         step = [*ASK, {"role": "assistant", "content": "x"}, {"role": "tool", "tool_call_id": "t", "content": "y"}]
         r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": step})
         assert r.status_code == 200 and "orch_requests" not in stack.mock
+
+
+def test_roles_parsing():
+    from app.council import parse_roles, role_note, roster_text
+
+    text = "a = researcher: search and cite\nb=reviewer\nnot-a-member = x: y\nbroken line\n= nothing"
+    roles = parse_roles(text, ["a", "b"])
+    assert roles == {"a": ("researcher", "search and cite"), "b": ("reviewer", "")}
+    assert roster_text(["a", "b", "c"], roles) == "a (researcher: search and cite); b (reviewer); c"
+    assert "Your role: reviewer." in role_note("reviewer", "")
+
+
+async def test_roles_and_trace_page(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["orch_script"] = [
+        {"note": "Plan.", "calls": [(ASK_NAME, {"member": "small-model", "task": "secret project details"})]},
+        {"answer": "done"},
+    ]
+    roles = "small-model = reviewer: look for bugs\nmock-model = researcher"
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await orchestrate_setup(c, stack, council_roles=roles)
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.status_code == 200
+        system = stack.mock["orch_requests"][0]["messages"][0]["content"]
+        assert "Team: mock-model (researcher); small-model (reviewer: look for bugs)" in system
+        task_brief = [b for b in stack.mock.get("member_tasks", [])]
+        assert task_brief == [("small-model", "secret project details")]
+        rows = await rows_with(stack.app.state.store, lambda row: row["council"])
+        council = next(row for row in rows if row["council"])
+        trace = (await c.get(f"/admin/requests/{council['id']}/trace")).text
+        assert "Timeline" in trace and "→ small-model" in trace and "orchestrator member small-model" in trace
+        assert "secret project details" not in trace  # content logging is off: no excerpts
+        listing = (await c.get("/admin/requests")).text
+        assert f'href="/admin/requests/{council["id"]}/trace"' in listing
+        assert "member = role: instructions" in (await c.get("/admin/aliases/new")).text
+
+
+async def test_council_members_answer_in_their_roles(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack)
+        team = next(a for a in stack.app.state.store.list_aliases() if a.name == "team")
+        page = (await c.get(f"/admin/aliases/{team.id}")).text
+        form = {
+            "csrf": csrf_of(page),
+            "target_model": "mock-model",
+            "council": "pick",
+            "council_members": "mock-model, small-model",
+            "council_roles": "small-model = skeptic: question every assumption",
+            "enabled": "on",
+        }
+        assert "m=saved" in (await c.post(f"/admin/aliases/{team.id}", data=form)).headers["location"]
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.status_code == 200
+        judged = stack.mock["judge_inputs"][-1]
+        assert "### Answer 2 (skeptic)" in judged and "### Answer 1\n" in judged

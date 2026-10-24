@@ -416,6 +416,12 @@ MIGRATIONS: list[str] = [
     ALTER TABLE aliases ADD COLUMN orch_seconds INTEGER NOT NULL DEFAULT 300;
     ALTER TABLE aliases ADD COLUMN council_fetch INTEGER NOT NULL DEFAULT 0;
     """,
+    # 31: member roles per council / orchestrator alias ("member = role: instructions" lines), and the timeline
+    # of a council's or orchestrator's work per request (Requests > trace page)
+    """
+    ALTER TABLE aliases ADD COLUMN council_roles TEXT NOT NULL DEFAULT '';
+    ALTER TABLE requests ADD COLUMN timeline TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -463,6 +469,7 @@ REQUEST_COLUMNS = (
     "client_headers",
     "role",
     "parent",
+    "timeline",
 )
 
 
@@ -564,6 +571,7 @@ class Alias:
     orch_rounds: int = 6  # orchestrator budget per step: rounds of delegation...
     orch_tasks: int = 8  # ...member tasks...
     orch_seconds: int = 300  # ...and time
+    council_roles: str = ""  # "member = role: instructions" per line (app/council.py parse_roles)
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -1111,6 +1119,11 @@ class Store:
                     ),
                 )
 
+    def request_family(self, request_id: str) -> list[sqlite3.Row]:
+        """A request and the ones QueueRouter made for it (council members and judge, orchestrator calls),
+        oldest first."""
+        return self.query("SELECT * FROM requests WHERE id = ? OR parent = ? ORDER BY ts", (request_id, request_id))
+
     def list_requests(self, limit: int = 200, **filters: str) -> list[sqlite3.Row]:
         clauses, params = [], []
         for column in ("client", "outcome", "model", "upstream"):
@@ -1276,6 +1289,7 @@ class Store:
                 r["orch_rounds"] or 6,
                 r["orch_tasks"] or 8,
                 r["orch_seconds"] or 300,
+                r["council_roles"] or "",
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1305,14 +1319,15 @@ class Store:
         orch_rounds: int = 6,
         orch_tasks: int = 8,
         orch_seconds: int = 300,
+        council_roles: str = "",
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
                 "INSERT INTO aliases (name, target_model, upstream_ids, notes, params, fallbacks, fallback_on, "
                 "compact, compact_model, virtual_context, council, council_members, council_judge, council_when, "
                 "council_instructions, council_search, council_search_max, council_search_results, council_fetch, "
-                "orch_rounds, orch_tasks, orch_seconds, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "orch_rounds, orch_tasks, orch_seconds, council_roles, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     target_model,
@@ -1336,6 +1351,7 @@ class Store:
                     orch_rounds,
                     orch_tasks,
                     orch_seconds,
+                    council_roles,
                     time.time(),
                 ),
             )
@@ -1368,6 +1384,7 @@ class Store:
             "orch_rounds",
             "orch_tasks",
             "orch_seconds",
+            "council_roles",
         }
         self._update("aliases", alias_id, allowed, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)
