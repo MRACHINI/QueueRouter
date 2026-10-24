@@ -1191,6 +1191,27 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 
     # -- requests log and usage ----------------------------------------------------------
 
+    @app.get("/admin/requests/{request_id}/trace")
+    async def request_trace(request_id: str, request: Request):
+        """A council's or orchestrator's work: its timeline and every call it made."""
+        session = require(request, "viewer")
+        family = [dict(r) for r in await asyncio.to_thread(store.request_family, request_id[:40])]
+        main = next((r for r in family if r["id"] == request_id), None)
+        if main is None:
+            return back("/admin/requests", error="invalid")
+        try:
+            timeline = json.loads(main["timeline"] or "[]")
+        except ValueError:
+            timeline = []
+        calls = [r for r in family if r["id"] != request_id]
+        totals = {
+            "calls": len(calls),
+            "prompt": sum(r["prompt_tokens"] or 0 for r in calls),
+            "completion": sum(r["completion_tokens"] or 0 for r in calls),
+            "errors": sum(1 for r in calls if r["outcome"] != "done"),
+        }
+        return page(request, "request_trace.html", session, r=main, timeline=timeline, calls=calls, totals=totals)
+
     @app.get("/admin/requests")
     async def requests_log(request: Request):
         session = require(request, "viewer")
@@ -1411,6 +1432,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "orch_rounds": int_field(form, "orch_rounds", 1, 30, 6),
             "orch_tasks": int_field(form, "orch_tasks", 1, 64, 8),
             "orch_seconds": int_field(form, "orch_seconds", 30, 3600, 300),
+            "council_roles": "\n".join(
+                line.strip() for line in str(form.get("council_roles", "")).splitlines() if line.strip()
+            )[:8000],
         }
 
     def alias_from_form(form: dict, existing=None) -> SimpleNamespace:
@@ -1443,6 +1467,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             orch_rounds=str(form.get("orch_rounds", "6")),
             orch_tasks=str(form.get("orch_tasks", "8")),
             orch_seconds=str(form.get("orch_seconds", "300")),
+            council_roles=str(form.get("council_roles", "")),
             enabled=form.get("enabled") == "on" if existing else True,
         )
 
@@ -1479,7 +1504,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             fallback_on=DEFAULT_TRIGGERS, compact="off", compact_model="", virtual_context=None, council="off",
             council_members=[], council_judge="", council_when="planning", council_instructions="",
             council_search=False, council_search_max=3, council_search_results=5, council_fetch=False,
-            orch_rounds=6, orch_tasks=8, orch_seconds=300, enabled=True,
+            orch_rounds=6, orch_tasks=8, orch_seconds=300, council_roles="", enabled=True,
         )  # fmt: skip
         return alias_page(request, session, empty)
 

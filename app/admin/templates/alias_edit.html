@@ -68,6 +68,12 @@ reorder where order matters. A name no provider lists can be typed and added wit
       the answer from them (with one member: reviews it).</small></label>
     <label>Members (1–{{ council_max }}) {{ picker("council_members", a.council_members, "multi", "Add a member…") }}
       <small class="muted">They answer at once; mix providers so they don't wait for each other's slots.</small></label>
+    <label>Member roles <textarea name="council_roles" rows="3" placeholder="one per line: member = role: instructions, e.g.
+DeepSeek-V4.1-Flash-1017 = researcher: search the web and cite sources
+GLM-4.7 = reviewer: look for bugs, risks and missing tests">{{ a.council_roles }}</textarea>
+      <small class="muted">Optional. The orchestrator sees each member's role and gives it matching tasks; in pick / combine
+      mode each member answers in its role, and the judge sees which role wrote which answer. Lines for models that
+      aren't members are ignored.</small></label>
     <label>Judge {{ picker("council_judge", a.council_judge, "single", "blank = the target model") }}</label>
     <fieldset class="plain"><legend class="small muted">Orchestrator (mode "orchestrate")</legend>
       <small class="muted">The judge model becomes the orchestrator: it plans, gives members focused tasks (they see only

@@ -136,6 +136,7 @@ class RequestLog:
             "client_headers": None,  # what the app sent about itself (app/upstream.py client_identity)
             "role": None,  # e.g. "council member 1/2", "council judge", "summary": made by QueueRouter for...
             "parent": None,  # ...this request (its id)
+            "timeline": None,  # council / orchestrator: [[seconds, note], ...] (Requests > trace page)
         }
 
     def finish(self, stats: Stats, **fields) -> None:
@@ -1758,9 +1759,16 @@ def create_app(
         search_count, search_errors = [0], []  # web searches run for the members (app/websearch.py)
         notes: asyncio.Queue[str] = asyncio.Queue()  # progress, streamed to the app as reasoning (opencode: "Thought")
 
-        def progress(note: str) -> None:
+        timeline: list[list] = []  # [seconds, note]: the trace page
+        began_at = time.monotonic()
+        keep_content = client.policy.logs_content(time.time())
+
+        def progress(note: str, private: str = "") -> None:
+            """A step of the work: streamed whole to the app; on the trace page ``private`` (excerpts of the
+            conversation: tasks, queries, addresses) only for clients with content logging on."""
+            timeline.append([round(time.monotonic() - began_at, 1), (note + private if keep_content else note)[:400]])
             if stream:
-                notes.put_nowait(note)
+                notes.put_nowait(note + private)
 
         async def orchestrate(base, members, searching, fetching, member, web_tool) -> tuple[bytes | None, None]:
             """Mode "orchestrate": the orchestrator (the judge model) plans, delegates tasks to members, uses the
@@ -1776,8 +1784,16 @@ def create_app(
             own += [websearch.FETCH_TOOL] if fetching else []
             own_names = {t["function"]["name"] for t in own}
             today = tools_mod.today()
+            roles = council_mod.parse_roles(alias.council_roles, roster)
             prompt = council_mod.orchestration_prompt(
-                roster, alias.orch_rounds, alias.orch_tasks, searching, fetching, today, alias.council_instructions
+                roster,
+                alias.orch_rounds,
+                alias.orch_tasks,
+                searching,
+                fetching,
+                today,
+                alias.council_instructions,
+                council_mod.roster_text(roster, roles),
             )
             if key:
                 prompt += council_mod.notebook_section(notebook)
@@ -1799,9 +1815,14 @@ def create_app(
                         text = "No member tasks left in this step's budget: finish with what you have."
                     else:
                         tasks[0] += 1
-                        progress(f"→ {who}: {' '.join(task.split())[:160]}")
+                        progress(f"→ {who}", f": {' '.join(task.split())[:160]}")
                         brief = [
-                            {"role": "system", "content": council_mod.member_prompt(searching, fetching, today)},
+                            {
+                                "role": "system",
+                                "content": council_mod.member_prompt(
+                                    searching, fetching, today, roles.get(who, ("", ""))
+                                ),
+                            },
                             {"role": "user", "content": task},
                         ]
                         body, sources = await member(
@@ -1819,7 +1840,7 @@ def create_app(
                     text = "Notebook saved."
                 elif name == tools_mod.CALC_NAME:
                     text = tools_mod.calculate(websearch.call_argument(call, "expression"))
-                    progress(text)
+                    progress("Calculated", f": {text}")
                 elif name in (websearch.TOOL_NAME, websearch.FETCH_NAME):
                     if web_used[0] >= alias.council_search_max * max(1, len(roster)):
                         text = "No web searches or page reads left in this step's budget."
@@ -1858,7 +1879,7 @@ def create_app(
                     progress("Budget used up: taking the orchestrator's answer as it is.")
                     return council_mod.without_calls(body, own_names), None
                 if note := " ".join(str(message.get("content") or "").split())[:300]:
-                    progress(f"Orchestrator: {note}")
+                    progress("Orchestrator", f": {note}")
                 rounds += 1
                 closed = rounds > alias.orch_rounds or time.monotonic() > deadline
                 results = await asyncio.gather(*(run(call, closed) for call in mine))
@@ -1879,7 +1900,7 @@ def create_app(
                 name = (call.get("function") or {}).get("name")
                 if name == websearch.FETCH_NAME:
                     url = websearch.call_argument(call, "url")
-                    progress(f"{who} reads {url[:100]}")
+                    progress(f"{who} reads a page", f": {url[:100]}")
                     try:
                         final, text = await websearch.fetch(app.state.client, url)
                     except websearch.SearchError as exc:
@@ -1889,7 +1910,7 @@ def create_app(
                     progress(f"{who}: read {len(text):,} characters")
                     return f"Page {final}:\n{text}"
                 query = websearch.call_query(call)
-                progress(f'{who} searches the web: "{query[:80]}"')
+                progress(f"{who} searches the web", f': "{query[:80]}"')
                 search_count[0] += 1
                 try:
                     found = await websearch.search(
@@ -1962,11 +1983,21 @@ def create_app(
                 f"Council ({alias.council}): asking {len(members)} member(s): {names}"
                 + (" · web search on" if searching else "")
             )
-            replies = await asyncio.gather(*(member(i, m) for i, m in enumerate(members, 1)))
+            roles = council_mod.parse_roles(alias.council_roles, members)
+
+            def briefed(m: str) -> list | None:  # a member with a role gets it in its instructions
+                if m not in roles:
+                    return None
+                return council_mod.with_orchestration(base["messages"], council_mod.role_note(*roles[m]))
+
+            replies = await asyncio.gather(*(member(i, m, briefed(m)) for i, m in enumerate(members, 1)))
             answered = []
             for m, (b, sources) in zip(members, replies, strict=True):
                 if b and (msg := council_mod.message_of(b)):
-                    answered.append((m, {**msg, "_sources": sources} if searching else msg, b))
+                    shown = {**msg, "_sources": sources} if searching else dict(msg)
+                    if m in roles:
+                        shown["_role"] = roles[m][0]
+                    answered.append((m, shown, b))
             if not answered:
                 rlog.fields["council"] = f"no member answered: {alias.target_model} alone"
                 progress(f"No member answered: {alias.target_model} answers alone.")
@@ -2027,6 +2058,7 @@ def create_app(
         def finish(ok: bool) -> None:
             inflight.pop(rlog.fields["id"], None)
             rlog.fields["target_model"] = alias.target_model
+            rlog.fields["timeline"] = json.dumps(timeline[-300:], ensure_ascii=False) if timeline else None
             if search_count[0]:
                 rlog.fields["council"] = f"{rlog.fields['council'] or ''} · {search_count[0]} searches".lstrip(" ·")
             if search_errors and not rlog.fields["error"]:
