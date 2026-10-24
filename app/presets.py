@@ -65,6 +65,18 @@ PRESETS: dict[str, Preset] = {
             "a used-up daily quota fails fast instead of waiting. Models are listed as models/gemini-....",
         ),
         Preset(
+            "anthropic",
+            "Anthropic (Claude)",
+            "https://api.anthropic.com/v1",
+            8,
+            # Claude 4.7 and later answer 400 to any temperature below 1 or top_p other than the default
+            params='{"strip": ["temperature", "top_p", "store"]}',
+            note="Key from platform.claude.com (Claude Console). Uses Anthropic's OpenAI-compatible endpoint: tools, "
+            "streaming and images work; prompt caching isn't available and thinking isn't returned. temperature and "
+            "top_p are removed (newer Claude models reject them). Use a key created in a workspace (personal keys "
+            "not tied to one need an extra header QueueRouter doesn't send yet).",
+        ),
+        Preset(
             "nvidia",
             "NVIDIA (build.nvidia.com)",
             "https://integrate.api.nvidia.com/v1",

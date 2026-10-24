@@ -18,8 +18,8 @@ from pathlib import Path
 PROVIDER_ID = "queuerouter"
 KEY_ENV = "QUEUEROUTER_KEY"
 DEFAULT_OUTPUT = 16_384
-CONTEXT_KEYS = ("context_length", "max_model_len", "max_context_length")
-OUTPUT_KEYS = ("max_output_tokens", "max_completion_tokens")
+CONTEXT_KEYS = ("context_length", "max_model_len", "max_context_length", "max_input_tokens")  # last: Anthropic
+OUTPUT_KEYS = ("max_output_tokens", "max_completion_tokens", "max_tokens")  # last: Anthropic
 
 # The login command only hands opencode the key from $QUEUEROUTER_KEY (opencode runs it without a
 # shell and stores whatever it prints). Windows has no `sh`, hence a PowerShell variant.

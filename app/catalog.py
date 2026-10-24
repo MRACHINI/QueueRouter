@@ -8,9 +8,11 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from .limits import error_message
 from .upstream import upstream_headers
 
 FAILED_RETRY_S = 10  # retry a model list we never managed to fetch this often
+ANTHROPIC_VERSION = "2023-06-01"  # the Claude API version its model list is asked in
 
 
 @dataclass
@@ -22,12 +24,16 @@ class _Entry:
 
 
 async def fetch_models(client: httpx.AsyncClient, base_url: str, api_key: str, timeout: float = 15) -> list[dict]:
-    """GET {base_url}/models; raises on network errors or a non-200 / malformed answer."""
-    response = await client.get(
-        f"{base_url.rstrip('/')}/models", headers=upstream_headers({}, api_key), timeout=timeout
-    )
+    """GET {base_url}/models; raises on network errors or a non-200 / malformed answer (with the provider's
+    own reason, shown on the Upstreams page)."""
+    headers, params = upstream_headers({}, api_key), {}
+    if "api.anthropic.com" in base_url:  # Anthropic: its API version header, and up to 1,000 models per page
+        headers["anthropic-version"] = ANTHROPIC_VERSION
+        params["limit"] = 1000
+    response = await client.get(f"{base_url.rstrip('/')}/models", headers=headers, params=params, timeout=timeout)
     if response.status_code != 200:
-        raise ValueError(f"HTTP {response.status_code}")
+        reason = " ".join(error_message(response.content).split())[:160]
+        raise ValueError(f"HTTP {response.status_code}" + (f": {reason}" if reason else ""))
     data = response.json().get("data")
     if not isinstance(data, list):
         raise ValueError("no 'data' list in the response")
