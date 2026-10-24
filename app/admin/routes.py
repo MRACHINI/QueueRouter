@@ -75,6 +75,9 @@ ALIAS_ERRORS = {  # what was wrong in the alias editor
     "council_members": "A council needs 1 to 64 members.",
     "council_search_max": "Searches per member: 1 to 10.",
     "council_search_results": "Results per search: 1 to 10.",
+    "orch_rounds": "Orchestrator rounds: 1 to 30.",
+    "orch_tasks": "Orchestrator member tasks: 1 to 64.",
+    "orch_seconds": "Orchestrator time: 30 to 3,600 seconds.",
 }
 PRICING_DAYS = 30  # the price table lists models used this recently (plus offered and manually priced ones)
 LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes / send anyway
@@ -1403,6 +1406,10 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "council_search": form.get("council_search") == "on",
             "council_search_max": int_field(form, "council_search_max", 1, 10, 3),
             "council_search_results": int_field(form, "council_search_results", 1, 10, 5),
+            "council_fetch": form.get("council_fetch") == "on",
+            "orch_rounds": int_field(form, "orch_rounds", 1, 30, 6),
+            "orch_tasks": int_field(form, "orch_tasks", 1, 64, 8),
+            "orch_seconds": int_field(form, "orch_seconds", 30, 3600, 300),
         }
 
     def alias_from_form(form: dict, existing=None) -> SimpleNamespace:
@@ -1431,6 +1438,10 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             council_search=form.get("council_search") == "on",
             council_search_max=str(form.get("council_search_max", "3")),
             council_search_results=str(form.get("council_search_results", "5")),
+            council_fetch=form.get("council_fetch") == "on",
+            orch_rounds=str(form.get("orch_rounds", "6")),
+            orch_tasks=str(form.get("orch_tasks", "8")),
+            orch_seconds=str(form.get("orch_seconds", "300")),
             enabled=form.get("enabled") == "on" if existing else True,
         )
 
@@ -1466,7 +1477,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             id=None, name="", target_model="", upstream_ids=(), notes="", params="", fallbacks=[],
             fallback_on=DEFAULT_TRIGGERS, compact="off", compact_model="", virtual_context=None, council="off",
             council_members=[], council_judge="", council_when="planning", council_instructions="",
-            council_search=False, council_search_max=3, council_search_results=5, enabled=True,
+            council_search=False, council_search_max=3, council_search_results=5, council_fetch=False,
+            orch_rounds=6, orch_tasks=8, orch_seconds=300, enabled=True,
         )  # fmt: skip
         return alias_page(request, session, empty)
 

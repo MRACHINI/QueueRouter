@@ -409,6 +409,13 @@ MIGRATIONS: list[str] = [
     ALTER TABLE aliases ADD COLUMN council_search_max INTEGER NOT NULL DEFAULT 3;
     ALTER TABLE aliases ADD COLUMN council_search_results INTEGER NOT NULL DEFAULT 5;
     """,
+    # 30: orchestrator budgets per alias (rounds, member tasks, seconds) and web page reading for its tools
+    """
+    ALTER TABLE aliases ADD COLUMN orch_rounds INTEGER NOT NULL DEFAULT 6;
+    ALTER TABLE aliases ADD COLUMN orch_tasks INTEGER NOT NULL DEFAULT 8;
+    ALTER TABLE aliases ADD COLUMN orch_seconds INTEGER NOT NULL DEFAULT 300;
+    ALTER TABLE aliases ADD COLUMN council_fetch INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -553,6 +560,10 @@ class Alias:
     council_search: bool = False  # members may search the web (app/websearch.py)
     council_search_max: int = 3  # searches per member per step
     council_search_results: int = 5  # results per search
+    council_fetch: bool = False  # the orchestrator (and its members) may read web pages
+    orch_rounds: int = 6  # orchestrator budget per step: rounds of delegation...
+    orch_tasks: int = 8  # ...member tasks...
+    orch_seconds: int = 300  # ...and time
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -1261,6 +1272,10 @@ class Store:
                 bool(r["council_search"]),
                 r["council_search_max"] or 3,
                 r["council_search_results"] or 5,
+                bool(r["council_fetch"]),
+                r["orch_rounds"] or 6,
+                r["orch_tasks"] or 8,
+                r["orch_seconds"] or 300,
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1286,13 +1301,18 @@ class Store:
         council_search: bool = False,
         council_search_max: int = 3,
         council_search_results: int = 5,
+        council_fetch: bool = False,
+        orch_rounds: int = 6,
+        orch_tasks: int = 8,
+        orch_seconds: int = 300,
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
                 "INSERT INTO aliases (name, target_model, upstream_ids, notes, params, fallbacks, fallback_on, "
                 "compact, compact_model, virtual_context, council, council_members, council_judge, council_when, "
-                "council_instructions, council_search, council_search_max, council_search_results, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "council_instructions, council_search, council_search_max, council_search_results, council_fetch, "
+                "orch_rounds, orch_tasks, orch_seconds, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     target_model,
@@ -1312,6 +1332,10 @@ class Store:
                     int(council_search),
                     council_search_max,
                     council_search_results,
+                    int(council_fetch),
+                    orch_rounds,
+                    orch_tasks,
+                    orch_seconds,
                     time.time(),
                 ),
             )
@@ -1340,6 +1364,10 @@ class Store:
             "council_search",
             "council_search_max",
             "council_search_results",
+            "council_fetch",
+            "orch_rounds",
+            "orch_tasks",
+            "orch_seconds",
         }
         self._update("aliases", alias_id, allowed, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)

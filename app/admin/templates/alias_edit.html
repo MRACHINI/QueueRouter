@@ -69,9 +69,21 @@ reorder where order matters. A name no provider lists can be typed and added wit
     <label>Members (1–{{ council_max }}) {{ picker("council_members", a.council_members, "multi", "Add a member…") }}
       <small class="muted">They answer at once; mix providers so they don't wait for each other's slots.</small></label>
     <label>Judge {{ picker("council_judge", a.council_judge, "single", "blank = the target model") }}</label>
+    <fieldset class="plain"><legend class="small muted">Orchestrator (mode "orchestrate")</legend>
+      <small class="muted">The judge model becomes the orchestrator: it plans, gives members focused tasks (they see only
+      the task it writes), can search and read the web, may ask again, then answers. Progress shows live in the app's
+      thinking ("Thought" in opencode). Budget per step:</small>
+      <div class="row wrap">
+        <label class="inline-field">rounds <input type="number" name="orch_rounds" min="1" max="30" value="{{ a.orch_rounds }}"></label>
+        <label class="inline-field">member tasks <input type="number" name="orch_tasks" min="1" max="64" value="{{ a.orch_tasks }}"></label>
+        <label class="inline-field">seconds <input type="number" name="orch_seconds" min="30" max="3600" value="{{ a.orch_seconds }}"></label>
+      </div>
+    </fieldset>
     <fieldset class="plain"><legend class="small muted">Web search for members</legend>
       <label class="check"><input type="checkbox" name="council_search" {% if a.council_search %}checked{% endif %}>
         Members can search the web before the judge decides</label>
+      <label class="check"><input type="checkbox" name="council_fetch" {% if a.council_fetch %}checked{% endif %}>
+        They (and the orchestrator) can also read web pages (no key needed; private and local addresses are refused)</label>
       <div class="row wrap">
         <label class="inline-field">searches per member <input type="number" name="council_search_max" min="1" max="10" value="{{ a.council_search_max }}"></label>
         <label class="inline-field">results per search <input type="number" name="council_search_results" min="1" max="10" value="{{ a.council_search_results }}"></label>
