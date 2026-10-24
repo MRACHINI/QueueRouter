@@ -69,6 +69,18 @@ reorder where order matters. A name no provider lists can be typed and added wit
     <label>Members (1–{{ council_max }}) {{ picker("council_members", a.council_members, "multi", "Add a member…") }}
       <small class="muted">They answer at once; mix providers so they don't wait for each other's slots.</small></label>
     <label>Judge {{ picker("council_judge", a.council_judge, "single", "blank = the target model") }}</label>
+    <fieldset class="plain"><legend class="small muted">Web search for members</legend>
+      <label class="check"><input type="checkbox" name="council_search" {% if a.council_search %}checked{% endif %}>
+        Members can search the web before the judge decides</label>
+      <div class="row wrap">
+        <label class="inline-field">searches per member <input type="number" name="council_search_max" min="1" max="10" value="{{ a.council_search_max }}"></label>
+        <label class="inline-field">results per search <input type="number" name="council_search_results" min="1" max="10" value="{{ a.council_search_results }}"></label>
+      </div>
+      <small class="muted">QueueRouter runs the searches with the provider and key in Settings &gt; Web search{% if not search_on %}
+        (<strong>not set up yet</strong>){% endif %}; the judge sees each member's sources. Each search re-asks that member,
+        so the step takes longer and uses more slot time. Queries are written by the models; ones that look like they
+        contain secrets are refused.</small>
+    </fieldset>
     <label>Judge instructions <textarea name="council_instructions" rows="3" maxlength="4000" placeholder="optional, e.g. Prefer the smallest change that fixes the problem. Reject answers that skip tests. Answer in Arabic.">{{ a.council_instructions }}</textarea>
       <small class="muted">Added to the built-in instruction (pick: choose the best answer by number; combine: write the
       best reply from them). In pick mode the judge still answers with a number.</small></label>

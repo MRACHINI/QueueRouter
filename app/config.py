@@ -201,6 +201,9 @@ TUNABLES: dict[str, type] = {
     "compaction_idle_minutes": int,
     "compaction_saved": bool,
     "compaction_keep_days": int,
+    "search_provider": str,
+    "search_key": str,
+    "search_url": str,
     "metrics_token": str,
     "otel_endpoint": str,
     "otel_headers": str,
@@ -214,7 +217,7 @@ TUNABLES: dict[str, type] = {
     "circuit_threshold": int,
     "circuit_cooldown_s": float,
 }
-SECRET_TUNABLES = frozenset({"metrics_token", "otel_headers"})  # stored encrypted, never shown back
+SECRET_TUNABLES = frozenset({"metrics_token", "otel_headers", "search_key"})  # stored encrypted, never shown back
 
 
 @dataclass(frozen=True)
@@ -263,6 +266,9 @@ class Settings:
     compaction_idle_minutes: int = 60  # summaries are forgotten after this long unused
     compaction_saved: bool = False  # also keep summaries in the database (encrypted), so they survive restarts
     compaction_keep_days: int = 7  # saved summaries are deleted after this long unused
+    search_provider: str = "off"  # web search for council members: off | tavily | brave | searxng
+    search_key: str = ""  # its API key (Tavily, Brave)
+    search_url: str = ""  # SearXNG address, e.g. http://searxng:8080
     metrics_token: str = ""  # /metrics needs "Authorization: Bearer <token>"; empty = /metrics is off
     otel_endpoint: str = ""  # OTLP/HTTP collector base URL (traces go to <it>/v1/traces); empty = off
     otel_headers: str = ""  # extra headers for the collector, "key=value,key2=value2"

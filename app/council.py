@@ -23,6 +23,7 @@ WHEN = ("planning", "always")
 MIN_MEMBERS, MAX_MEMBERS = 1, 64
 CANDIDATE_CHARS = 12_000  # per candidate shown to the judge, at most...
 JUDGE_READS = 120_000  # ...and all of them together (with many members each answer gets its share)
+PICK_TOKENS = 4_000  # the pick judge's answer: a number, after any thinking
 
 JUDGE_MARK = "[QueueRouter council]"
 PICK_PROMPT = (
@@ -77,7 +78,36 @@ def render(message: dict, limit: int = CANDIDATE_CHARS) -> str:
     text = "\n".join(parts)
     if len(text) > limit:
         text = text[:limit] + "\n[... cut ...]"
+    sources = message.get("_sources") or []  # web searches QueueRouter ran for this member
+    if sources:
+        found = "\n\n".join(sources)
+        if len(found) > limit:
+            found = found[:limit] + "\n[... cut ...]"
+        text += f"\n\n[Web search results this member used]\n{found}"
+    else:
+        text += (
+            "\n\n[This member ran no web search: facts it states come from memory.]" if "_sources" in message else ""
+        )
     return text
+
+
+def without_calls(body: bytes | None, tool_name: str) -> bytes | None:
+    """A chat completion with the calls to ``tool_name`` removed (QueueRouter's own tool: the app doesn't
+    know it). None if nothing is left of the answer."""
+    try:
+        data = json.loads(body or b"")
+        message = data["choices"][0]["message"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return body
+    calls = [c for c in message.get("tool_calls") or [] if (c.get("function") or {}).get("name") != tool_name]
+    if calls:
+        message["tool_calls"] = calls
+    else:
+        message.pop("tool_calls", None)
+        if not message.get("content"):
+            return None
+        data["choices"][0]["finish_reason"] = "stop"
+    return json.dumps(data).encode()
 
 
 def judge_payload(
@@ -99,7 +129,9 @@ def judge_payload(
         "messages": [*payload["messages"], {"role": "user", "content": f"{prompt}\n\n{listing}"}],
     }
     if mode == "pick":
-        judged.update(stream=False, max_tokens=20, temperature=0)
+        # room for thinking models to reason first (their reasoning counts as output); the verdict is read
+        # from the final answer
+        judged.update(stream=False, max_tokens=PICK_TOKENS, temperature=0)
         judged.pop("max_completion_tokens", None)
         judged.pop("stream_options", None)
         if judged.get("tools"):
@@ -107,11 +139,27 @@ def judge_payload(
     return judged
 
 
+def verdict(text: str | None, count: int) -> int | None:
+    """The 0-based candidate the judge named, or None when its answer doesn't say clearly. Thinking that
+    some servers leave inline (<think>...</think>) is skipped; a bare number wins, else "answer N" /
+    "#N" at the start, else the last number mentioned."""
+    text = re.sub(r"<think>.*?(</think>|$)", "", text or "", flags=re.S | re.I).strip()
+    if not text:
+        return None
+    match = re.fullmatch(r"\D{0,20}?(\d+)\D{0,3}", text) or re.match(
+        r"\s*(?:answer|candidate|#)?\s*#?(\d+)\b", text, re.I
+    )
+    numbers = [match.group(1)] if match else re.findall(r"\b(\d+)\b", text)[-1:]
+    if not numbers:
+        return None
+    number = int(numbers[0])
+    return number - 1 if 1 <= number <= count else None
+
+
 def parse_pick(text: str | None, count: int) -> int:
     """The 0-based candidate the judge named (the first one when its answer is unclear)."""
-    match = re.search(r"\d+", text or "")
-    number = int(match.group()) if match else 1
-    return number - 1 if 1 <= number <= count else 0
+    index = verdict(text, count)
+    return 0 if index is None else index
 
 
 def as_stream(body: bytes, model: str) -> bytes:
