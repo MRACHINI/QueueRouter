@@ -114,6 +114,13 @@ def create_mock(limit: int = 2) -> FastAPI:
             state.setdefault("orch_requests", []).append(body)
             script = state.get("orch_script") or [{"answer": "final from orchestrator"}]
             step = script[min(turn, len(script) - 1)]
+            if "app_call" in step:  # end the turn with one of the app's own tools
+                name, arguments = step["app_call"]
+                function = {"name": name, "arguments": json.dumps(arguments)}
+                call = {"id": f"a{turn}", "type": "function", "function": function}
+                message = {"role": "assistant", "content": None, "tool_calls": [call]}
+                choice = {"index": 0, "message": message, "finish_reason": "tool_calls"}
+                return {"id": "x", "object": "chat.completion", "model": body.get("model"), "choices": [choice]}
             if "answer" in step:
                 message = {"role": "assistant", "content": step["answer"]}
                 choice = {"index": 0, "message": message, "finish_reason": "stop"}

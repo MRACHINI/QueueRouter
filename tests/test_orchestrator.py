@@ -141,3 +141,50 @@ async def test_editor_offers_orchestrate(make_stack):
         await login(c, stack.url)
         page = (await c.get("/admin/aliases/new")).text
     assert '<option value="orchestrate"' in page and 'name="orch_rounds"' in page and 'name="council_fetch"' in page
+
+
+async def test_notebook_carries_the_work_across_steps(make_stack):
+    """Step 1: it plans, writes its notebook and asks the app to read a file. Step 2 (the file's content comes
+    back as a tool result, which a planning-steps council would leave to the target model): it continues from
+    its notebook and answers."""
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0, compaction_saved=True)
+    stack.mock["orch_script"] = [
+        {"calls": [("queuerouter_notebook", {"text": "PLAN: 1) read config.py 2) fix the loader"})]},
+        {"app_call": ("read_file", {"path": "config.py"})},
+        {"answer": "fixed: the loader now reads the env file"},
+    ]
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}]
+    headers = {**stack.headers, "X-Session-Id": "ses-nb"}
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await orchestrate_setup(c, stack)
+        r = await c.post(
+            "/v1/chat/completions", headers=headers, json={"model": "team", "messages": ASK, "tools": tools}
+        )
+        call = r.json()["choices"][0]["message"]["tool_calls"][0]
+        assert call["function"]["name"] == "read_file"  # the app's own tool goes back to the app
+        step2 = [
+            *ASK,
+            {"role": "assistant", "content": None, "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": call["id"], "content": "LOAD_ENV = False"},
+        ]
+        r = await c.post(
+            "/v1/chat/completions", headers=headers, json={"model": "team", "messages": step2, "tools": tools}
+        )
+        assert r.json()["choices"][0]["message"]["content"] == "fixed: the loader now reads the env file"
+    third = stack.mock["orch_requests"][2]  # the orchestrator again, on the tool step
+    assert "Your notebook for this conversation" in third["messages"][0]["content"]
+    assert "PLAN: 1) read config.py 2) fix the loader" in third["messages"][0]["content"]
+    assert third["messages"][-1]["content"] == "LOAD_ENV = False"
+    store = stack.app.state.store
+    rows = store.query("SELECT key, data FROM compaction_summaries WHERE key LIKE 'notebook:%'")
+    assert len(rows) == 1 and "PLAN" not in rows[0]["data"]  # saved, encrypted
+    assert store.load_summary(rows[0]["key"])["notebook"].startswith("PLAN:")
+
+
+async def test_without_a_notebook_tool_steps_go_to_the_target(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await orchestrate_setup(c, stack)
+        step = [*ASK, {"role": "assistant", "content": "x"}, {"role": "tool", "tool_call_id": "t", "content": "y"}]
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": step})
+        assert r.status_code == 200 and "orch_requests" not in stack.mock
