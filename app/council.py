@@ -187,3 +187,16 @@ def as_stream(body: bytes, model: str) -> bytes:
     if data.get("usage"):
         chunks.append({**base, "choices": [], "usage": data["usage"]})
     return b"".join(f"data: {json.dumps(c)}\n\n".encode() for c in chunks) + b"data: [DONE]\n\n"
+
+
+def reasoning_chunk(note: str, model: str, seconds: int) -> bytes:
+    """A progress note as a streamed reasoning delta: apps that show a model's thinking (opencode's
+    "Thought") show it live, apart from the answer."""
+    chunk = {
+        "id": "qr-council-progress",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": {"reasoning_content": f"[{seconds}s] {note}\n"}, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
