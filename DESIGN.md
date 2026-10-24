@@ -1185,6 +1185,10 @@ file are refused together (read-only tools never conflict).
 v0.34.1: Anthropic (Claude) preset (OpenAI-compatible endpoint; temperature / top_p stripped: Claude 4.7+ reject
 them); its model list asked with anthropic-version and limit=1000; max_input_tokens / max_tokens read as context /
 output sizes; a refused model list shows the provider's reason on the Upstreams page.
+v0.35.0: model@upstream — wherever a model is named (alias target, fallbacks, council members, judge, summary
+model, or a request's model) a name ending in @<upstream name> is served only by that upstream (the provider gets the
+plain name); split only when the suffix is exactly an upstream's name; the alias editor's picker lists models
+offered by several upstreams once per provider.
 
 ### Later (agreed, not scheduled)
 
