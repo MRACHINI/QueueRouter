@@ -115,3 +115,36 @@ async def test_provider_error_text_recorded(make_stack):
         "HTTP 422 from upstream: forced",
         "HTTP 503 from upstream: temporarily unavailable",
     ]
+
+
+async def test_anthropic_model_list(make_stack, monkeypatch):
+    """Claude's model list: its API version header, up to 1,000 models, sizes from max_input_tokens / max_tokens;
+    a refusal shows the provider's reason."""
+    import httpx as httpx_mod
+
+    from app.catalog import fetch_models
+    from app.opencode import model_limits
+    from app.presets import PRESETS
+
+    seen = {}
+
+    def handler(request: httpx_mod.Request) -> httpx_mod.Response:
+        seen.update(headers=dict(request.headers), params=dict(request.url.params))
+        if request.headers.get("anthropic-version") != "2023-06-01":
+            return httpx_mod.Response(
+                400,
+                json={"error": {"type": "invalid_request_error", "message": "anthropic-version: header is required"}},
+            )
+        data = [{"type": "model", "id": "claude-opus-5-5", "max_input_tokens": 1_000_000, "max_tokens": 128_000}]
+        return httpx_mod.Response(200, json={"data": data, "has_more": False})
+
+    async with httpx_mod.AsyncClient(transport=httpx_mod.MockTransport(handler)) as client:
+        models = await fetch_models(client, "https://api.anthropic.com/v1", "sk-ant-test")
+        assert seen["params"] == {"limit": "1000"} and seen["headers"]["authorization"] == "Bearer sk-ant-test"
+        assert model_limits(models[0], []) == {"context": 1_000_000, "output": 128_000}
+        try:
+            await fetch_models(client, "https://other.example/v1", "k")  # no Anthropic header: the reason is kept
+        except ValueError as exc:
+            assert "HTTP 400" in str(exc) and "anthropic-version: header is required" in str(exc)
+    preset = PRESETS["anthropic"]
+    assert preset.base_url == "https://api.anthropic.com/v1" and "temperature" in preset.params

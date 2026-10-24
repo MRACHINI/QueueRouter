@@ -3225,7 +3225,14 @@ def create_app(
     return app
 
 
-CONTEXT_FIELDS = ("context_length", "max_model_len", "max_context_length", "max_output_tokens", "max_tokens")
+CONTEXT_FIELDS = (
+    "context_length",
+    "max_model_len",
+    "max_context_length",
+    "max_input_tokens",
+    "max_output_tokens",
+    "max_tokens",
+)
 
 
 @functools.lru_cache(maxsize=256)

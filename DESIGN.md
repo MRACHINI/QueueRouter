@@ -1182,6 +1182,9 @@ v0.34.0: orchestrator phase 4 — ask_member(propose=true) lets a member propose
 app's tool definitions); proposals are numbered P1, P2… and the orchestrator adopts chosen ones with
 queuerouter_adopt_proposals (sent to the app exactly as proposed, optional text); two proposals changing the same
 file are refused together (read-only tools never conflict).
+v0.34.1: Anthropic (Claude) preset (OpenAI-compatible endpoint; temperature / top_p stripped: Claude 4.7+ reject
+them); its model list asked with anthropic-version and limit=1000; max_input_tokens / max_tokens read as context /
+output sizes; a refused model list shows the provider's reason on the Upstreams page.
 
 ### Later (agreed, not scheduled)
 
