@@ -1165,6 +1165,8 @@ member, results per search; members re-asked with the results, the judge sees ea
 never passed to the app; secret-looking queries refused; search count and errors on the council row). Pick judge:
 4,000 output tokens so thinking models can reason, verdict read from the final answer (inline <think> skipped),
 unclear verdicts marked.
+v0.30.1: council progress streamed to the app as reasoning (opencode's Thought: members asked, answered, searches,
+the judge's choice); an abandoned council now also cancels its members' requests (slots freed at once).
 
 ### Later (agreed, not scheduled)
 

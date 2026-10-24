@@ -147,14 +147,14 @@ async def test_leaving_mid_council_leaves_nothing_behind(make_stack):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await setup(c, stack, mode="combine", judge="small-model")
         slow = {"model": "team", "messages": ASK, "stream": True, "mock_delay": 0.3, "mock_chunks": 20}
-        for wait_for in (b": council", b"data:"):  # leave during the members, then during the judge's stream
+        for wait_for in (b": council", b"t0 "):  # leave during the members, then during the judge's stream
             async with c.stream("POST", "/v1/chat/completions", headers=stack.headers, json=slow) as s:
                 async for chunk in s.aiter_bytes():
                     if wait_for in chunk:
                         break
         for _ in range(100):
             live = (await c.get("/admin/api/stats")).json()
-            if not live["inflight"] and live["active"] == 0:
+            if not live["inflight"] and live["active"] == 0 and stack.mock["active"] == 0:  # provider done too
                 break
             await asyncio.sleep(0.1)
         assert live["inflight"] == [] and live["active"] == 0
@@ -317,3 +317,22 @@ async def test_pick_judge_may_think(make_stack):
         stack.mock["judge_answer"] = "hmm, both are fine"
         r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
         assert r.headers["x-queuerouter-council"] == "pick 1/2: mock-model (unclear verdict: took answer 1)"
+
+
+async def test_progress_shown_as_reasoning(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack)
+        payload = {"model": "team", "messages": ASK, "stream": True}
+        async with c.stream("POST", "/v1/chat/completions", headers=stack.headers, json=payload) as s:
+            text = "".join([chunk async for chunk in s.aiter_text()])
+    notes = [
+        json.loads(line[5:])["choices"][0]["delta"]["reasoning_content"]
+        for line in text.splitlines()
+        if line.startswith("data: {") and "reasoning_content" in line
+    ]
+    joined = "".join(notes)
+    assert "Council (pick): asking 2 member(s): mock-model, small-model" in joined
+    assert "✓ mock-model answered" in joined and "✓ small-model answered" in joined
+    assert "is choosing between 2 answers" in joined and "Judge chose answer 2: small-model" in joined
+    assert text.index("Judge chose answer 2") < text.index("answer from small-model")  # progress, then the answer

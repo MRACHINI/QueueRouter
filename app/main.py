@@ -1731,6 +1731,11 @@ def create_app(
         )
         inflight[rlog.fields["id"]] = rlog  # "council…" in the Now table while members and judge work
         search_count, search_errors = [0], []  # web searches run for the members (app/websearch.py)
+        notes: asyncio.Queue[str] = asyncio.Queue()  # progress, streamed to the app as reasoning (opencode: "Thought")
+
+        def progress(note: str) -> None:
+            if stream:
+                notes.put_nowait(note)
 
         async def work() -> tuple[bytes | None, Response | None]:
             base = {k: v for k, v in payload.items() if k not in ("stream", "stream_options")}
@@ -1742,6 +1747,7 @@ def create_app(
                 """One member's answer; with web search on, its searches run here and it is asked again
                 with the results, until it answers without searching (or reaches the limit)."""
                 role = f"council member {i}/{len(members)}"
+                began = time.monotonic()
                 messages, sources, used = list(base["messages"]), [], 0
                 tools = [*(base.get("tools") or []), websearch.TOOL] if searching else base.get("tools")
                 while True:
@@ -1753,10 +1759,13 @@ def create_app(
                     calls = (message or {}).get("tool_calls") or []
                     wanted = [c for c in calls if (c.get("function") or {}).get("name") == websearch.TOOL_NAME]
                     if not searching or not wanted:
+                        seconds = round(time.monotonic() - began)
+                        progress(f"✓ {model} answered ({seconds}s)" if message else f"✗ {model} didn't answer")
                         return body, sources
                     results = []
                     for call in wanted:
                         query = websearch.call_query(call)
+                        progress(f'{model} searches the web: "{query[:80]}"')
                         if used >= alias.council_search_max:
                             text = "Search limit reached: answer now with what you have."
                         else:
@@ -1768,10 +1777,12 @@ def create_app(
                                     alias.council_search_results,
                                 )  # fmt: skip
                                 text = websearch.results_text(query, found)
+                                progress(f"{model}: {len(found)} results")
                                 sources.append(text)
                             except websearch.SearchError as exc:
                                 text = f"Search failed: {exc}. Do not present unverified facts as found."
                                 search_errors.append(str(exc))
+                                progress(f"{model}: search failed ({exc})")
                         results.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": text})
                     if used >= alias.council_search_max and all(
                         r["content"].startswith("Search limit") for r in results
@@ -1782,6 +1793,11 @@ def create_app(
                     messages = [*messages, assistant, *results]
                     role = f"council member {i}/{len(members)} · after search"
 
+            names = ", ".join(members)
+            progress(
+                f"Council ({alias.council}): asking {len(members)} member(s): {names}"
+                + (" · web search on" if searching else "")
+            )
             replies = await asyncio.gather(*(member(i, m) for i, m in enumerate(members, 1)))
             answered = []
             for m, (b, sources) in zip(members, replies, strict=True):
@@ -1789,13 +1805,16 @@ def create_app(
                     answered.append((m, {**msg, "_sources": sources} if searching else msg, b))
             if not answered:
                 rlog.fields["council"] = f"no member answered: {alias.target_model} alone"
+                progress(f"No member answered: {alias.target_model} answers alone.")
                 return None, None
             if len(answered) == 1 and alias.council == "pick":  # nothing to choose between
                 rlog.fields["council"] = f"only {answered[0][0]} answered"
+                progress(f"Only {answered[0][0]} answered: using its answer.")
                 return answered[0][2], None
             judge = alias.council_judge or alias.target_model
             candidates = [(m, msg) for m, msg, _ in answered]
             if alias.council == "pick":
+                progress(f"The judge ({judge}) is choosing between {len(answered)} answers…")
                 verdict = await internal_completion(
                     client,
                     council_mod.judge_payload(payload, judge, "pick", candidates, alias.council_instructions),
@@ -1818,7 +1837,9 @@ def create_app(
                 if chosen is None and said:
                     rlog.fields["error"] = f"council judge's reply wasn't a clear number: {said[:200]}"
                 rlog.fields["council"] = f"pick {index + 1}/{len(answered)}: {answered[index][0]}{note}"
+                progress(f"Judge chose answer {index + 1}: {answered[index][0]}{note}")
                 return answered[index][2], None
+            progress(f"The judge ({judge}) is writing the answer from {len(answered)} answers…")
             judged = council_mod.judge_payload(payload, judge, "combine", candidates, alias.council_instructions)
             judge_headers = {
                 **request_headers,
@@ -1871,16 +1892,33 @@ def create_app(
         async def events() -> AsyncIterator[bytes]:
             task = asyncio.ensure_future(work())
             ok = False
+            started = time.monotonic()
+            getter = None
             try:
-                while not task.done():
-                    yield b": council: members are answering\n\n"
-                    await asyncio.wait({task}, timeout=max(1.0, cfg().keepalive_interval_s))
+                while not task.done() or not notes.empty():
+                    if notes.empty():
+                        yield b": council at work\n\n"  # keep-alive between notes
+                        getter = asyncio.ensure_future(notes.get())
+                        done, _ = await asyncio.wait(
+                            {task, getter},
+                            timeout=max(1.0, cfg().keepalive_interval_s),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if getter not in done:
+                            getter.cancel()
+                            continue
+                        note = getter.result()
+                    else:
+                        note = notes.get_nowait()
+                    yield council_mod.reasoning_chunk(note, alias.name, round(time.monotonic() - started))
                 content, response = task.result()
                 ok = content is not None or response is not None
             except Exception as exc:
                 log.warning(json.dumps({"event": "council_failed", "error": repr(exc)[:200]}))
                 content, response = None, None
             finally:
+                if getter is not None and not getter.done():
+                    getter.cancel()
                 if not task.done():  # the app went away while members answered: stop the council
                     task.cancel()
                 finish(ok)
@@ -2762,7 +2800,11 @@ def create_app(
         """Run ``work`` but cancel it (freeing its slot) if the client goes away."""
         task = asyncio.ensure_future(work)
         while True:
-            done, _ = await asyncio.wait({task}, timeout=1.0)
+            try:
+                done, _ = await asyncio.wait({task}, timeout=1.0)
+            except asyncio.CancelledError:  # whoever waits for it gave up (e.g. an abandoned council)
+                task.cancel()
+                raise
             if done:
                 return task.result()
             if await request.is_disconnected():
