@@ -134,6 +134,15 @@ def call_query(call: dict) -> str:
     return call_argument(call, "query")
 
 
+def call_arguments(call: dict) -> dict:
+    """All arguments of a tool call ({} if unreadable)."""
+    try:
+        arguments = json.loads((call.get("function") or {}).get("arguments") or "{}")
+    except ValueError:
+        return {}
+    return arguments if isinstance(arguments, dict) else {}
+
+
 def call_argument(call: dict, name: str) -> str:
     """One argument of a tool call ("" if unreadable)."""
     try:

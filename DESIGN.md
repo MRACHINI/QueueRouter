@@ -1178,6 +1178,10 @@ v0.33.0: orchestrator phase 3 — member roles per alias ("member = role: instru
 list and briefs, council members' instructions, role labels for the judge); a trace page per council / orchestrator
 request (timeline of its steps with times, and every call made for it with tokens and errors; excerpts of the
 conversation only for clients with content logging on); links from the Requests page.
+v0.34.0: orchestrator phase 4 — ask_member(propose=true) lets a member propose the app's tool calls (it gets the
+app's tool definitions); proposals are numbered P1, P2… and the orchestrator adopts chosen ones with
+queuerouter_adopt_proposals (sent to the app exactly as proposed, optional text); two proposals changing the same
+file are refused together (read-only tools never conflict).
 
 ### Later (agreed, not scheduled)
 
@@ -1243,7 +1247,7 @@ conversation only for clients with content logging on); links from the Requests 
   - *Costs:* you wait for the slowest member plus the judge, nothing streams meanwhile (keep-alive comments
     hold the connection); several times the tokens.
   - *Shown:* the Requests page lists each member's call and the judge's choice.
-- **Orchestrator (alias mode).** Agreed design (2026-10-24); phases 1-3 done (v0.31.0-v0.33.0), phase 4 to come.
+- **Orchestrator (alias mode).** Agreed design (2026-10-24); phases 1-4 done (v0.31.0-v0.34.0).
   - *What:* unlike the council (members answer the same request at once, a judge reads the results), an
     orchestrator model directs the work through tools QueueRouter runs for it: it plans, delegates focused
     tasks to members, searches and reads the web, reads the results, may ask again, then writes the final

@@ -1780,6 +1780,7 @@ def create_app(
             notebook = await asyncio.to_thread(load_notebook, key)
             own = [council_mod.ask_tool(roster), tools_mod.CALC_TOOL]
             own += [council_mod.NOTEBOOK_TOOL] if key else []
+            own += [council_mod.ADOPT_TOOL] if base.get("tools") else []
             own += [websearch.TOOL] if searching else []
             own += [websearch.FETCH_TOOL] if fetching else []
             own_names = {t["function"]["name"] for t in own}
@@ -1800,6 +1801,23 @@ def create_app(
             messages = council_mod.with_orchestration(base["messages"], prompt)
             deadline = time.monotonic() + alias.orch_seconds
             rounds, tasks, web_used = 0, [0], [0]
+            proposals: dict[str, dict] = {}  # P1, P2…: app tool calls members proposed
+            final: list[bytes] = []  # set when it adopts proposals: the answer
+
+            def describe_answer(who: str, message: dict, sources: list[str]) -> str:
+                """A member's answer for the orchestrator; its proposed app tool calls get numbers."""
+                calls = message.get("tool_calls") or []
+                shown = {k: v for k, v in message.items() if k != "tool_calls"}
+                text = council_mod.render({**shown, "_sources": sources} if sources else shown)
+                if calls:
+                    found = {}
+                    for call in calls:
+                        pid = f"P{len(proposals) + 1}"
+                        proposals[pid] = found[pid] = call
+                    progress(f"{who} proposes {len(found)} tool call(s): {', '.join(found)}")
+                    text = f"{text}\n\n{council_mod.proposals_text(found)}".strip()
+                return text
+
             started_from = "continues from its notebook" if notebook else "is planning"
             progress(f"Orchestrator ({orchestrator}) {started_from} · team: {', '.join(roster)}")
 
@@ -1809,6 +1827,8 @@ def create_app(
                     text = "Budget used up: write your final answer now with what you have."
                 elif name == council_mod.ASK_NAME:
                     who, task = websearch.call_argument(call, "member"), websearch.call_argument(call, "task")
+                    wants_proposals = websearch.call_argument(call, "propose").lower() in ("true", "1", "yes")
+                    propose = bool(base.get("tools")) and wants_proposals  # app tools exist to propose
                     if who not in roster:
                         text = f"No member called {who!r}. The team: {', '.join(roster)}."
                     elif tasks[0] >= alias.orch_tasks:
@@ -1826,13 +1846,27 @@ def create_app(
                             {"role": "user", "content": task},
                         ]
                         body, sources = await member(
-                            roster.index(who) + 1, who, brief, f"orchestrator member {who}", who, app_tools=False
+                            roster.index(who) + 1, who, brief, f"orchestrator member {who}", who, app_tools=propose
                         )
                         message = council_mod.message_of(body) if body else None
                         if message is None:
                             text = f"{who} didn't answer."
                         else:
-                            text = council_mod.render({**message, "_sources": sources} if sources else message)
+                            text = describe_answer(who, message, sources)
+                elif name == council_mod.ADOPT_NAME:
+                    arguments = websearch.call_arguments(call)
+                    wanted = [str(p).strip().upper() for p in arguments.get("proposals") or [] if str(p).strip()]
+                    unknown = [p for p in wanted if p not in proposals]
+                    chosen = {p: proposals[p] for p in wanted if p in proposals}
+                    if not chosen or unknown:
+                        known = ", ".join(proposals) or "none yet"
+                        text = f"Unknown proposals {unknown or wanted}: the proposals so far are {known}."
+                    elif problem := council_mod.conflicts(chosen):
+                        text = f"Not adopted: {problem}."
+                    else:
+                        progress(f"Adopting {', '.join(chosen)} for the app")
+                        final.append(council_mod.adopted_body(chosen, str(arguments.get("text") or ""), orchestrator))
+                        text = "Adopted: the calls go to the app."
                 elif name == council_mod.NOTEBOOK_NAME:
                     text_in = websearch.call_argument(call, "text")[: council_mod.NOTEBOOK_MAX]
                     await asyncio.to_thread(keep_notebook, key, client.name, text_in)
@@ -1883,6 +1917,11 @@ def create_app(
                 rounds += 1
                 closed = rounds > alias.orch_rounds or time.monotonic() > deadline
                 results = await asyncio.gather(*(run(call, closed) for call in mine))
+                if final:  # it adopted members' proposals: they are the answer
+                    rlog.fields["council"] = (
+                        f"orchestrate: {rounds} rounds, {tasks[0]} member tasks · adopted proposals"
+                    )
+                    return final[0], None
                 assistant = {"role": "assistant", "content": message.get("content") or "", "tool_calls": mine}
                 messages = [*messages, assistant, *results]
 

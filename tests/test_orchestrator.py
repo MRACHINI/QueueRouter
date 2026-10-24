@@ -244,3 +244,42 @@ async def test_council_members_answer_in_their_roles(make_stack):
         assert r.status_code == 200
         judged = stack.mock["judge_inputs"][-1]
         assert "### Answer 2 (skeptic)" in judged and "### Answer 1\n" in judged
+
+
+def test_conflicting_proposals():
+    from app.council import conflicts, read_only
+
+    assert read_only("read_file") and read_only("grep") and read_only("list") and not read_only("edit")
+    edit = {"function": {"name": "edit", "arguments": json.dumps({"filePath": "a.py", "new": "x"})}}
+    write = {"function": {"name": "write", "arguments": json.dumps({"path": "a.py"})}}
+    other = {"function": {"name": "edit", "arguments": json.dumps({"filePath": "b.py"})}}
+    read = {"function": {"name": "read_file", "arguments": json.dumps({"path": "a.py"})}}
+    assert conflicts({"P1": edit, "P2": write}) == "P1 and P2 both change a.py: adopt one of them"
+    assert conflicts({"P1": edit, "P2": other, "P3": read}) is None  # different files; reading never conflicts
+
+
+async def test_members_propose_and_the_orchestrator_adopts(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["orch_script"] = [
+        {"calls": [(ASK_NAME, {"member": "small-model", "task": "look at the config loader", "propose": True})]},
+        {"calls": [("queuerouter_adopt_proposals", {"proposals": ["P9"]})]},  # a mistake: told what exists
+        {"calls": [("queuerouter_adopt_proposals", {"proposals": ["p1"], "text": "Reading the config first."})]},
+    ]
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await orchestrate_setup(c, stack)
+        payload = {"model": "team", "messages": ASK, "tools": tools}
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=payload)
+    message = r.json()["choices"][0]["message"]
+    assert message["content"] == "Reading the config first."
+    assert [(t["function"]["name"], t["function"]["arguments"]) for t in message["tool_calls"]] == [
+        ("read_file", '{"q": "x"}')
+    ]  # exactly as the member proposed it
+    second = stack.mock["orch_requests"][1]
+    results = "\n".join(m["content"] for m in second["messages"] if m.get("role") == "tool")
+    assert "P1: read_file(" in results
+    third = stack.mock["orch_requests"][2]
+    assert "Unknown proposals ['P9']: the proposals so far are P1." in third["messages"][-1]["content"]
+    assert len(stack.mock["orch_requests"]) == 3  # adopting ended the step
+    first_tools = {t["function"]["name"] for t in stack.mock["orch_requests"][0]["tools"]}
+    assert {"queuerouter_adopt_proposals", "read_file"} <= first_tools

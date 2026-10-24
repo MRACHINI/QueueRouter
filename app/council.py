@@ -228,6 +228,13 @@ def ask_tool(roster: list[str]) -> dict:
                 "properties": {
                     "member": {"type": "string", "enum": roster, "description": "Who does it"},
                     "task": {"type": "string", "description": "The complete task"},
+                    "propose": {
+                        "type": "boolean",
+                        "description": (
+                            "Let the member propose calls to the app's tools (read, edit, run…). Proposals come back "
+                            "labelled P1, P2…; adopt the ones you want with queuerouter_adopt_proposals."
+                        ),
+                    },
                 },
                 "required": ["member", "task"],
             },
@@ -245,7 +252,11 @@ def orchestration_prompt(
     instructions: str,
     team: str = "",
 ) -> str:
-    tools = ["queuerouter_ask_member (delegate a task)", "queuerouter_calculate (exact maths)"]
+    tools = [
+        "queuerouter_ask_member (delegate a task; with propose=true the member may propose app tool calls)",
+        "queuerouter_adopt_proposals (send chosen proposals to the app)",
+        "queuerouter_calculate (exact maths)",
+    ]
     if searching:
         tools.append("queuerouter_web_search (search the web)")
     if fetching:
@@ -356,3 +367,82 @@ def role_note(role: str, instructions: str) -> str:
     return f"{JUDGE_MARK} You answer as part of a council of models. Your role: {role}." + (
         f" {instructions}" if instructions else ""
     )
+
+
+# -- proposals (phase 4): members propose the app's tool calls, the orchestrator adopts them ----------------
+ADOPT_NAME = "queuerouter_adopt_proposals"
+ADOPT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": ADOPT_NAME,
+        "description": (
+            "Finish this step by sending members' proposed tool calls (P1, P2…) to the app exactly as they "
+            "proposed them, optionally with a short text for the user. The app runs them and sends back the "
+            "results. Calls that change the same file can't be adopted together: choose one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "proposals": {"type": "array", "items": {"type": "string"}, "description": 'e.g. ["P1", "P3"]'},
+                "text": {"type": "string", "description": "Optional message to the user"},
+            },
+            "required": ["proposals"],
+        },
+    },
+}
+_READ_ONLY = ("read", "view", "list", "ls", "glob", "grep", "search", "find", "fetch", "get", "cat", "stat", "tree")
+_PATH_KEYS = ("path", "filePath", "file_path", "filename", "file", "target_file")
+
+
+def read_only(name: str) -> bool:
+    """A tool that only looks (by its name): never conflicts with another call."""
+    lowered = name.lower()
+    return any(lowered == word or lowered.startswith(f"{word}_") or lowered.endswith(f"_{word}") for word in _READ_ONLY)
+
+
+def conflicts(calls: dict[str, dict]) -> str | None:
+    """Why ``calls`` ({id: call}) can't go together (two changes to one file), or None."""
+    changed: dict[str, str] = {}
+    for pid, call in calls.items():
+        function = call.get("function") or {}
+        if read_only(str(function.get("name", ""))):
+            continue
+        try:
+            arguments = json.loads(function.get("arguments") or "{}")
+        except ValueError:
+            arguments = {}
+        for key in _PATH_KEYS:
+            path = arguments.get(key) if isinstance(arguments, dict) else None
+            if isinstance(path, str) and path:
+                if path in changed:
+                    return f"{changed[path]} and {pid} both change {path}: adopt one of them"
+                changed[path] = pid
+    return None
+
+
+def proposals_text(found: dict[str, dict]) -> str:
+    lines = ["Proposed tool calls (adopt with queuerouter_adopt_proposals):"]
+    for pid, call in found.items():
+        function = call.get("function") or {}
+        arguments = str(function.get("arguments") or "")
+        if len(arguments) > 1_500:
+            arguments = arguments[:1_500] + "…"
+        lines.append(f"{pid}: {function.get('name')}({arguments})")
+    return "\n".join(lines)
+
+
+def adopted_body(calls: dict[str, dict], text: str, model: str) -> bytes:
+    """The final answer: the adopted calls (fresh ids), as an ordinary chat completion."""
+    tool_calls = [
+        {"id": f"call_{pid.lower()}_{n}", "type": "function", "function": dict(call.get("function") or {})}
+        for n, (pid, call) in enumerate(calls.items())
+    ]
+    message = {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
+    data = {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
+    }
+    return json.dumps(data).encode()
