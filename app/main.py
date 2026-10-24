@@ -32,6 +32,7 @@ from . import compaction as compaction_mod
 from . import council as council_mod
 from . import cron as cron_mod
 from . import jobs as jobs_mod
+from . import tools as tools_mod
 from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
 from .alerts import Alerts
@@ -1737,61 +1738,189 @@ def create_app(
             if stream:
                 notes.put_nowait(note)
 
+        async def orchestrate(base, members, searching, fetching, member, web_tool) -> tuple[bytes | None, None]:
+            """Mode "orchestrate": the orchestrator (the judge model) plans, delegates tasks to members, uses the
+            web and a calculator through tools QueueRouter runs, and finally answers (text or the app's tools).
+            Budgets: rounds, member tasks, time; past them it is told to finish."""
+            orchestrator = alias.council_judge or alias.target_model
+            roster = list(members)
+            own = [council_mod.ask_tool(roster), tools_mod.CALC_TOOL]
+            own += [websearch.TOOL] if searching else []
+            own += [websearch.FETCH_TOOL] if fetching else []
+            own_names = {t["function"]["name"] for t in own}
+            today = tools_mod.today()
+            prompt = council_mod.orchestration_prompt(
+                roster, alias.orch_rounds, alias.orch_tasks, searching, fetching, today, alias.council_instructions
+            )
+            messages = council_mod.with_orchestration(base["messages"], prompt)
+            deadline = time.monotonic() + alias.orch_seconds
+            rounds, tasks, web_used = 0, [0], [0]
+            progress(f"Orchestrator ({orchestrator}) is planning · team: {', '.join(roster)}")
+
+            async def run(call: dict, closed: bool) -> dict:
+                name = (call.get("function") or {}).get("name")
+                if closed:
+                    text = "Budget used up: write your final answer now with what you have."
+                elif name == council_mod.ASK_NAME:
+                    who, task = websearch.call_argument(call, "member"), websearch.call_argument(call, "task")
+                    if who not in roster:
+                        text = f"No member called {who!r}. The team: {', '.join(roster)}."
+                    elif tasks[0] >= alias.orch_tasks:
+                        text = "No member tasks left in this step's budget: finish with what you have."
+                    else:
+                        tasks[0] += 1
+                        progress(f"→ {who}: {' '.join(task.split())[:160]}")
+                        brief = [
+                            {"role": "system", "content": council_mod.member_prompt(searching, fetching, today)},
+                            {"role": "user", "content": task},
+                        ]
+                        body, sources = await member(
+                            roster.index(who) + 1, who, brief, f"orchestrator member {who}", who, app_tools=False
+                        )
+                        message = council_mod.message_of(body) if body else None
+                        if message is None:
+                            text = f"{who} didn't answer."
+                        else:
+                            text = council_mod.render({**message, "_sources": sources} if sources else message)
+                elif name == tools_mod.CALC_NAME:
+                    text = tools_mod.calculate(websearch.call_argument(call, "expression"))
+                    progress(text)
+                elif name in (websearch.TOOL_NAME, websearch.FETCH_NAME):
+                    if web_used[0] >= alias.council_search_max * max(1, len(roster)):
+                        text = "No web searches or page reads left in this step's budget."
+                    else:
+                        web_used[0] += 1
+                        text = await web_tool(call, "Orchestrator")
+                else:
+                    text = f"Unknown tool {name!r}."
+                return {"role": "tool", "tool_call_id": call.get("id", ""), "content": text}
+
+            while True:
+                asked = {
+                    **base,
+                    "model": orchestrator,
+                    "messages": messages,
+                    "tools": [*(base.get("tools") or []), *own],
+                }
+                body = await internal_completion(
+                    client, asked, priority, "council", request_headers, "orchestrator", rlog.fields["id"]
+                )
+                message = council_mod.message_of(body) if body else None
+                if message is None:
+                    rlog.fields["council"] = f"orchestrator ({orchestrator}) didn't answer: {alias.target_model} alone"
+                    progress(f"The orchestrator didn't answer: {alias.target_model} answers alone.")
+                    return None, None
+                mine = [
+                    c for c in message.get("tool_calls") or [] if (c.get("function") or {}).get("name") in own_names
+                ]
+                summary = f"orchestrate: {rounds} rounds, {tasks[0]} member tasks"
+                if not mine:
+                    rlog.fields["council"] = summary
+                    progress("Orchestrator is answering.")
+                    return body, None
+                if rounds > alias.orch_rounds:  # told to finish, still delegating: keep what it says
+                    rlog.fields["council"] = f"{summary} (budget)"
+                    progress("Budget used up: taking the orchestrator's answer as it is.")
+                    return council_mod.without_calls(body, own_names), None
+                if note := " ".join(str(message.get("content") or "").split())[:300]:
+                    progress(f"Orchestrator: {note}")
+                rounds += 1
+                closed = rounds > alias.orch_rounds or time.monotonic() > deadline
+                results = await asyncio.gather(*(run(call, closed) for call in mine))
+                assistant = {"role": "assistant", "content": message.get("content") or "", "tool_calls": mine}
+                messages = [*messages, assistant, *results]
+
         async def work() -> tuple[bytes | None, Response | None]:
             base = {k: v for k, v in payload.items() if k not in ("stream", "stream_options")}
             members = alias.council_members[: council_mod.MAX_MEMBERS]
             s = cfg()
             searching = alias.council_search and s.search_provider not in ("", "off")
 
-            async def member(i: int, model: str) -> tuple[bytes | None, list[str]]:
-                """One member's answer; with web search on, its searches run here and it is asked again
-                with the results, until it answers without searching (or reaches the limit)."""
-                role = f"council member {i}/{len(members)}"
+            fetching = alias.council_fetch
+            own_web = {websearch.TOOL_NAME, websearch.FETCH_NAME}
+
+            async def web_tool(call: dict, who: str) -> str:
+                """Run a web_search / web_fetch call for ``who``; the text for the model (results or why not)."""
+                name = (call.get("function") or {}).get("name")
+                if name == websearch.FETCH_NAME:
+                    url = websearch.call_argument(call, "url")
+                    progress(f"{who} reads {url[:100]}")
+                    try:
+                        final, text = await websearch.fetch(app.state.client, url)
+                    except websearch.SearchError as exc:
+                        search_errors.append(str(exc))
+                        progress(f"{who}: couldn't read it ({exc})")
+                        return f"Couldn't read {url}: {exc}. Do not present its content as known."
+                    progress(f"{who}: read {len(text):,} characters")
+                    return f"Page {final}:\n{text}"
+                query = websearch.call_query(call)
+                progress(f'{who} searches the web: "{query[:80]}"')
+                search_count[0] += 1
+                try:
+                    found = await websearch.search(
+                        app.state.client, s.search_provider, s.search_key, s.search_url, query,
+                        alias.council_search_results,
+                    )  # fmt: skip
+                except websearch.SearchError as exc:
+                    search_errors.append(str(exc))
+                    progress(f"{who}: search failed ({exc})")
+                    return f"Search failed: {exc}. Do not present unverified facts as found."
+                progress(f"{who}: {len(found)} results")
+                return websearch.results_text(query, found)
+
+            async def member(
+                i: int,
+                model: str,
+                messages: list | None = None,
+                role: str | None = None,
+                label: str | None = None,
+                app_tools: bool = True,
+            ) -> tuple[bytes | None, list[str]]:
+                """One member's answer; with web tools on, its searches / page reads run here and it is asked
+                again with the results, until it answers without them (or reaches the limit)."""
+                role = role or f"council member {i}/{len(members)}"
+                label = label or model
                 began = time.monotonic()
-                messages, sources, used = list(base["messages"]), [], 0
-                tools = [*(base.get("tools") or []), websearch.TOOL] if searching else base.get("tools")
+                messages, sources, used = list(messages or base["messages"]), [], 0
+                web = [*([websearch.TOOL] if searching else []), *([websearch.FETCH_TOOL] if fetching else [])]
+                tools = [*((base.get("tools") or []) if app_tools else []), *web]
                 while True:
-                    asked = {**base, "model": model, "messages": messages, **({"tools": tools} if tools else {})}
+                    asked = {**base, "model": model, "messages": messages}
+                    asked.pop("tools", None)
+                    asked.pop("tool_choice", None)
+                    if tools:
+                        asked["tools"] = tools
                     body = await internal_completion(
                         client, asked, priority, "council", request_headers, role, rlog.fields["id"]
                     )
                     message = council_mod.message_of(body) if body else None
                     calls = (message or {}).get("tool_calls") or []
-                    wanted = [c for c in calls if (c.get("function") or {}).get("name") == websearch.TOOL_NAME]
-                    if not searching or not wanted:
+                    wanted = [c for c in calls if (c.get("function") or {}).get("name") in own_web] if web else []
+                    if not wanted:
                         seconds = round(time.monotonic() - began)
-                        progress(f"✓ {model} answered ({seconds}s)" if message else f"✗ {model} didn't answer")
+                        progress(f"✓ {label} answered ({seconds}s)" if message else f"✗ {label} didn't answer")
                         return body, sources
                     results = []
                     for call in wanted:
-                        query = websearch.call_query(call)
-                        progress(f'{model} searches the web: "{query[:80]}"')
                         if used >= alias.council_search_max:
-                            text = "Search limit reached: answer now with what you have."
+                            text = "Limit reached: answer now with what you have."
                         else:
                             used += 1
-                            search_count[0] += 1
-                            try:
-                                found = await websearch.search(
-                                    app.state.client, s.search_provider, s.search_key, s.search_url, query,
-                                    alias.council_search_results,
-                                )  # fmt: skip
-                                text = websearch.results_text(query, found)
-                                progress(f"{model}: {len(found)} results")
+                            text = await web_tool(call, label)
+                            if not text.startswith(("Search failed", "Couldn't read")):
                                 sources.append(text)
-                            except websearch.SearchError as exc:
-                                text = f"Search failed: {exc}. Do not present unverified facts as found."
-                                search_errors.append(str(exc))
-                                progress(f"{model}: search failed ({exc})")
                         results.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": text})
                     if used >= alias.council_search_max and all(
-                        r["content"].startswith("Search limit") for r in results
+                        r["content"].startswith("Limit reached") for r in results
                     ):
-                        # it keeps searching past the limit: take what it says, without the search calls
-                        return council_mod.without_calls(body, websearch.TOOL_NAME), sources
+                        # it keeps searching past the limit: take what it says, without those calls
+                        return council_mod.without_calls(body, own_web), sources
                     assistant = {"role": "assistant", "content": message.get("content") or "", "tool_calls": wanted}
                     messages = [*messages, assistant, *results]
-                    role = f"council member {i}/{len(members)} · after search"
+                    role = f"{role.split(' · ')[0]} · after search"
+
+            if alias.council == "orchestrate":
+                return await orchestrate(base, members, searching, fetching, member, web_tool)
 
             names = ", ".join(members)
             progress(

@@ -12,8 +12,13 @@ and a query that looks like it holds a secret (API keys, tokens, private keys) i
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
 import re
+import socket
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -126,8 +131,145 @@ def results_text(query: str, results: list[dict]) -> str:
 
 def call_query(call: dict) -> str:
     """The query of a queuerouter_web_search tool call ("" if unreadable)."""
+    return call_argument(call, "query")
+
+
+def call_argument(call: dict, name: str) -> str:
+    """One argument of a tool call ("" if unreadable)."""
     try:
         arguments = json.loads((call.get("function") or {}).get("arguments") or "{}")
     except ValueError:
         return ""
-    return str(arguments.get("query") or "") if isinstance(arguments, dict) else ""
+    return str(arguments.get(name) or "") if isinstance(arguments, dict) else ""
+
+
+# -- web_fetch: read a page (built in, no key) -----------------------------------------------------
+
+FETCH_NAME = "queuerouter_web_fetch"
+FETCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": FETCH_NAME,
+        "description": (
+            "Read a web page (documentation, an article, a changelog) and get its text. Use links from search "
+            "results or that the user gave. Never put secrets or private data in the address."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "http(s) address of the page"}},
+            "required": ["url"],
+        },
+    },
+}
+FETCH_MAX_BYTES = 2 * 1024 * 1024
+FETCH_MAX_CHARS = 20_000
+_TEXT_TYPES = (
+    "text/",
+    "application/json",
+    "application/xml",
+    "application/xhtml",
+    "application/rss",
+    "application/atom",
+)
+_SKIP_TAGS = {"script", "style", "noscript", "svg", "nav", "footer", "header", "form"}
+_BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "section", "article", "table"}
+
+
+class _Text(HTMLParser):
+    """Readable text of an HTML page: no scripts, styles or navigation chrome; line breaks at blocks."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.skip = 0
+        self.title = ""
+        self.in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in _SKIP_TAGS:
+            self.skip += 1
+        elif tag == "title":
+            self.in_title = True
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in _SKIP_TAGS and self.skip:
+            self.skip -= 1
+        elif tag == "title":
+            self.in_title = False
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.title += data
+        elif not self.skip:
+            self.parts.append(data)
+
+    def text(self) -> str:
+        lines = (" ".join(line.split()) for line in "".join(self.parts).splitlines())
+        return "\n".join(line for line in lines if line)
+
+
+def readable(text: str) -> str:
+    """An HTML page as readable text (title first); other text as it is."""
+    parser = _Text()
+    parser.feed(text)
+    title = parser.title.strip()
+    return (f"{title}\n\n" if title else "") + parser.text()
+
+
+async def public_host(host: str) -> None:
+    """SearchError unless every address ``host`` resolves to is public: no localhost, LAN, Docker networks,
+    link-local (cloud metadata), multicast or reserved ranges."""
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        raise SearchError(f"can't resolve {host}") from None
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if not address.is_global or address.is_multicast:
+            raise SearchError("refused: that address is not on the public internet")
+
+
+async def fetch(client: httpx.AsyncClient, url: str) -> tuple[str, str]:
+    """(final address, readable text) of a page; SearchError on refusal or failure. Redirects are followed
+    here, so every hop's address is checked too."""
+    url = str(url or "").strip()
+    if _SECRET.search(url):
+        raise SearchError("refused: the address looks like it contains a secret")
+    for _ in range(5):
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise SearchError("only http(s) addresses can be read")
+        await public_host(parts.hostname)  # looked up here, so tests can stand in for it
+        headers = {
+            "User-Agent": "QueueRouter-fetch/1.0",
+            "Accept": "text/html,text/plain,application/json;q=0.9,*/*;q=0.5",
+        }
+        try:
+            async with client.stream("GET", url, headers=headers, timeout=20, follow_redirects=False) as response:
+                if response.status_code in (301, 302, 303, 307, 308) and response.headers.get("location"):
+                    url = urljoin(url, response.headers["location"])
+                    continue
+                if response.status_code >= 400:
+                    raise SearchError(f"the page answered HTTP {response.status_code}")
+                kind = response.headers.get("content-type", "").lower()
+                if kind and not kind.startswith(_TEXT_TYPES):
+                    raise SearchError(f"not a text page ({kind.split(';')[0]})")
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    data += chunk
+                    if len(data) > FETCH_MAX_BYTES:
+                        break
+                encoding = response.encoding or "utf-8"
+        except httpx.HTTPError as exc:
+            raise SearchError(f"couldn't read the page ({type(exc).__name__})") from None
+        text = bytes(data).decode(encoding, "replace")
+        if "html" in kind or text.lstrip()[:15].lower().startswith(("<!doctype", "<html")):
+            text = readable(text)
+        if len(text) > FETCH_MAX_CHARS:
+            text = text[:FETCH_MAX_CHARS] + "\n[... the rest of the page was cut ...]"
+        return url, text
+    raise SearchError("too many redirects")

@@ -44,6 +44,17 @@ def create_mock(limit: int = 2) -> FastAPI:
         extra = [{"id": m, "object": "model"} for m in state.get("extra_models", [])]  # no size reported
         return {"object": "list", "data": [{"id": "mock-model", "object": "model", "max_model_len": 262144}, *extra]}
 
+    @app.get("/page")
+    async def page():
+        """A web page for QueueRouter's web_fetch."""
+        from fastapi.responses import HTMLResponse
+
+        html = (
+            "<html><head><title>Install docs</title><script>var x=1;</script></head><body>"
+            "<nav>Home | Blog</nav><h1>Install</h1><p>Use Python 3.14 or newer.</p></body></html>"
+        )
+        return HTMLResponse(html)
+
     @app.get("/search")
     async def searxng(request: Request):
         """A SearXNG-style search (format=json), for QueueRouter's web search."""
@@ -95,6 +106,39 @@ def create_mock(limit: int = 2) -> FastAPI:
             state.setdefault("summary_inputs", []).append(body["messages"][1]["content"])
             body["mock_content"] = f"summary {len(state['summary_inputs'])}"
             body["mock_delay"] = state.get("summary_delay", 0.05)  # per chunk of 5: a slow summariser
+        # Orchestrator (scripted by the test: state["orch_script"], one step per request) and its members.
+        first_content = str((body.get("messages") or [{}])[0].get("content", ""))
+        if "You lead a team" in first_content:
+            turn = state.setdefault("orch_turn", 0)
+            state["orch_turn"] = turn + 1
+            state.setdefault("orch_requests", []).append(body)
+            script = state.get("orch_script") or [{"answer": "final from orchestrator"}]
+            step = script[min(turn, len(script) - 1)]
+            if "answer" in step:
+                message = {"role": "assistant", "content": step["answer"]}
+                choice = {"index": 0, "message": message, "finish_reason": "stop"}
+                usage = {"prompt_tokens": 10, "completion_tokens": 3}
+                return {
+                    "id": "x",
+                    "object": "chat.completion",
+                    "model": body.get("model"),
+                    "choices": [choice],
+                    "usage": usage,
+                }
+            else:
+                calls = []
+                for n, (name, arguments) in enumerate(step["calls"]):
+                    function = {"name": name, "arguments": json.dumps(arguments)}
+                    calls.append({"id": f"o{turn}_{n}", "type": "function", "function": function})
+                message = {"role": "assistant", "content": step.get("note"), "tool_calls": calls}
+                choice = {"index": 0, "message": message, "finish_reason": "tool_calls"}
+                return {"id": "x", "object": "chat.completion", "model": body.get("model"), "choices": [choice]}
+        elif first_content.startswith("You are a member of a team") and all(
+            str((t.get("function") or {}).get("name", "")).startswith("queuerouter_") for t in body.get("tools") or []
+        ):
+            task = str(body["messages"][1].get("content", ""))
+            state.setdefault("member_tasks", []).append((body.get("model"), task))
+            body["mock_content"] = f"answer from {body.get('model')}: {task[:60]}"
         # Council members that search (QueueRouter's own web search tool): ask first, answer with the results.
         offered = {(t.get("function") or {}).get("name") for t in body.get("tools") or []}
         if "queuerouter_web_search" in offered and body.get("model") in state.get("searching_models", []):
@@ -144,7 +188,7 @@ def create_mock(limit: int = 2) -> FastAPI:
             return JSONResponse({"error": {"message": "Request blocked by content policy"}}, status_code=400)
         refuse = model in body.get("mock_refuse_models", [])
         messages = body.get("messages") or [{}]
-        real_tools = offered - {"queuerouter_web_search"}  # (QueueRouter's own search tool isn't "an agent's tool")
+        real_tools = {n for n in offered if not str(n).startswith("queuerouter_")}  # not QueueRouter's own tools
         if real_tools and body.get("tool_choice") != "none" and messages[-1].get("role") == "user":
             return _tool_call(body)  # agents: call the first tool
         if messages[-1].get("role") == "tool":

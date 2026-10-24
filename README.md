@@ -77,6 +77,10 @@ from a **web admin UI**.
   your own SearXNG), council members can search before the judge decides. QueueRouter runs the searches,
   gives each member its results and asks it again (up to a per-alias limit), and the judge sees every member's
   sources. opencode never sees this tool. Queries that look like they contain secrets are refused.
+- **Orchestrator** (council mode "orchestrate"): the judge model leads the team. It plans, gives members
+  focused tasks (briefs: they see only the task it writes), searches and reads the web, uses a calculator,
+  may ask again, then answers (text or the app's own tools). Progress streams live into the app's thinking
+  (opencode's "Thought"); budgets per step (rounds, member tasks, seconds) keep it from looping.
 - **Choose which models each upstream offers** (Upstreams > "N models"): untick models to hide them from
   opencode, `/v1/models`, the Models page and the Playground; aliases can still use them. A switch decides
   whether models the provider adds later appear automatically.
