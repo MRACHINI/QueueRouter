@@ -376,6 +376,7 @@ async def stream(
         yield chunk
     for item in calls.values():
         item["status"] = "completed"
+        item["arguments"] = item["arguments"] or "{}"  # a call without parameters: clients json.loads this
         index = output.index(item)
         yield event(
             "response.function_call_arguments.done",

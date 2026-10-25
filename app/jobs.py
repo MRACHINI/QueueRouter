@@ -34,6 +34,7 @@ log = logging.getLogger("queuerouter")
 MAX_ATTEMPTS = 3  # restarts while running
 RETRY_STATUSES = (429, 502, 503, 504)  # passing refusals: the job waits and runs again
 RETRY_ATTEMPTS = 8
+SWEEP_S = 30  # how often callbacks and batch completions left behind are picked up
 
 
 def retry_after(status: int, attempts: int) -> float | None:
@@ -361,22 +362,53 @@ class JobRunner:
         self._usage_of = usage_of
         self.running: dict[str, asyncio.Task] = {}
         self._callbacks: set[asyncio.Task] = set()
+        self._calling: set[str] = set()  # jobs whose callback is being sent
+        self._swept_at = 0.0
 
     def start(self) -> int:
-        """At startup: jobs a previous run was in the middle of go back in the queue, and callbacks a shutdown
-        interrupted are sent again."""
-        for job_id in self.store.pending_callbacks():
-            task = asyncio.get_running_loop().create_task(self._callback(job_id))
-            self._callbacks.add(task)
-            task.add_done_callback(self._callbacks.discard)
-        return self.store.requeue_running_jobs(MAX_ATTEMPTS + RETRY_ATTEMPTS)  # retries count as attempts too
+        """At startup: jobs a previous run was in the middle of go back in the queue (or fail), then callbacks
+        not sent yet go out and batches whose last job finished get their files."""
+        requeued = self.store.requeue_running_jobs(MAX_ATTEMPTS + RETRY_ATTEMPTS)  # retries count as attempts too
+        self._sweep()
+        return requeued
+
+    def _sweep(self, pending: list[str] | None = None) -> None:
+        """Jobs that ended outside a run (expired, cancelled, failed by restarts) still get their callback, and
+        a batch whose completion was interrupted is completed."""
+        self._swept_at = time.monotonic()
+        for job_id in self.store.pending_callbacks() if pending is None else pending:
+            if job_id not in self.running:
+                self._send_callback(job_id)
+        if pending is None:
+            for batch_id in self.store.open_batch_ids():
+                finish_batch_if_done(self.store, batch_id)
+
+    def _send_callback(self, job_id: str) -> None:
+        if job_id in self._calling:
+            return
+        self._calling.add(job_id)
+        task = asyncio.get_running_loop().create_task(self._callback(job_id))
+        self._callbacks.add(task)
+        task.add_done_callback(self._callbacks.discard)
+        task.add_done_callback(lambda _: self._calling.discard(job_id))
 
     async def tick(self, max_in_flight: int, live_waiting: int) -> None:
         now = time.time()
         for schedule in await asyncio.to_thread(self.store.due_schedules, now):
-            await asyncio.to_thread(fire_schedule, self.store, schedule, now)
+            try:
+                await asyncio.to_thread(fire_schedule, self.store, schedule, now)
+            except Exception as exc:  # e.g. it can't be decrypted: switch it off, or it blocks every tick
+                log.error(
+                    json.dumps({"event": "schedule_failed", "schedule": schedule["id"], "error": repr(exc)[:200]})
+                )
+                await asyncio.to_thread(self.store.set_schedule, schedule["id"], enabled=False)
         for batch_id in await asyncio.to_thread(self.store.expire_jobs, now):
             await asyncio.to_thread(finish_batch_if_done, self.store, batch_id)
+        if time.monotonic() - self._swept_at >= SWEEP_S:
+            pending = await asyncio.to_thread(self.store.pending_callbacks)
+            for batch_id in await asyncio.to_thread(self.store.open_batch_ids):
+                await asyncio.to_thread(finish_batch_if_done, self.store, batch_id)
+            self._sweep(pending)  # spawns tasks: on the loop, not in a thread
         free = max_in_flight - len(self.running)
         if free <= 0:
             return
@@ -403,8 +435,11 @@ class JobRunner:
             except ValueError:
                 result = {"raw": body.decode("utf-8", "replace")[:100_000]}
             fields: dict = {"status_code": status, "result": result, "model": request.get("model")}
-            message = (result or {}).get("error", {}).get("message") if isinstance(result, dict) else None
-            delay = retry_after(status, row["attempts"] or 1)
+            error = result.get("error") if isinstance(result, dict) else None  # an object, or plain text
+            message = error.get("message") if isinstance(error, dict) else error if isinstance(error, str) else None
+            delay = retry_after(
+                status, (row["attempts"] or 0) + 1
+            )  # the row was read before claim_job counted this run
             if delay is not None and (not row["deadline"] or time.time() + delay < row["deadline"]):
                 # a passing refusal (queue full, rate or quota limit, no upstream right now): try again later
                 note = f"HTTP {status}: {message or 'temporarily refused'}; retrying in {delay:.0f} s"[:1000]
@@ -435,9 +470,7 @@ class JobRunner:
         if row["batch_id"]:
             await asyncio.to_thread(finish_batch_if_done, self.store, row["batch_id"])
         if row["callback_url"]:  # in its own task: retries must not hold a job slot
-            task = asyncio.get_running_loop().create_task(self._callback(job_id))
-            self._callbacks.add(task)
-            task.add_done_callback(self._callbacks.discard)
+            self._send_callback(job_id)
 
     async def _callback(self, job_id: str) -> None:
         row = await asyncio.to_thread(self.store.get_job, job_id)

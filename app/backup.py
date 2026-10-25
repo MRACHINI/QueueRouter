@@ -135,6 +135,12 @@ def _check_database(path: str, fernet: Fernet) -> dict:
             ("settings", "SELECT value FROM settings WHERE value LIKE '%gAAAAA%' LIMIT 1"),
             ("webhooks", "SELECT url FROM webhooks WHERE url LIKE 'gAAAAA%' LIMIT 1"),
             ("two-factor secrets", "SELECT totp_secret FROM admin_users WHERE totp_secret LIKE 'gAAAAA%' LIMIT 1"),
+            ("jobs", "SELECT request FROM jobs WHERE request LIKE 'gAAAAA%' LIMIT 1"),
+            ("schedules", "SELECT request FROM schedules WHERE request LIKE 'gAAAAA%' LIMIT 1"),
+            ("files", "SELECT data FROM files WHERE data LIKE 'gAAAAA%' LIMIT 1"),
+            ("stored responses", "SELECT data FROM stored_responses WHERE data LIKE 'gAAAAA%' LIMIT 1"),
+            ("logged content", "SELECT request FROM request_content WHERE request LIKE 'gAAAAA%' LIMIT 1"),
+            ("summaries", "SELECT data FROM compaction_summaries WHERE data LIKE 'gAAAAA%' LIMIT 1"),
         )
         for what, query in samples:
             try:
@@ -168,23 +174,10 @@ def stage_restore(data_dir: str, upload_path: str, current: Fernet, env_key: boo
     with tempfile.TemporaryDirectory(dir=data_dir, prefix=".restore-") as tmp:
         db_path, key_bytes = os.path.join(tmp, DB_NAME), None
         if zipfile.is_zipfile(upload_path):
-            with zipfile.ZipFile(upload_path) as zf:
-                names = set(zf.namelist())
-                if DB_NAME not in names:
-                    raise RestoreError("The zip has no queuerouter.db; is it a QueueRouter backup?")
-                if zf.getinfo(DB_NAME).file_size > MAX_RESTORE_DB_BYTES:
-                    raise RestoreError("The database in the backup is too large.")
-                with zf.open(DB_NAME) as src, open(db_path, "wb") as dst:
-                    copied = 0
-                    while chunk := src.read(1024 * 1024):  # count as we go: sizes in a zip can lie
-                        copied += len(chunk)
-                        if copied > MAX_RESTORE_DB_BYTES:
-                            raise RestoreError("The database in the backup is too large.")
-                        dst.write(chunk)
-                if KEY_NAME in names:
-                    if zf.getinfo(KEY_NAME).file_size > 1024:
-                        raise RestoreError("The encryption key in the backup is invalid.")
-                    key_bytes = zf.read(KEY_NAME).strip()
+            try:
+                key_bytes = _unpack(upload_path, db_path)
+            except zipfile.BadZipFile as exc:  # is_zipfile only looks at the end of the file
+                raise RestoreError("The zip is damaged.") from exc
         else:
             shutil.copyfile(upload_path, db_path)
         fernet = current
@@ -240,3 +233,26 @@ def apply_staged_restore(data_dir: str) -> bool:
     shutil.rmtree(staged, ignore_errors=True)
     log.warning(json.dumps({"event": "restored_backup", "previous": f"backups/pre-restore-{stamp}.db"}))
     return True
+
+
+def _unpack(upload_path: str, db_path: str) -> bytes | None:
+    """The database of a backup zip written to ``db_path``; the encryption key in it, if any."""
+    key_bytes = None
+    with zipfile.ZipFile(upload_path) as zf:
+        names = set(zf.namelist())
+        if DB_NAME not in names:
+            raise RestoreError("The zip has no queuerouter.db; is it a QueueRouter backup?")
+        if zf.getinfo(DB_NAME).file_size > MAX_RESTORE_DB_BYTES:
+            raise RestoreError("The database in the backup is too large.")
+        with zf.open(DB_NAME) as src, open(db_path, "wb") as dst:
+            copied = 0
+            while chunk := src.read(1024 * 1024):  # count as we go: sizes in a zip can lie
+                copied += len(chunk)
+                if copied > MAX_RESTORE_DB_BYTES:
+                    raise RestoreError("The database in the backup is too large.")
+                dst.write(chunk)
+        if KEY_NAME in names:
+            if zf.getinfo(KEY_NAME).file_size > 1024:
+                raise RestoreError("The encryption key in the backup is invalid.")
+            key_bytes = zf.read(KEY_NAME).strip()
+    return key_bytes

@@ -69,7 +69,7 @@ def apply_rules(payload: dict, alias_rules: dict, client_rules: dict) -> list[st
             if isinstance(value, int | float) and not isinstance(value, bool):
                 clamped = min(max(value, bounds.get("min", value)), bounds.get("max", value))
                 if clamped != value:
-                    payload[name] = type(value)(clamped) if isinstance(value, int) else clamped
+                    payload[name] = int(clamped) if isinstance(value, int) and float(clamped).is_integer() else clamped
                     changes.append(f"clamp {name}")
     for rules in (alias_rules, client_rules):
         for name in rules.get("strip", []):

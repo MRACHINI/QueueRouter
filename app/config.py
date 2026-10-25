@@ -92,6 +92,7 @@ class ClientKey:
     key_hash: str
     priority: str = "normal"
     policy: ClientPolicy = ClientPolicy()
+    expires_at: float | None = None  # checked on every request, not only when the configuration reloads
 
 
 class ParsedKey(NamedTuple):
@@ -168,10 +169,10 @@ class Bootstrap:
     def from_env(cls, env: dict[str, str] | None = None) -> Bootstrap:
         env = dict(os.environ if env is None else env)
         return cls(
-            data_dir=env.get("DATA_DIR", cls.data_dir),
+            data_dir=_env(env, "DATA_DIR") or cls.data_dir,
             secret_key=env.get("SECRET_KEY") or None,
             trusted_proxies=_networks(env, "TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES),
-            log_level=env.get("LOG_LEVEL", cls.log_level).upper(),
+            log_level=(_env(env, "LOG_LEVEL") or cls.log_level).upper(),
             admin_username=env.get("ADMIN_USERNAME") or None,
             admin_password=env.get("ADMIN_PASSWORD") or None,
             admin_allowed_ips=_networks(env, "ADMIN_ALLOWED_IPS", ""),
@@ -299,7 +300,7 @@ class Settings:
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
         env = dict(os.environ if env is None else env)
         return cls(
-            upstream_url=env.get("UPSTREAM_URL", cls.upstream_url).rstrip("/"),
+            upstream_url=(_env(env, "UPSTREAM_URL") or cls.upstream_url).rstrip("/"),
             upstream_api_key=env.get("ARLIAI_API_KEY", ""),
             max_concurrency=_int(env, "MAX_CONCURRENCY", cls.max_concurrency),
             min_spacing_ms=_int(env, "MIN_SPACING_MS", cls.min_spacing_ms),

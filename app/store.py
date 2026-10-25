@@ -1626,6 +1626,9 @@ class Store:
             )
         return cur.rowcount == 1
 
+    def open_batch_ids(self) -> list[str]:
+        return [r["id"] for r in self.query("SELECT id FROM batches WHERE status IN ('in_progress', 'cancelling')")]
+
     def pending_callbacks(self, within_s: float = 86_400) -> list[str]:
         """Finished jobs (last day) whose callback never completed: a shutdown interrupted it."""
         done = ",".join(f"'{s}'" for s in JOB_DONE)

@@ -111,8 +111,8 @@ def _convert_message(message: dict) -> list[dict]:
             )
         elif kind == "tool_result":
             text = _text_of(block.get("content")) if not isinstance(block.get("content"), str) else block["content"]
-            parts = block.get("content") if isinstance(block.get("content"), list) else []
-            if any(isinstance(p, dict) and p.get("type") == "image" for p in parts):
+            result_parts = block.get("content") if isinstance(block.get("content"), list) else []
+            if any(isinstance(p, dict) and p.get("type") == "image" for p in result_parts):
                 # chat tool results carry text only: say so, rather than losing the image silently
                 text += "\n[An image in this tool result was left out: this model API can't receive it.]"
             if block.get("is_error"):
@@ -241,7 +241,7 @@ def from_chat(body: dict, model: str) -> dict:
         "content": content,
         # some servers say "stop" even when the reply calls tools: Anthropic clients run tools only on "tool_use"
         "stop_reason": "tool_use"
-        if any(block["type"] == "tool_use" for block in content)
+        if any(block["type"] == "tool_use" for block in content) and choice.get("finish_reason") != "length"
         else STOP_REASONS.get(choice.get("finish_reason") or "stop", "end_turn"),
         "stop_sequence": None,
         "usage": _usage(body.get("usage")),
@@ -367,7 +367,10 @@ async def stream(body: AsyncIterator[bytes], model: str) -> AsyncIterator[bytes]
         {
             "type": "message_delta",
             "delta": {
-                "stop_reason": "tool_use" if tool_blocks else STOP_REASONS.get(finish or "stop", "end_turn"),
+                # cut off by the length limit: the tool input is incomplete, so say so rather than run it
+                "stop_reason": "tool_use"
+                if tool_blocks and finish != "length"
+                else STOP_REASONS.get(finish or "stop", "end_turn"),
                 "stop_sequence": None,
             },
             "usage": _usage(usage),

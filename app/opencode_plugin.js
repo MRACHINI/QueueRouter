@@ -102,8 +102,13 @@ async function setupCatalog(ctx) {
   const timer = startTimer(async () => {
     const next = await fetchModels(current?.tag);
     if (!next || !next.provider || next.tag === current?.tag) return;
+    const previous = current;
     current = next;
-    await ctx.catalog.reload(); // the desktop app re-reads its model list on this
+    try {
+      await ctx.catalog.reload(); // the desktop app re-reads its model list on this
+    } catch {
+      current = previous; // not applied: the next tick tries again
+    }
   });
   return () => clearInterval(timer);
 }
@@ -158,8 +163,13 @@ async function setupProviders(ctx) {
   const timer = startTimer(async () => {
     const next = await fetchModels(current?.tag);
     if (!next || !next.provider || next.tag === current?.tag) return;
+    const previous = current;
     current = next;
-    await ctx.provider.reload(); // the desktop app re-reads providers and models on this
+    try {
+      await ctx.provider.reload(); // the desktop app re-reads providers and models on this
+    } catch {
+      current = previous; // not applied: the next tick tries again
+    }
   });
   return () => clearInterval(timer); // opencode calls this when the plugin is unloaded
 }

@@ -151,7 +151,7 @@ def describe_429(content: bytes) -> tuple[str, bool, float | None]:
     try:
         data = json.loads(content or b"{}")
     except ValueError:
-        text = content.decode("utf-8", "replace").strip()[:300]
+        text = " ".join(content.decode("utf-8", "replace").split())[:300]  # one line: it goes into SSE comments
         return text or "rate limited", any(h in text.lower() for h in _HARD_QUOTA_HINTS), None
     if isinstance(data, list) and data:  # Google wraps errors in a list
         data = data[0]

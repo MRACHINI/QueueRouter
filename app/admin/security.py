@@ -119,4 +119,4 @@ class Sessions:
 
 
 def csrf_ok(session: AdminSession, submitted: str | None) -> bool:
-    return bool(submitted) and hmac.compare_digest(session.csrf, submitted)
+    return bool(submitted) and hmac.compare_digest(session.csrf.encode(), str(submitted).encode())  # bytes: any text

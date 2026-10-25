@@ -55,7 +55,10 @@ def find_client(key: str | None, clients: dict[str, ClientKey], allow_no_auth: b
         return ANONYMOUS
     if not key:
         return None
-    return clients.get(hash_key(key))
+    client = clients.get(hash_key(key))
+    if client is not None and client.expires_at is not None and client.expires_at <= time.time():
+        return None  # expired since the configuration was loaded
+    return client
 
 
 class AuthGuard:

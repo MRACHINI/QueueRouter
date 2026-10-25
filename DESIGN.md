@@ -1208,6 +1208,21 @@ OpenAI organization/project headers not forwarded; plugin refresh kept within 5 
 v0.35.2: GET /v1/models/{id} answered by QueueRouter (aliases and model@upstream included); other unknown /v1/ GETs
 are refused unless their path is listed in Settings → "GET paths passed to the provider" (default none): they used to
 go to the first usable upstream with its key, so any client could read the provider account (credits, key details).
+v0.35.3: fixes from a second six-part review. Request path: the background loop survives database and probe errors;
+a non-streaming council stops when the app goes away; network errors before a stream's body get an SSE error; 429
+text and fallback notes kept on one line; double-encoded dot segments refused. Council/compaction: the client's model
+list and queue limits no longer refuse the council's and summariser's own requests; requests don't wait for a background
+summary while they fit under 90%; the orchestrator's rounds are fitted to its context; the judge prompt joins the last
+user message; tool arguments sent as objects accepted; trim plans per conversation start; the summary note kept when no
+user message precedes the cut. Adapters/jobs: Anthropic tool results no longer duplicated or leak images (a v0.35.1
+regression); "max_tokens" when a tool call was cut off; Responses calls without arguments get "{}"; job callbacks for
+expired/cancelled jobs and unfinished batches picked up every 30 s; plain-text upstream errors don't crash a job;
+retry count fixed. Storage/security: key expiry checked on every request; conversation text kept out of the error column;
+restore checks client data too and reports a damaged zip; non-ASCII CSRF/setup tokens refused cleanly; a failing
+schedule is switched off; "anonymous" reserved. Admin: inf hours/thresholds refused; usernames over 100 characters
+refused; viewers can't mark notifications read; content links only where they open; emptied numbers go back to their
+default; CSV cells can't start a formula; more than 20 allowed apps refused. Config: float clamps keep fractions; Groq
+context sizes and limits read; blank DATA_DIR/LOG_LEVEL/UPSTREAM_URL use defaults; the plugin retries a failed reload.
 
 ### Later (agreed, not scheduled)
 

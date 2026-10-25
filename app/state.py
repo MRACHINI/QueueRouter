@@ -61,7 +61,7 @@ def load_snapshot(store: Store) -> Snapshot:
         if u.pool_id in pools
     }
     clients = {
-        c.key_hash: ClientKey(c.name, c.key_hash, c.priority, c.policy)
+        c.key_hash: ClientKey(c.name, c.key_hash, c.priority, c.policy, c.expires_at)
         for c in store.list_clients()
         if c.enabled and not c.expired
     }

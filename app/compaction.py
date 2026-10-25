@@ -142,7 +142,9 @@ def _apply(payload: dict, plan: Plan, note_first_user: bool = True) -> dict:
             note = f"\n\n[QueueRouter: {dropped} earlier messages were removed here to fit the model's context.]"
         if kept_latest is not None:  # the user's latest message was inside the cut: keep it, after the summary
             note += f"\n\n[The user's latest message]\n{_text(messages[kept_latest].get('content'))}"
-        if target is not None:
+        if target is None:  # no user message before the cut (e.g. it starts with the assistant): its own message
+            out.insert(max(index + 1, 0), {"role": "user", "content": note.strip()})
+        else:
             content = target.get("content")
             if isinstance(content, str):
                 out[index] = {**target, "content": content + note}

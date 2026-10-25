@@ -113,6 +113,7 @@ MESSAGES = {
     "and can set it up again.",
 }
 
+MAX_USERNAME = 100
 SETTING_CHOICES: dict[str, tuple[str, ...]] = {"lb_strategy": STRATEGIES, "search_provider": SEARCH_PROVIDERS}
 
 SETTING_HELP: dict[str, tuple[str, str, str]] = {
@@ -394,12 +395,12 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         if login_guard.is_blocked(ip):
             return page(request, "setup.html", None, error="Too many attempts. Try again later.")
         form = dict(await request.form())
-        if not secrets.compare_digest(str(form.get("token", "")), setup["token"]):
+        if not secrets.compare_digest(str(form.get("token", "")).encode(), setup["token"].encode()):
             login_guard.fail(ip)
             return page(request, "setup.html", None, error="Wrong setup token (see the container log).")
         username = str(form.get("username", "")).strip()
-        if not username:
-            return page(request, "setup.html", None, error="Choose a username.")
+        if not username or len(username) > MAX_USERNAME:  # sign-in reads at most MAX_USERNAME characters
+            return page(request, "setup.html", None, error=f"Choose a username (up to {MAX_USERNAME} characters).")
         if problem := password_problem(str(form.get("password", "")), str(form.get("confirm", ""))):
             return page(request, "setup.html", None, error=problem, username=username)
         user_id = store.create_admin(username, hash_password(str(form["password"])), "owner", username)
@@ -421,7 +422,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     @app.post("/admin/login")
     async def login_submit(request: Request):
         form = dict(await request.form())
-        username = str(form.get("username", "")).strip()[:100]  # bounded: it is kept for the lockout and audit
+        username = str(form.get("username", "")).strip()[:MAX_USERNAME]  # bounded: it is kept for the lockout and audit
         nxt = _safe_next(str(form.get("next", "")))
         ip = client_ip(request, bootstrap.trusted_proxies)
         if login_guard.is_blocked(ip) or login_guard.is_blocked(f"user:{username}"):
@@ -586,7 +587,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                         values[name] = ""
                     elif text or name not in SECRET_TUNABLES:  # a blank secret field keeps the secret
                         values[name] = text
-                elif name in form and form[name] != "":
+                elif name in form and str(form[name]).strip() == "":  # emptied: back to the default
+                    values[name] = getattr(Settings, name)
+                elif name in form:
                     values[name] = kind(form[name])
                     if not math.isfinite(values[name]):  # "nan" and "inf" parse as floats
                         raise ValueError(name)
@@ -621,7 +624,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         session, form = await require_post(request, "owner")
         username = str(form.get("username", "")).strip()
         role = str(form.get("role", "viewer"))
-        if not username or role not in ROLES or password_problem(str(form.get("password", ""))):
+        bad_name = not username or len(username) > MAX_USERNAME
+        if bad_name or role not in ROLES or password_problem(str(form.get("password", ""))):
             return back("/admin/users", error="invalid")
         try:
             store.create_admin(username, hash_password(str(form["password"])), role, session.user.username)
@@ -808,7 +812,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             expires_at = _parse_date(str(form.get("expires", "")))
         except ValueError:
             return back("/admin/clients", error="invalid")
-        if not CLIENT_NAME.fullmatch(name) or priority not in PRIORITIES:
+        # "anonymous" is what requests without a key are stored under (allow_no_auth)
+        if not CLIENT_NAME.fullmatch(name) or name == "anonymous" or priority not in PRIORITIES:
             return back("/admin/clients", error="invalid")
         try:
             key = store.create_client(
@@ -854,7 +859,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 raise ValueError("on_limit")
             policy = ClientPolicy(
                 allowed_models=models,
-                user_agents=tuple(p.strip() for p in str(form.get("user_agents", "")).split(",") if p.strip())[:20],
+                user_agents=_user_agents(form),
                 **_ua_fields(form),
                 rpm=_opt(form, "rpm", int, 1),
                 rpd=_opt(form, "rpd", int, 1),
@@ -897,9 +902,12 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         enabled = form.get("enabled") == "on"
         hours = str(form.get("hours", "")).strip()
         try:
-            until = time.time() + float(hours) * 3600 if enabled and hours else None
+            span = float(hours) if enabled and hours else None
         except ValueError:
             return back("/admin/clients", error="invalid")
+        if span is not None and not (math.isfinite(span) and 0 < span <= 24 * 366):  # "inf" would break the page
+            return back("/admin/clients", error="invalid")
+        until = time.time() + span * 3600 if span is not None else None
         policy = dataclasses.replace(target.policy, log_content=enabled, log_content_until=until)
         store.update_client(client_id, session.user.username, policy=policy)
         ctx.reload()
@@ -1241,7 +1249,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         options = await asyncio.to_thread(store.request_filter_values)
         with_content = (
             await asyncio.to_thread(store.content_ids, [r["id"] for r in rows])
-            if session.user.can_view_content
+            if session.user.can("admin") and session.user.can_view_content  # as the content page requires
             else set()
         )
         return page(
@@ -1294,7 +1302,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         writer.writerow(columns)
         for r in rows:
             values = {**r, "cost_usd": f"{r['cost']:.4f}" if r["priced"] else ""}
-            writer.writerow([values[c] for c in columns])
+            writer.writerow([_csv_cell(values[c]) for c in columns])
         return Response(
             out.getvalue(),
             media_type="text/csv",
@@ -1596,7 +1604,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         try:
             data = json.loads(await request.body())
             client_name = str(data.pop("client"))
-        except (ValueError, KeyError, AttributeError):
+        except (ValueError, KeyError, AttributeError, TypeError):  # TypeError: a JSON array
             return JSONResponse({"error": {"message": "bad playground request", "code": 400}}, status_code=400)
         allowed = {"model", "messages", "stream", "max_tokens", "temperature", "stream_options"}
         body = json.dumps({k: v for k, v in data.items() if k in allowed}).encode()
@@ -1622,7 +1630,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 
     @app.post("/admin/alerts/read")
     async def alerts_read(request: Request):
-        await require_post(request, "viewer")
+        await require_post(request, "operator")  # read state is shared: a viewer mustn't clear it for everyone
         store.mark_notifications_read()
         return back("/admin/alerts", "read")
 
@@ -1638,7 +1646,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             cooldown_s = int(form.get("cooldown_s") or spec.cooldown_s)
         except (KeyError, ValueError):
             return back("/admin/alerts#rules", error="invalid")
-        if (threshold is not None and threshold < 0) or (window_s is not None and window_s < 0) or cooldown_s < 0:
+        bad_threshold = threshold is not None and (not math.isfinite(threshold) or threshold < 0)
+        if bad_threshold or (window_s is not None and window_s < 0) or cooldown_s < 0:
             return back("/admin/alerts#rules", error="invalid")
         store.save_alert_rule(kind, form.get("enabled") == "on", threshold, window_s, cooldown_s, session.user.username)
         ctx.alerts.reload()
@@ -1960,6 +1969,22 @@ def _expiry_date(timestamp: float | None) -> str:
     if not timestamp:
         return ""
     return datetime.fromtimestamp(timestamp - 1, UTC).strftime("%Y-%m-%d")
+
+
+def _user_agents(form: dict) -> tuple[str, ...]:
+    """A client's allowed apps: at most 20, refused rather than silently cut."""
+    prefixes = tuple(p.strip() for p in str(form.get("user_agents", "")).split(",") if p.strip())
+    if len(prefixes) > 20:
+        raise ValueError("user_agents")
+    return prefixes
+
+
+def _csv_cell(value):
+    """Text a spreadsheet would run as a formula (=, +, -, @ ...) starts with a quote instead; client and model
+    names come from requests."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
 
 
 def _safe_next(value: str | None) -> str:
