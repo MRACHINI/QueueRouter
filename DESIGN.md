@@ -1189,6 +1189,22 @@ v0.35.0: model@upstream — wherever a model is named (alias target, fallbacks, 
 model, or a request's model) a name ending in @<upstream name> is served only by that upstream (the provider gets the
 plain name); split only when the suffix is exactly an upstream's name; the alias editor's picker lists models
 offered by several upstreams once per provider.
+v0.35.1: fixes from a six-part code review. Admin/storage: "can read logged content" on the Users page; trace
+excerpts encrypted, purged with content and shown only to admins with that permission; restore checks every
+encrypted value; nan/inf settings refused; client renames can't hand data to another client. Jobs/adapters: 429/5xx
+retried with back-off (up to 8 times, within the deadline); offset-less times are UTC; adapter endpoints can't run as
+jobs; one batch completion at a time; webhooks resent after a restart; tool-calling replies are "tool_use"; image
+tool results noted; top_k stripped by the OpenAI/Gemini/Claude presets. Request path: a half-open circuit's trial
+released on a quota failover; every network error is a failed attempt; mid-stream errors start a new SSE event;
+responses closed when cancelled during inspection; no requeue in maintenance; waiting ends when no enabled upstream
+is left; dot-segment paths refused; keep-alive at least 0.1 s; the model header sanitised. Council/compaction:
+the conversation is compacted for the council's smallest model first; odd messages and tool calls tolerated;
+proposals only for the app's tools; adopt/notebook allowed in the closing round; judge replies and fetch errors kept
+out of plain logs; web fetches connect to the address that was checked (no DNS rebinding), and addresses are
+refused only for real key shapes or secret parameters; calculator results over 4,300 digits refused politely.
+Config: blank env vars use defaults; Anthropic's "input length and max_tokens exceed context limit" is an overflow;
+overflow errors state the provider's own context; bare-list model lists accepted; api-key, x-goog-api-key and
+OpenAI organization/project headers not forwarded; plugin refresh kept within 5 s–1 day.
 
 ### Later (agreed, not scheduled)
 
