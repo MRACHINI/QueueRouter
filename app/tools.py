@@ -71,7 +71,10 @@ def calculate(expression: str) -> str:
         return f"Can't calculate {expression!r}: {exc}"
     if isinstance(result, float) and result.is_integer() and abs(result) < 1e15:
         result = int(result)
-    return f"{expression} = {result}"
+    try:
+        return f"{expression} = {result}"
+    except ValueError:  # Python won't print integers longer than 4,300 digits
+        return f"Can't calculate {expression!r}: the result has more than 4,300 digits"
 
 
 def today() -> str:

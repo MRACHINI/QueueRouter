@@ -26,6 +26,9 @@ _OVERFLOW = re.compile(
     r"|maximum (?:input|prompt) length|maximum allowed (?:token|input)",
     re.I,
 )
+_INPUT_AND_OUTPUT = re.compile(
+    r"input length and .{0,3}max_tokens.{0,3} exceed context limit: [\d,]+ \+ [\d,]+ > (\d[\d,]*)", re.I
+)
 # Numbers that state the limit itself, most specific first.
 _LIMIT_PATTERNS = (
     re.compile(r"maximum context length (?:is|of) (\d[\d,]*)", re.I),
@@ -67,6 +70,11 @@ def overflow_of(status: int, content: bytes) -> tuple[bool, int | None, str]:
     message = error_message(content)
     if not _OVERFLOW.search(message):
         return False, None, message
+    # Anthropic: "input length and `max_tokens` exceed context limit: 190000 + 20000 > 200000": the prompt
+    # plus the answer don't fit, so a shorter prompt does help
+    if match := _INPUT_AND_OUTPUT.search(message):
+        value = int(match.group(1).replace(",", ""))
+        return True, value if MIN_CONTEXT <= value <= MAX_CONTEXT else None, message
     lowered = message.lower()
     if ("max_tokens" in lowered or "completion tokens" in lowered) and "messages" not in lowered:
         return False, None, message  # the requested answer size is too big, not the prompt

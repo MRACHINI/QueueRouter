@@ -13,12 +13,13 @@ and a query that looks like it holds a secret (API keys, tokens, private keys) i
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import json
 import re
 import socket
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -47,6 +48,14 @@ _SECRET = re.compile(
     r"|\b[A-Fa-f0-9]{40,}\b"  # long hex (tokens, hashes of secrets)
     r"|\b[A-Za-z0-9+/_-]{48,}={0,2}"  # long base64-ish blobs
     r"|(password|passwd|secret|token|api[_-]?key)\s*[:=]",
+    re.I,
+)
+# In addresses, long hex and base64 are ordinary (commit hashes, doc paths): only clear key shapes, and
+# secret-looking query parameters, are refused.
+_URL_SECRET = re.compile(
+    r"\b(?:(?:sk|pk|rk)[-_][A-Za-z0-9_-]{20,}|(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}"
+    r"|xox[abp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})"
+    r"|[?&;](?:password|passwd|secret|token|access_token|api[_-]?key|apikey|sig|signature)=",
     re.I,
 )
 
@@ -229,9 +238,9 @@ def readable(text: str) -> str:
     return (f"{title}\n\n" if title else "") + parser.text()
 
 
-async def public_host(host: str) -> None:
-    """SearchError unless every address ``host`` resolves to is public: no localhost, LAN, Docker networks,
-    link-local (cloud metadata), multicast or reserved ranges."""
+async def public_host(host: str) -> str | None:
+    """The address to connect to; SearchError unless every address ``host`` resolves to is public: no
+    localhost, LAN, Docker networks, link-local (cloud metadata), multicast or reserved ranges."""
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except OSError:
@@ -240,25 +249,34 @@ async def public_host(host: str) -> None:
         address = ipaddress.ip_address(info[4][0])
         if not address.is_global or address.is_multicast:
             raise SearchError("refused: that address is not on the public internet")
+    return infos[0][4][0] if infos else None
 
 
 async def fetch(client: httpx.AsyncClient, url: str) -> tuple[str, str]:
     """(final address, readable text) of a page; SearchError on refusal or failure. Redirects are followed
     here, so every hop's address is checked too."""
     url = str(url or "").strip()
-    if _SECRET.search(url):
+    if _URL_SECRET.search(url):
         raise SearchError("refused: the address looks like it contains a secret")
     for _ in range(5):
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise SearchError("only http(s) addresses can be read")
-        await public_host(parts.hostname)  # looked up here, so tests can stand in for it
+        address = await public_host(parts.hostname)  # looked up here, so tests can stand in for it
         headers = {
             "User-Agent": "QueueRouter-fetch/1.0",
             "Accept": "text/html,text/plain,application/json;q=0.9,*/*;q=0.5",
         }
+        target, extensions = url, {}
+        if address:  # connect to the address just checked, so a second DNS answer can't point elsewhere
+            host = f"[{address}]" if ":" in address else address
+            target = urlunsplit(parts._replace(netloc=host + (f":{parts.port}" if parts.port else "")))
+            headers["Host"] = parts.netloc.rpartition("@")[2]
+            extensions = {"sni_hostname": parts.hostname}  # the certificate is still checked for the name
         try:
-            async with client.stream("GET", url, headers=headers, timeout=20, follow_redirects=False) as response:
+            request = client.build_request("GET", target, headers=headers, timeout=20, extensions=extensions)
+            response = await client.send(request, stream=True, follow_redirects=False)
+            async with contextlib.aclosing(response):
                 if response.status_code in (301, 302, 303, 307, 308) and response.headers.get("location"):
                     url = urljoin(url, response.headers["location"])
                     continue

@@ -148,6 +148,9 @@ def _apply(payload: dict, plan: Plan, note_first_user: bool = True) -> dict:
                 out[index] = {**target, "content": content + note}
             elif isinstance(content, list):
                 out[index] = {**target, "content": [*content, {"type": "text", "text": note.strip()}]}
+            else:  # no content (or an odd one): the note must still get there, or the summary is lost
+                before = "" if content is None else json.dumps(content, ensure_ascii=False, default=str)
+                out[index] = {**target, "content": (before + note).strip()}
     return {**payload, "messages": out}
 
 
@@ -225,7 +228,22 @@ class Plans:
         return len(self._entries)
 
 
+def well_formed(messages: Any) -> bool:
+    """Messages compaction can work on: a list of objects whose tool calls are objects too. Anything else is
+    sent on as it is (the provider says what's wrong with it)."""
+    return isinstance(messages, list) and all(
+        isinstance(m, dict)
+        and (
+            not m.get("tool_calls")
+            or (isinstance(m["tool_calls"], list) and all(isinstance(c, dict) for c in m["tool_calls"]))
+        )
+        for m in messages
+    )
+
+
 def needed(payload: dict, context: int | None, output: int, start_at: float = START_AT) -> bool:
+    if not well_formed(payload.get("messages")):
+        return False
     return bool(context) and estimate_prompt_tokens(payload) + output > context * start_at
 
 
@@ -277,7 +295,7 @@ def summarise_goal(context: int, output: int) -> int:
 def conversation_key(client: str, session: str | None, messages: list) -> str | None:
     """Summaries belong to a conversation: the client, its session and its start (system prompt and task,
     so a subagent sharing its parent's session id gets its own)."""
-    if not session or not isinstance(messages, list):
+    if not session or not well_formed(messages):
         return None
     start, _ = _protected(messages)
     return f"{client}:{session}:{_hash(messages[:start])}"

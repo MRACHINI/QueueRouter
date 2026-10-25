@@ -62,10 +62,23 @@ def message_of(body: bytes) -> dict | None:
         choice = (json.loads(body).get("choices") or [{}])[0]
     except (ValueError, AttributeError, IndexError):
         return None
-    message = choice.get("message")
-    if not isinstance(message, dict) or not (message.get("content") or message.get("tool_calls")):
+    message = choice.get("message") if isinstance(choice, dict) else None
+    if not isinstance(message, dict):
+        return None
+    if "tool_calls" in message:  # only well-formed calls: a model's odd output mustn't break the council
+        calls = (
+            [c for c in message["tool_calls"] or [] if _well_formed(c)]
+            if isinstance(message["tool_calls"], list)
+            else []
+        )
+        message = {k: v for k, v in message.items() if k != "tool_calls"} | ({"tool_calls": calls} if calls else {})
+    if not (message.get("content") or message.get("tool_calls")):
         return None
     return message
+
+
+def _well_formed(call) -> bool:
+    return isinstance(call, dict) and isinstance(call.get("function") or {}, dict)
 
 
 def render(message: dict, limit: int = CANDIDATE_CHARS) -> str:
@@ -100,7 +113,10 @@ def without_calls(body: bytes | None, tool_names: str | set[str]) -> bytes | Non
     except (ValueError, KeyError, IndexError, TypeError):
         return body
     names = {tool_names} if isinstance(tool_names, str) else set(tool_names)
-    calls = [c for c in message.get("tool_calls") or [] if (c.get("function") or {}).get("name") not in names]
+    if not isinstance(message, dict):
+        return body
+    calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+    calls = [c for c in calls if _well_formed(c) and (c.get("function") or {}).get("name") not in names]
     if calls:
         message["tool_calls"] = calls
     else:

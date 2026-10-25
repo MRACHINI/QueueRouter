@@ -273,6 +273,21 @@ def create_app(
     summaries = Plans()  # summarise mode: the summary per conversation
     notebooks = Plans()  # orchestrator: its notebook (plan, findings) per conversation
     summary_locks: collections.defaultdict[str, asyncio.Lock] = collections.defaultdict(asyncio.Lock)
+    summary_users: collections.Counter[str] = collections.Counter()  # so finished conversations' locks go
+
+    @contextlib.asynccontextmanager
+    async def summary_lock(key: str):
+        """One summariser per conversation; the lock is forgotten once nobody holds or waits for it."""
+        summary_users[key] += 1
+        try:
+            async with summary_locks[key]:
+                yield
+        finally:
+            summary_users[key] -= 1
+            if not summary_users[key]:
+                del summary_users[key]
+                summary_locks.pop(key, None)
+
     prices = PriceCatalog(os.path.join(bootstrap.data_dir, "models-dev-prices.json"))
     prices.load_file()
     circuits = Circuits()
@@ -1775,7 +1790,7 @@ def create_app(
         messages = payload["messages"]
         key = compaction_mod.conversation_key(client.name, session, messages)
         before = estimate_prompt_tokens(payload)
-        async with summary_locks[key or ""]:  # one summariser per conversation; the others wait and reuse
+        async with summary_lock(key or ""):  # one summariser per conversation; the others wait and reuse
             previous = await asyncio.to_thread(load_summary, key)
             if previous is not None and not previous.matches(messages):
                 previous = None
@@ -1811,7 +1826,31 @@ def create_app(
 
     # -- model council (see app/council.py) -------------------------------------------------
 
-    async def run_council(request, client, alias, payload, request_headers, lane, tags, path, body, query) -> Response:
+    def council_compacted(client: ClientKey, alias, payload: dict, request_headers) -> dict:
+        """Council members and the judge get the conversation as it is, under their own model names (so no
+        alias compaction of their own): with compaction on, it's trimmed first to fit the smallest context
+        among the models taking part."""
+        if alias.compact == "off" or not isinstance(payload.get("messages"), list):
+            return payload
+        contexts = []
+        for named in {alias.target_model, alias.council_judge or alias.target_model, *alias.council_members}:
+            model, pin = split_pin(named)
+            candidates = candidates_for(model, pin, raw=True)
+            if candidates and (context := model_context(model, candidates)):
+                contexts.append(int(context / stats.ratio(model)))  # in estimate units, as for the alias
+        if not contexts:
+            return payload
+        context = min(contexts)
+        output = requested_output(payload) or min(DEFAULT_OUTPUT, context // 8)
+        session = session_key(request_headers, client.name, payload)
+        plans.idle_s = cfg().compaction_idle_minutes * 60
+        key = f"{client.name}:{session}:council:{alias.name}" if session else None
+        result = compact_request(dict(payload), context, output, plans, key)
+        return result.payload if result is not None else payload
+
+    async def run_council(
+        request, client, alias, payload, request_headers, lane, tags, path, body, query, original: dict | None = None
+    ) -> Response:
         """Members answer at once (internal requests, tagged "council"), the judge picks one or writes the
         answer. A streaming app gets its response headers at once and keep-alives meanwhile."""
         priority = LANE_NAMES[lane]
@@ -1855,7 +1894,7 @@ def create_app(
             Budgets: rounds, member tasks, time; past them it is told to finish."""
             orchestrator = alias.council_judge or alias.target_model
             roster = list(members)
-            key = notebook_key(client, request_headers, base)
+            key = notebook_key(client, request_headers, original or base)  # before compaction: stays the same
             notebook = await asyncio.to_thread(load_notebook, key)
             own = [council_mod.ask_tool(roster), tools_mod.CALC_TOOL]
             own += [council_mod.NOTEBOOK_TOOL] if key else []
@@ -1883,9 +1922,16 @@ def create_app(
             proposals: dict[str, dict] = {}  # P1, P2…: app tool calls members proposed
             final: list[bytes] = []  # set when it adopts proposals: the answer
 
-            def describe_answer(who: str, message: dict, sources: list[str]) -> str:
-                """A member's answer for the orchestrator; its proposed app tool calls get numbers."""
-                calls = message.get("tool_calls") or []
+            app_names = {(t.get("function") or {}).get("name") for t in base.get("tools") or [] if isinstance(t, dict)}
+
+            def describe_answer(who: str, message: dict, sources: list[str], propose: bool) -> str:
+                """A member's answer for the orchestrator; its proposed app tool calls get numbers (only calls of
+                the app's own tools, and only when proposals were asked for)."""
+                calls = [
+                    c
+                    for c in message.get("tool_calls") or []
+                    if propose and (c.get("function") or {}).get("name") in app_names
+                ]
                 shown = {k: v for k, v in message.items() if k != "tool_calls"}
                 text = council_mod.render({**shown, "_sources": sources} if sources else shown)
                 if calls:
@@ -1902,7 +1948,7 @@ def create_app(
 
             async def run(call: dict, closed: bool) -> dict:
                 name = (call.get("function") or {}).get("name")
-                if closed:
+                if closed and name not in (council_mod.ADOPT_NAME, council_mod.NOTEBOOK_NAME):  # wrapping up is allowed
                     text = "Budget used up: write your final answer now with what you have."
                 elif name == council_mod.ASK_NAME:
                     who, task = websearch.call_argument(call, "member"), websearch.call_argument(call, "task")
@@ -1931,7 +1977,7 @@ def create_app(
                         if message is None:
                             text = f"{who} didn't answer."
                         else:
-                            text = describe_answer(who, message, sources)
+                            text = describe_answer(who, message, sources, propose)
                 elif name == council_mod.ADOPT_NAME:
                     arguments = websearch.call_arguments(call)
                     wanted = [str(p).strip().upper() for p in arguments.get("proposals") or [] if str(p).strip()]
@@ -2022,8 +2068,8 @@ def create_app(
                     try:
                         final, text = await websearch.fetch(app.state.client, url)
                     except websearch.SearchError as exc:
-                        search_errors.append(str(exc))
-                        progress(f"{who}: couldn't read it ({exc})")
+                        search_errors.append("a page couldn't be read" if not keep_content else str(exc))
+                        progress(f"{who}: couldn't read it", f" ({exc})")  # the reason can name the host
                         return f"Couldn't read {url}: {exc}. Do not present its content as known."
                     progress(f"{who}: read {len(text):,} characters")
                     return f"Page {final}:\n{text}"
@@ -2148,7 +2194,9 @@ def create_app(
                     else " (unclear verdict: took answer 1)"
                 )
                 if chosen is None and said:
-                    rlog.fields["error"] = f"council judge's reply wasn't a clear number: {said[:200]}"
+                    rlog.fields["error"] = "council judge's reply wasn't a clear number" + (
+                        f": {said[:200]}" if keep_content else ""
+                    )
                 rlog.fields["council"] = f"pick {index + 1}/{len(answered)}: {answered[index][0]}{note}"
                 progress(f"Judge chose answer {index + 1}: {answered[index][0]}{note}")
                 return answered[index][2], None
@@ -2263,7 +2311,7 @@ def create_app(
             return False
         messages = payload["messages"]
         key = compaction_mod.conversation_key(client.name, session, messages)
-        if key and summary_locks[key].locked():
+        if key and (lock := summary_locks.get(key)) is not None and lock.locked():
             return True  # another request of this conversation is writing one: we'd wait for it
         previous = load_summary(key)
         current = payload
@@ -2934,8 +2982,9 @@ def create_app(
                 and bool(await asyncio.to_thread(load_notebook, notebook_key(client, request_headers, payload)))
             )
             if continues or council_mod.applies(alias, payload, tags, low):
+                compacted = council_compacted(client, alias, payload, request_headers)
                 return await run_council(
-                    request, client, alias, payload, request_headers, lane, tags, path, body, query
+                    request, client, alias, compacted, request_headers, lane, tags, path, body, query, original=payload
                 )
         # The chain: the requested model (or the alias's target), then the alias's fallbacks.
         chain = [target_model, *(alias.fallbacks if alias else ())]
@@ -2962,6 +3011,7 @@ def create_app(
             if alias or i > 0 or pin:
                 step_payload["model"] = step_model  # the upstream gets the real model name
             context = model_context(step_model, step_candidates)
+            real_context = context  # the provider's own figure (compaction below works in estimate units)
             compaction = None
             bigger_next = "context" in triggers and i < len(chain) - 1  # a fallback loses nothing: prefer it
             if alias and alias.compact != "off" and context and not (bigger_next and too_long(step_payload, context)):
@@ -3010,7 +3060,13 @@ def create_app(
                 if result is not None:
                     step_payload, compaction = result.payload, result.label
             if cfg().context_check and (over := too_long(step_payload, context)):
-                too_long_for = too_long_for or (*over, step_model, requested_output(step_payload))
+                scale = real_context / context if context and real_context else 1  # reported in the provider's units
+                too_long_for = too_long_for or (
+                    round(over[0] * scale),
+                    real_context,
+                    step_model,
+                    requested_output(step_payload),
+                )
                 if "context" in triggers:
                     continue  # try a model with a bigger context
                 break

@@ -34,6 +34,10 @@ _DROP_REQUEST_HEADERS = {
     "upgrade",
     "authorization",
     "x-api-key",
+    "api-key",  # Azure OpenAI
+    "x-goog-api-key",  # Gemini
+    "openai-organization",  # the client's OpenAI account, not the upstream's
+    "openai-project",
     "cookie",
     "accept-encoding",
     "forwarded",
