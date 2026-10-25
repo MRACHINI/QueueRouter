@@ -124,7 +124,7 @@ input, select, textarea {
   font: inherit; color: var(--text); background: var(--bg);
   border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; min-width: 0;
 }
-input[type="checkbox"] { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--accent); }
+input[type="checkbox"] { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--accent); flex: none; } /* long label text must not squeeze it */
 input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button {
   font: inherit; cursor: pointer; border: 1px solid transparent; border-radius: 8px;

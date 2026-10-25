@@ -1238,6 +1238,8 @@ read daily into model-scores.json, credited on the Models page). Names are match
 fine-tune and quantisation tags, trailing versions and dates are dropped, and the longest index name the model starts
 with wins at a word boundary, so GLM-4.6-Derestricted-v5 inherits GLM-4.6 (shown as "from GLM-4.6") and GLM-4.7
 isn't claimed by GLM-4. Migration 32: model_scores.
+v0.37.1: Settings checkboxes with long help text no longer shrink to a dot (the "Order models by strength" box couldn't
+be seen); "-free" / ":free" model names take their base model's score.
 
 ### Later (agreed, not scheduled)
 
