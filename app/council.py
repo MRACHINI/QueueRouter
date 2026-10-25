@@ -18,6 +18,8 @@ import re
 import time
 import uuid
 
+from . import websearch
+
 MODES = ("off", "pick", "combine", "orchestrate")
 WHEN = ("planning", "always")
 MIN_MEMBERS, MAX_MEMBERS = 1, 64
@@ -67,7 +69,7 @@ def message_of(body: bytes) -> dict | None:
         return None
     if "tool_calls" in message:  # only well-formed calls: a model's odd output mustn't break the council
         calls = (
-            [c for c in message["tool_calls"] or [] if _well_formed(c)]
+            [_normalised(c) for c in message["tool_calls"] or [] if _well_formed(c)]
             if isinstance(message["tool_calls"], list)
             else []
         )
@@ -79,6 +81,14 @@ def message_of(body: bytes) -> dict | None:
 
 def _well_formed(call) -> bool:
     return isinstance(call, dict) and isinstance(call.get("function") or {}, dict)
+
+
+def _normalised(call: dict) -> dict:
+    """Arguments as a JSON string, as the chat API has them (some servers send an object)."""
+    function = call.get("function") or {}
+    if isinstance(function.get("arguments"), dict):
+        return {**call, "function": {**function, "arguments": json.dumps(function["arguments"])}}
+    return call
 
 
 def render(message: dict, limit: int = CANDIDATE_CHARS) -> str:
@@ -146,11 +156,15 @@ def judge_payload(
         prompt += f"\n\nAlso follow these instructions from the administrator:\n{instructions.strip()}"
     if mode == "pick":
         listing += "\n\nReply with only the number of the best answer."
-    judged = {
-        **payload,
-        "model": model,
-        "messages": [*payload["messages"], {"role": "user", "content": f"{prompt}\n\n{listing}"}],
-    }
+    ask = f"{prompt}\n\n{listing}"
+    messages = list(payload["messages"])
+    last = messages[-1] if messages else None
+    if isinstance(last, dict) and last.get("role") == "user" and isinstance(last.get("content"), str):
+        # added to the user's message, not as a second one in a row: some chat templates refuse that
+        messages[-1] = {**last, "content": f"{last['content']}\n\n{ask}"}
+    else:
+        messages.append({"role": "user", "content": ask})
+    judged = {**payload, "model": model, "messages": messages}
     if mode == "pick":
         # room for thinking models to reason first (their reasoning counts as output); the verdict is read
         # from the final answer
@@ -423,10 +437,7 @@ def conflicts(calls: dict[str, dict]) -> str | None:
         function = call.get("function") or {}
         if read_only(str(function.get("name", ""))):
             continue
-        try:
-            arguments = json.loads(function.get("arguments") or "{}")
-        except ValueError:
-            arguments = {}
+        arguments = websearch.call_arguments(call)
         for key in _PATH_KEYS:
             path = arguments.get(key) if isinstance(arguments, dict) else None
             if isinstance(path, str) and path:

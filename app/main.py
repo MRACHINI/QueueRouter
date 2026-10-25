@@ -18,6 +18,7 @@ import os
 import signal
 import sys
 import time
+import urllib.parse
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -93,7 +94,13 @@ def error_response(message: str, status: int, kind: str = "queuerouter_error", *
 
 def odd_path(path: str) -> bool:
     """Dot segments (or backslashes) would let a /v1/ path reach other paths on the provider."""
+    path = urllib.parse.unquote(path)  # once more: "%252e%252e" arrives as "%2e%2e", which servers may decode
     return "\\" in path or any(part in (".", "..") for part in path.split("/"))
+
+
+def one_line(text: str) -> str:
+    """Provider text for an SSE comment line: a line break would end the comment."""
+    return " ".join(str(text).split())
 
 
 def header_value(text: str) -> str:
@@ -508,7 +515,10 @@ def create_app(
                 peak[0] = peak[1] = 0
             if queue.queued:
                 queue.poke()
-            await flush_usage()
+            try:
+                await flush_usage()
+            except Exception as exc:  # e.g. the disk is full: keep the loop (and the queue) going
+                log.error(json.dumps({"event": "usage_flush_failed", "error": repr(exc)[:200]}))
             if snapshot.mode == "running":
                 try:
                     await job_runner.tick(cfg().max_jobs_in_flight, max(0, queue.queued - len(job_runner.running)))
@@ -541,13 +551,16 @@ def create_app(
                 asyncio.ensure_future(prices.refresh(app.state.client))  # don't hold up the loop
             if time.monotonic() - last_prune > 3600:
                 last_prune = time.monotonic()
-                if cfg().request_log_days > 0:
-                    await asyncio.to_thread(store.prune_requests, cfg().request_log_days)
-                await asyncio.to_thread(store.prune_notifications)
-                await asyncio.to_thread(store.prune_responses, responses_api.STORE_DAYS)
-                await asyncio.to_thread(store.prune_jobs, cfg().job_retention_days)
-                await asyncio.to_thread(store.prune_content, cfg().content_log_days)
-                await asyncio.to_thread(store.prune_summaries, cfg().compaction_keep_days)
+                try:
+                    if cfg().request_log_days > 0:
+                        await asyncio.to_thread(store.prune_requests, cfg().request_log_days)
+                    await asyncio.to_thread(store.prune_notifications)
+                    await asyncio.to_thread(store.prune_responses, responses_api.STORE_DAYS)
+                    await asyncio.to_thread(store.prune_jobs, cfg().job_retention_days)
+                    await asyncio.to_thread(store.prune_content, cfg().content_log_days)
+                    await asyncio.to_thread(store.prune_summaries, cfg().compaction_keep_days)
+                except Exception as exc:  # e.g. database locked or disk full: try again next hour
+                    log.error(json.dumps({"event": "prune_failed", "error": repr(exc)[:200]}))
                 try:
                     await asyncio.to_thread(auto_backup, store, bootstrap.data_dir, cfg().backup_keep_days)
                 except Exception as exc:  # e.g. disk full: say so, keep serving
@@ -560,14 +573,21 @@ def create_app(
                 if not target.usable:
                     continue
                 state = circuits.state(target.id)
-                if state == "half-open" and circuits.allows(target.id):
-                    circuits.begin(target.id)
-                    if await refresh_catalog(target):
-                        circuits.success(target.id)
-                    else:
-                        circuits.failure(target.id, "health probe failed")
-                elif state == "closed" and catalogs.stale(target.id, CATALOG_MAX_AGE_S):
-                    await refresh_catalog(target)
+                try:
+                    if state == "half-open" and circuits.allows(target.id):
+                        circuits.begin(target.id)
+                        if await refresh_catalog(target):
+                            circuits.success(target.id)
+                        else:
+                            circuits.failure(target.id, "health probe failed")
+                    elif state == "closed" and catalogs.stale(target.id, CATALOG_MAX_AGE_S):
+                        await refresh_catalog(target)
+                except Exception as exc:  # e.g. an unusable address: a failed probe, not a stopped loop
+                    if state == "half-open":
+                        circuits.failure(target.id, f"health probe failed: {type(exc).__name__}")
+                    log.error(
+                        json.dumps({"event": "health_probe_failed", "upstream": target.id, "error": repr(exc)[:200]})
+                    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -1706,6 +1726,7 @@ def create_app(
                 "",
                 allow_defer=False,
                 allow_council=False,
+                internal=True,
             )
         except Exception as exc:  # summaries and council members are extras: never fail the user's request
             log.warning(json.dumps({"event": f"{tag}_failed", "client": client.name, "error": repr(exc)[:200]}))
@@ -1813,6 +1834,16 @@ def create_app(
         messages = payload["messages"]
         key = compaction_mod.conversation_key(client.name, session, messages)
         before = estimate_prompt_tokens(payload)
+        if background and write and key and (lock := summary_locks.get(key)) is not None and lock.locked():
+            # another request of this conversation is writing the summary: don't wait for it while this one
+            # still fits under BLOCK_AT with the summary there is (or none yet)
+            previous = await asyncio.to_thread(load_summary, key)
+            if previous is not None and not previous.matches(messages):
+                previous = None
+            current = compaction_mod.with_summary(payload, previous) if previous is not None else payload
+            if not compaction_mod.needed(current, context, output, compaction_mod.BLOCK_AT):
+                after = estimate_prompt_tokens(current)
+                return compaction_mod.Result(current, before, after, "summarise", previous is not None, "updating")
         async with summary_lock(key or ""):  # one summariser per conversation; the others wait and reuse
             previous = await asyncio.to_thread(load_summary, key)
             if previous is not None and not previous.matches(messages):
@@ -1867,7 +1898,9 @@ def create_app(
         output = requested_output(payload) or min(DEFAULT_OUTPUT, context // 8)
         session = session_key(request_headers, client.name, payload)
         plans.idle_s = cfg().compaction_idle_minutes * 60
-        key = f"{client.name}:{session}:council:{alias.name}" if session else None
+        # per conversation start too: a subagent sharing its parent's session id gets its own plan
+        start = compaction_mod.conversation_key(client.name, session, payload["messages"])
+        key = f"{start}:council:{alias.name}" if start else None
         result = compact_request(dict(payload), context, output, plans, key)
         return result.payload if result is not None else payload
 
@@ -1940,6 +1973,29 @@ def create_app(
             if key:
                 prompt += council_mod.notebook_section(notebook)
             messages = council_mod.with_orchestration(base["messages"], prompt)
+            first_round = len(messages)
+            orch_model, orch_pin = split_pin(orchestrator)
+            orch_context = model_context(orch_model, candidates_for(orch_model, orch_pin, raw=True))
+            orch_context = int(orch_context / stats.ratio(orch_model)) if orch_context else None
+
+            def fitted(messages: list) -> list:
+                """Members' answers and pages pile up round after round: past 80% of the orchestrator's context the
+                oldest long results are shortened (start and end kept), so a round isn't lost to an overflow."""
+                if not orch_context:
+                    return messages
+                out = list(messages)
+                for i in range(first_round, len(out)):
+                    if estimate_prompt_tokens({"messages": out}) <= orch_context * 0.8:
+                        break
+                    content = out[i].get("content")
+                    if (
+                        out[i].get("role") == "tool"
+                        and isinstance(content, str)
+                        and len(content) > compaction_mod.LONG_OUTPUT
+                    ):
+                        out[i] = {**out[i], "content": compaction_mod.shorten(content)}
+                return out
+
             deadline = time.monotonic() + alias.orch_seconds
             rounds, tasks, web_used = 0, [0], [0]
             proposals: dict[str, dict] = {}  # P1, P2…: app tool calls members proposed
@@ -2037,7 +2093,7 @@ def create_app(
                 asked = {
                     **base,
                     "model": orchestrator,
-                    "messages": messages,
+                    "messages": (messages := fitted(messages)),
                     "tools": [*(base.get("tools") or []), *own],
                 }
                 body = await internal_completion(
@@ -2091,7 +2147,7 @@ def create_app(
                     try:
                         final, text = await websearch.fetch(app.state.client, url)
                     except websearch.SearchError as exc:
-                        search_errors.append("a page couldn't be read" if not keep_content else str(exc))
+                        search_errors.append("a page couldn't be read")  # the reason can name the host
                         progress(f"{who}: couldn't read it", f" ({exc})")  # the reason can name the host
                         return f"Couldn't read {url}: {exc}. Do not present its content as known."
                     progress(f"{who}: read {len(text):,} characters")
@@ -2217,9 +2273,9 @@ def create_app(
                     else " (unclear verdict: took answer 1)"
                 )
                 if chosen is None and said:
-                    rlog.fields["error"] = "council judge's reply wasn't a clear number" + (
-                        f": {said[:200]}" if keep_content else ""
-                    )
+                    # the reply itself only in the (encrypted, permission-gated) trace, never the plain error column
+                    rlog.fields["error"] = "council judge's reply wasn't a clear number"
+                    progress("The judge's reply wasn't a clear number", f": {said[:200]}")
                 rlog.fields["council"] = f"pick {index + 1}/{len(answered)}: {answered[index][0]}{note}"
                 progress(f"Judge chose answer {index + 1}: {answered[index][0]}{note}")
                 return answered[index][2], None
@@ -2258,18 +2314,22 @@ def create_app(
             return await serve(request, client, path, body, request_headers, query, allow_council=False)
 
         if not stream:
-            try:
-                content, response = await work()
+            try:  # stopped when the app goes away, as for a plain request: members free their slots
+                outcome = await run_until_disconnect(request, work())
             except Exception:
                 finish(False)
                 raise
+            if isinstance(outcome, Response):  # the app went away
+                finish(False)
+                return outcome
+            content, response = outcome
             if content is not None:
                 finish(True)
                 return Response(
                     content,
                     200,
                     media_type="application/json",
-                    headers={"X-QueueRouter-Council": rlog.fields["council"] or ""},
+                    headers={"X-QueueRouter-Council": header_value(rlog.fields["council"] or "")},
                 )
             finish(response is not None)
             return response if response is not None else await fallback()
@@ -2334,8 +2394,6 @@ def create_app(
             return False
         messages = payload["messages"]
         key = compaction_mod.conversation_key(client.name, session, messages)
-        if key and (lock := summary_locks.get(key)) is not None and lock.locked():
-            return True  # another request of this conversation is writing one: we'd wait for it
         previous = load_summary(key)
         current = payload
         if previous is not None and previous.matches(messages):
@@ -2978,6 +3036,7 @@ def create_app(
         query: str | None = None,
         allow_defer: bool = True,
         allow_council: bool = True,
+        internal: bool = False,
     ) -> Response:
         """Everything after authentication: policies, aliases/fallbacks, queueing, forwarding.
         Used by the API and by the admin Playground (which passes its own clean ``headers``).
@@ -2995,7 +3054,9 @@ def create_app(
         alias = snapshot.aliases.get(model) if model else None
         target_model = alias.target_model if alias else model
         bare_target, target_pin = split_pin(target_model)
-        if refusal := policy_refusal(client, model, bare_target):
+        # QueueRouter's own requests (council members, judge, summaries) serve a request already admitted: the
+        # client's model list and queue limits apply to that request, not to the models working on it
+        if not internal and (refusal := policy_refusal(client, model, bare_target)):
             return refusal
         no_fallbacks = not (alias and alias.fallbacks)  # with fallbacks, a missing target just moves on
         checked = cfg().unknown_model_check and no_fallbacks and not target_pin  # a pinned upstream decides
@@ -3090,7 +3151,8 @@ def create_app(
                     watch_idle(client, session, full, result, context, output, alias, step_model, request_headers)
                 if result is None:  # trim mode, or a summary couldn't be written: trim instead
                     plans.idle_s = cfg().compaction_idle_minutes * 60
-                    key = f"{client.name}:{session}:{step_model}" if session else None
+                    start = compaction_mod.conversation_key(client.name, session, step_payload.get("messages"))
+                    key = f"{start}:{step_model}" if start else None  # per conversation start, like summaries
                     result = compact_request(step_payload, context, output, plans, key)
                 if result is not None:
                     step_payload, compaction = result.payload, result.label
@@ -3318,7 +3380,7 @@ def create_app(
             async with contextlib.aclosing(chained(adm)) as events:
                 async for event in events:
                     if isinstance(event, FellBack):
-                        yield f": {event.from_model} {event.reason}; trying {event.to_model}\n\n".encode()
+                        yield f": {event.from_model} {one_line(event.reason)}; trying {event.to_model}\n\n".encode()
                     elif isinstance(event, Queued):
                         note = (
                             f": queued id={adm.request_id} position={event.position} "
@@ -3328,7 +3390,7 @@ def create_app(
                     elif isinstance(event, Waiting):
                         yield f": queued position={event.position} waited={int(event.waited_s)}s\n\n".encode()
                     elif isinstance(event, Backoff):
-                        yield f": {event.reason}, retry {event.attempt} in {event.delay:.0f}s\n\n".encode()
+                        yield f": {one_line(event.reason)}, retry {event.attempt} in {event.delay:.0f}s\n\n".encode()
                         deadline = time.monotonic() + event.delay
                         while (remaining := deadline - time.monotonic()) > 0:
                             await asyncio.sleep(min(remaining, keepalive_s()))
@@ -3379,6 +3441,10 @@ def create_app(
             # Client disconnected: Starlette cancels us, or the generator is closed.
             outcome = "cancelled"
             raise
+        except httpx.HTTPError as exc:  # reading an error body or the stream's start, before any of it was sent
+            status = 502
+            rlog.fields["error"] = rlog.fields["error"] or f"{type(exc).__name__} reading the upstream's answer"
+            yield sse_error(f"upstream error: {type(exc).__name__}", 502)
         finally:
             if captured is not None:
                 rlog.content = (adm.log_request or b"", bytes(captured))
@@ -3407,6 +3473,7 @@ CONTEXT_FIELDS = (
     "context_length",
     "max_model_len",
     "max_context_length",
+    "context_window",  # Groq
     "max_input_tokens",
     "max_output_tokens",
     "max_tokens",

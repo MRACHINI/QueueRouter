@@ -144,21 +144,18 @@ def call_query(call: dict) -> str:
 
 
 def call_arguments(call: dict) -> dict:
-    """All arguments of a tool call ({} if unreadable)."""
+    """All arguments of a tool call ({} if unreadable). Some servers send them as an object, not a string."""
+    raw = (call.get("function") or {}).get("arguments") or "{}"
     try:
-        arguments = json.loads((call.get("function") or {}).get("arguments") or "{}")
-    except ValueError:
+        arguments = raw if isinstance(raw, dict) else json.loads(raw)
+    except (ValueError, TypeError):
         return {}
     return arguments if isinstance(arguments, dict) else {}
 
 
 def call_argument(call: dict, name: str) -> str:
     """One argument of a tool call ("" if unreadable)."""
-    try:
-        arguments = json.loads((call.get("function") or {}).get("arguments") or "{}")
-    except ValueError:
-        return ""
-    return str(arguments.get(name) or "") if isinstance(arguments, dict) else ""
+    return str(call_arguments(call).get(name) or "")
 
 
 # -- web_fetch: read a page (built in, no key) -----------------------------------------------------

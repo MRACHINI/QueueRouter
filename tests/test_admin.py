@@ -302,3 +302,28 @@ async def test_review_fixes_storage(make_stack, tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         store.update_client(first, "t", name="beta")
     assert store.query("SELECT client FROM compaction_summaries WHERE key = 'k1'")[0]["client"] == "alpha"
+
+
+async def test_second_review_admin_forms(admin_stack):
+    """An emptied number goes back to its default; inf hours / thresholds and over-long usernames are refused."""
+    from app.config import Settings
+
+    store = admin_stack.app.state.store
+    async with httpx.AsyncClient(base_url=admin_stack.url) as c:
+        await login(c, admin_stack.url)
+        csrf = csrf_of((await c.get("/admin/settings")).text)
+        await c.post("/admin/settings", data={"csrf": csrf, "aging_s": "9"})
+        assert store.get_tunables()["aging_s"] == 9
+        await c.post("/admin/settings", data={"csrf": csrf, "aging_s": ""})
+        assert store.get_tunables()["aging_s"] == Settings.aging_s
+
+        client = store.list_clients()[0]
+        r = await c.post(f"/admin/clients/{client.id}/logging", data={"csrf": csrf, "enabled": "on", "hours": "inf"})
+        assert "e=invalid" in r.headers["location"]
+        r = await c.post("/admin/alerts/rules/error_rate", data={"csrf": csrf, "threshold": "inf", "window_s": "300"})
+        assert "e=invalid" in r.headers["location"]
+        r = await c.post(
+            "/admin/users",
+            data={"csrf": csrf, "username": "u" * 101, "role": "viewer", "password": "correct horse battery 2"},
+        )
+        assert "e=invalid" in r.headers["location"]

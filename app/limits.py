@@ -38,6 +38,7 @@ _LIMIT_PATTERNS = (
     re.compile(r"maximum allowed (?:token|input) (?:size|length|count) (?:is |of )?(\d[\d,]*)", re.I),
     re.compile(r"tokens? > (\d[\d,]*) maximum", re.I),  # Anthropic: "250000 tokens > 200000 maximum"
     re.compile(r"(?:limit|maximum)(?: is)?:? (\d[\d,]*) tokens", re.I),
+    re.compile(r"while limit is (\d[\d,]*)", re.I),  # Groq: "Current length is 9000 while limit is 8192"
 )
 MIN_CONTEXT, MAX_CONTEXT = 1_024, 100_000_000
 OVERFLOW_STATUS = (400, 413, 422)
