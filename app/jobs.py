@@ -17,10 +17,11 @@ import json
 import logging
 import socket
 import sqlite3
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -31,6 +32,17 @@ from .store import JOB_DONE, Store
 log = logging.getLogger("queuerouter")
 
 MAX_ATTEMPTS = 3  # restarts while running
+RETRY_STATUSES = (429, 502, 503, 504)  # passing refusals: the job waits and runs again
+RETRY_ATTEMPTS = 8
+
+
+def retry_after(status: int, attempts: int) -> float | None:
+    """Seconds before a job refused with a passing status runs again (backing off), or None."""
+    if status not in RETRY_STATUSES or attempts >= RETRY_ATTEMPTS:
+        return None
+    return float(min(600, 15 * 2 ** (attempts - 1)))
+
+
 BATCH_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/embeddings")
 WINDOWS = {"24h": 86_400}
 MAX_BATCH_LINES = 50_000
@@ -52,14 +64,22 @@ def parse_time(value) -> float | None:
     if isinstance(value, int | float):
         return float(value)
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if moment.tzinfo is None:  # no offset given: UTC, like cron and quotas (not the server's local zone)
+            moment = moment.replace(tzinfo=UTC)
+        return moment.timestamp()
     except ValueError as exc:
         raise JobError(f"invalid time {value!r} (use ISO 8601 or epoch seconds)") from exc
 
 
+# QueueRouter's own endpoints and the API adapters (/v1/messages, /v1/responses) can't run as jobs: a job is
+# sent to the provider as it is.
+NOT_JOBS = ("jobs", "batches", "files", "schedules", "messages", "responses", "queue", "models", "opencode-config")
+
+
 def check_endpoint(endpoint: str) -> str:
     endpoint = "/" + endpoint.strip().lstrip("/")
-    if not endpoint.startswith("/v1/") or endpoint.split("/")[2] in ("jobs", "batches", "files"):
+    if not endpoint.startswith("/v1/") or endpoint.split("/")[2] in NOT_JOBS or ".." in endpoint:
         raise JobError(f"endpoint {endpoint!r} can't run as a job")
     return endpoint
 
@@ -258,8 +278,16 @@ def batch_view(store: Store, row: sqlite3.Row) -> dict:
     }
 
 
+_BATCH_LOCK = threading.Lock()  # two jobs of a batch finishing at once must not both write its files
+
+
 def finish_batch_if_done(store: Store, batch_id: str) -> bool:
     """Once every job of a batch is done, write the output / error files (OpenAI's format)."""
+    with _BATCH_LOCK:
+        return _finish_batch(store, batch_id)
+
+
+def _finish_batch(store: Store, batch_id: str) -> bool:
     batch = store.get_batch(batch_id)
     if batch is None or batch["status"] not in ("in_progress", "cancelling"):
         return False
@@ -335,8 +363,13 @@ class JobRunner:
         self._callbacks: set[asyncio.Task] = set()
 
     def start(self) -> int:
-        """At startup: jobs a previous run was in the middle of go back in the queue."""
-        return self.store.requeue_running_jobs(MAX_ATTEMPTS)
+        """At startup: jobs a previous run was in the middle of go back in the queue, and callbacks a shutdown
+        interrupted are sent again."""
+        for job_id in self.store.pending_callbacks():
+            task = asyncio.get_running_loop().create_task(self._callback(job_id))
+            self._callbacks.add(task)
+            task.add_done_callback(self._callbacks.discard)
+        return self.store.requeue_running_jobs(MAX_ATTEMPTS + RETRY_ATTEMPTS)  # retries count as attempts too
 
     async def tick(self, max_in_flight: int, live_waiting: int) -> None:
         now = time.time()
@@ -361,6 +394,7 @@ class JobRunner:
 
     async def _run(self, row: sqlite3.Row) -> None:
         job_id = row["id"]
+        finishing = False  # once its result is being written, a shutdown must not queue it again
         try:
             request = self.store.job_request(row)
             status, body = await self.execute(row, request)
@@ -369,16 +403,31 @@ class JobRunner:
             except ValueError:
                 result = {"raw": body.decode("utf-8", "replace")[:100_000]}
             fields: dict = {"status_code": status, "result": result, "model": request.get("model")}
+            message = (result or {}).get("error", {}).get("message") if isinstance(result, dict) else None
+            delay = retry_after(status, row["attempts"] or 1)
+            if delay is not None and (not row["deadline"] or time.time() + delay < row["deadline"]):
+                # a passing refusal (queue full, rate or quota limit, no upstream right now): try again later
+                note = f"HTTP {status}: {message or 'temporarily refused'}; retrying in {delay:.0f} s"[:1000]
+                await asyncio.to_thread(
+                    self.store.set_job_fields,
+                    job_id,
+                    status="queued",
+                    started=None,
+                    run_at=time.time() + delay,
+                    error=note,
+                )
+                return
+            finishing = True
             if status < 400:
                 prompt, completion, _ = self._usage_of(body)
                 fields.update(prompt_tokens=prompt, completion_tokens=completion)
                 await asyncio.to_thread(self.store.finish_job, job_id, "succeeded", **fields)
             else:
-                message = (result or {}).get("error", {}).get("message") if isinstance(result, dict) else None
                 fields["error"] = str(message or f"HTTP {status}")[:1000]
                 await asyncio.to_thread(self.store.finish_job, job_id, "failed", **fields)
-        except asyncio.CancelledError:  # shutdown: it runs again after the restart
-            await asyncio.to_thread(self.store.set_job_fields, job_id, status="queued", started=None)
+        except asyncio.CancelledError:  # shutdown: it runs again after the restart (unless already finished)
+            if not finishing:
+                await asyncio.to_thread(self.store.set_job_fields, job_id, status="queued", started=None)
             raise
         except Exception as exc:
             log.error(json.dumps({"event": "job_failed", "job": job_id, "error": repr(exc)[:300]}))

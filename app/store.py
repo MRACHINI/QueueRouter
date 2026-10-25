@@ -1626,6 +1626,16 @@ class Store:
             )
         return cur.rowcount == 1
 
+    def pending_callbacks(self, within_s: float = 86_400) -> list[str]:
+        """Finished jobs (last day) whose callback never completed: a shutdown interrupted it."""
+        done = ",".join(f"'{s}'" for s in JOB_DONE)
+        rows = self.query(
+            f"SELECT id FROM jobs WHERE status IN ({done}) AND callback_url IS NOT NULL "  # noqa: S608
+            "AND callback_status IS NULL AND finished > ?",
+            (time.time() - within_s,),
+        )
+        return [r["id"] for r in rows]
+
     def requeue_running_jobs(self, max_attempts: int) -> int:
         """After a restart: jobs that were running start again (or fail after too many tries)."""
         with self.tx() as db:

@@ -49,7 +49,7 @@ PRESETS: dict[str, Preset] = {
             note="Parallel requests and context cap depend on your plan.",
         ),
         Preset("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", 8),
-        Preset("openai", "OpenAI", "https://api.openai.com/v1", 8),
+        Preset("openai", "OpenAI", "https://api.openai.com/v1", 8, params='{"strip": ["top_k"]}'),
         Preset("groq", "Groq", "https://api.groq.com/openai/v1", 4),
         Preset("together", "Together AI", "https://api.together.xyz/v1", 8),
         Preset("deepinfra", "DeepInfra", "https://api.deepinfra.com/v1/openai", 8),
@@ -59,7 +59,7 @@ PRESETS: dict[str, Preset] = {
             "Google Gemini (AI Studio)",
             "https://generativelanguage.googleapis.com/v1beta/openai",
             2,
-            params='{"strip": ["store"]}',
+            params='{"strip": ["store", "top_k"]}',
             max_retries=2,
             note="Key from aistudio.google.com. Free tier: a few requests per minute and per day; "
             "a used-up daily quota fails fast instead of waiting. Models are listed as models/gemini-....",
@@ -70,7 +70,7 @@ PRESETS: dict[str, Preset] = {
             "https://api.anthropic.com/v1",
             8,
             # Claude 4.7 and later answer 400 to any temperature below 1 or top_p other than the default
-            params='{"strip": ["temperature", "top_p", "store"]}',
+            params='{"strip": ["temperature", "top_p", "top_k", "store"]}',
             note="Key from platform.claude.com (Claude Console). Uses Anthropic's OpenAI-compatible endpoint: tools, "
             "streaming and images work; prompt caching isn't available and thinking isn't returned. temperature and "
             "top_p are removed (newer Claude models reject them). Use a key created in a workspace (personal keys "
