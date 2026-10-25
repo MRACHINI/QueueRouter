@@ -45,6 +45,8 @@ from ..opencode import plugin_install_commands
 from ..params import parse_rules
 from ..presets import ARLIAI_PLANS, PRESETS, plan_for
 from ..pricing import PriceCatalog, resolve, summarize_usage
+from ..ranking import CREDIT, CREDIT_URL, Scores
+from ..ranking import INDEXES as RANK_INDEXES
 from ..slots import STRATEGIES
 from ..state import MODES
 from ..store import ROLES, Store
@@ -101,6 +103,8 @@ MESSAGES = {
     "(see the example).",
     "client_unavailable": "That client is disabled or expired; enable it first.",
     "refresh_failed": "Couldn't download prices from models.dev right now; the previous list is kept.",
+    "scores_failed": "Couldn't read the Artificial Analysis index right now (the reason is on the Models page); "
+    "the previous scores are kept.",
     "webhook_ok": "Test notification delivered.",
     "webhook_failed": "The test notification could not be delivered; see the error on the webhook.",
     "read": "All notifications marked as read.",
@@ -114,7 +118,11 @@ MESSAGES = {
 }
 
 MAX_USERNAME = 100
-SETTING_CHOICES: dict[str, tuple[str, ...]] = {"lb_strategy": STRATEGIES, "search_provider": SEARCH_PROVIDERS}
+SETTING_CHOICES: dict[str, tuple[str, ...]] = {
+    "lb_strategy": STRATEGIES,
+    "search_provider": SEARCH_PROVIDERS,
+    "rank_index": tuple(RANK_INDEXES),
+}
 
 SETTING_HELP: dict[str, tuple[str, str, str]] = {
     # name: (section, label, help)
@@ -199,6 +207,23 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Web search",
         "SearXNG address",
         "Only for SearXNG, e.g. http://searxng:8080 (its JSON output must be enabled).",
+    ),
+    "opencode_rank": (
+        "opencode",
+        "Order models by strength",
+        "Numbers the opencode model list: aliases first (00), then the strongest models (01, 02…), then the rest. "
+        "Scores come from the index below, or from your own scores on the Models page.",
+    ),
+    "rank_index": (
+        "opencode",
+        "Strength index",
+        "Which Artificial Analysis index ranks the models: intelligence (overall), coding or agentic.",
+    ),
+    "rank_key": (
+        "opencode",
+        "Artificial Analysis API key",
+        "Free key from artificialanalysis.ai (stored encrypted; blank keeps the current one). The index is "
+        "read once a day.",
     ),
     "passthrough_get_paths": (
         "Upstream",
@@ -288,6 +313,9 @@ class AdminContext:
     context_table: Callable[[], list[dict]]
     upstream_models: Callable[[int], Awaitable[list[str] | None]]
     model_choices: Callable[[], list[dict]]
+    scores: Scores
+    refresh_scores: Callable[[], Awaitable[bool]]
+    ranking_table: Callable[[], dict]
 
 
 class NeedLogin(Exception):
@@ -1347,6 +1375,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             catalog_size=len(ctx.prices.prices),
             catalog_age_h=round((time.time() - ctx.prices.fetched_at) / 3600, 1) if ctx.prices.fetched_at else None,
             contexts=ctx.context_table(),
+            ranking=ctx.ranking_table(),
+            rank_indexes=RANK_INDEXES,
+            credit=(CREDIT, CREDIT_URL),
         )
 
     @app.post("/admin/model-limits")
@@ -1377,6 +1408,28 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             return back("/admin/models#contexts", error="invalid")
         ctx.reload()
         return back("/admin/models#contexts", "saved")
+
+    @app.post("/admin/model-scores")
+    async def model_scores_update(request: Request):
+        session, form = await require_post(request, "admin")
+        model = str(form.get("model", "")).strip()
+        try:
+            if not model or len(model) > 200:
+                raise ValueError("model")
+            score = _opt(form, "score", float, 0)  # blank: the index decides again
+            if score is not None and score > 1000:
+                raise ValueError("score")
+            store.set_model_score(model, session.user.username, score)
+        except ValueError:
+            return back("/admin/models#ranking", error="invalid")
+        return back("/admin/models#ranking", "saved")
+
+    @app.post("/admin/model-scores/refresh")
+    async def model_scores_refresh(request: Request):
+        session, _ = await require_post(request, "admin")
+        ok = await ctx.refresh_scores()
+        store.audit(session.user.username, "scores.refresh", "artificialanalysis", {"ok": ok})
+        return back("/admin/models#ranking", "saved" if ok else None, None if ok else "scores_failed")
 
     @app.post("/admin/prices")
     async def prices_update(request: Request):

@@ -422,6 +422,14 @@ MIGRATIONS: list[str] = [
     ALTER TABLE aliases ADD COLUMN council_roles TEXT NOT NULL DEFAULT '';
     ALTER TABLE requests ADD COLUMN timeline TEXT;
     """,
+    # 32: the administrator's own strength score per model (orders the opencode model list; app/ranking.py)
+    """
+    CREATE TABLE model_scores (
+        model TEXT PRIMARY KEY,
+        score REAL NOT NULL,
+        updated_at REAL NOT NULL
+    );
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -1221,6 +1229,22 @@ class Store:
                 (upstream_id, model),
             )
         self.audit(actor, "model_limit.forget", model, {"upstream_id": upstream_id})
+
+    def list_model_scores(self) -> dict[str, float]:
+        return {r["model"]: r["score"] for r in self.query("SELECT model, score FROM model_scores")}
+
+    def set_model_score(self, model: str, actor: str, score: float | None) -> None:
+        """The administrator's strength score for a model (None removes it: the index decides again)."""
+        with self.tx() as db:
+            if score is None:
+                db.execute("DELETE FROM model_scores WHERE model = ?", (model,))
+            else:
+                db.execute(
+                    "INSERT INTO model_scores (model, score, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(model) DO UPDATE SET score = excluded.score, updated_at = excluded.updated_at",
+                    (model, score, time.time()),
+                )
+        self.audit(actor, "model.score", model, {"score": score})
 
     def list_model_prices(self) -> dict[str, sqlite3.Row]:
         return {r["model"]: r for r in self.query("SELECT * FROM model_prices")}

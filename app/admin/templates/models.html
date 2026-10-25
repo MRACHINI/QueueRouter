@@ -97,6 +97,61 @@ or correct a wrong value (applies on every upstream; a plan's context cap still 
   <p class="small muted">Empty both fields and Save to remove a manual size.</p>
 </details>
 
+<h2 id="ranking">Strength order in opencode</h2>
+<p class="muted small">With <a href="/admin/settings">Settings → opencode → Order models by strength</a> on, the
+opencode model list is numbered: aliases first (<span class="mono">00</span>), then the strongest models
+(<span class="mono">01</span>, <span class="mono">02</span>…), then models without a score. A model's score is yours
+when you set one here (same scale as the index; it can also move an alias into the list), else the
+{{ ranking.index }} index{% if not ranking.enabled %} · <strong>ordering is off</strong>{% endif %}. Variants such as
+fine-tunes get their base model's score (marked "from …").</p>
+<div class="card row wrap">
+  <span class="small">
+  {% if not ranking.has_key %}No Artificial Analysis key yet: add one in <a href="/admin/settings">Settings</a> (free), or set scores by hand.
+  {% elif ranking.fetched_at %}Index: {{ ranking.count }} models, read <time data-ts="{{ ranking.fetched_at }}">{{ ranking.fetched_at | int }}</time>.
+  {% else %}Index not read yet.{% endif %}
+  {% if ranking.error %}<span class="badge">last refresh failed: {{ ranking.error }}</span>{% endif %}
+  </span>
+  {% if ranking.has_key %}
+  <form method="post" action="/admin/model-scores/refresh" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="secondary">Refresh now</button>
+  </form>
+  {% endif %}
+</div>
+<details class="card" {% if ranking.rows | selectattr("source", "equalto", "yours") | list %}open{% endif %}>
+  <summary><strong>{{ ranking.rows | length }} models and aliases</strong>
+    <span class="badge">{{ ranking.rows | rejectattr("score", "none") | list | length }} ranked</span></summary>
+  <div class="table-wrap">
+  <table class="cards">
+    <thead><tr><th>#</th><th>Model</th><th>Score</th><th>Your score</th></tr></thead>
+    <tbody>
+    {% for r in ranking.rows %}
+    <tr>
+      <td data-label="#" class="mono">{{ r.prefix or "–" }}</td>
+      <td data-label="Model" class="mono small wrap-any">{{ r.model }}</td>
+      <td data-label="Score" class="small">
+        {% if r.source == "alias" %}<span class="muted">alias</span>
+        {% elif r.score is none %}<span class="muted">no score</span>
+        {% elif r.source == "yours" %}{{ "%.1f" | format(r.score) }} <span class="muted">yours</span>
+        {% else %}{{ "%.1f" | format(r.score) }}{% if r.inherited %} <span class="muted">from {{ r.source }}</span>{% elif r.source != r.model %} <span class="muted">{{ r.source }}</span>{% endif %}{% endif %}</td>
+      <td data-label="Your score">
+        <form method="post" action="/admin/model-scores" class="row wrap">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="model" value="{{ r.model }}">
+          <input type="number" name="score" min="0" max="1000" step="0.1" value="{{ r.score if r.source == 'yours' else '' }}" placeholder="score" aria-label="Your score" class="price">
+          <button type="submit" class="secondary">Save</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">No models loaded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</details>
+<p class="muted small">Index scores: <a href="{{ credit[1] }}" rel="noopener" target="_blank">{{ credit[0] }}</a>.</p>
+
 <h2 id="pricing">Reference prices</h2>
 <p class="muted small">What your tokens would cost at official API prices (USD per million tokens), used for the
 cost and savings figures on the Usage page. Prices come from <a href="https://models.dev" rel="noopener">models.dev</a>:
