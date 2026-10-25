@@ -61,7 +61,8 @@ async function fetchModels(previousTag) {
 // keeps its own timer. opencode stops it through the cleanup that setup() returns (newer systems)
 // or the dispose hook (terminal UI).
 function startTimer(tick) {
-  return REFRESH_S > 0 ? setInterval(tick, REFRESH_S * 1000) : undefined;
+  // within 5 s .. 1 day: a bigger delay than a timer can hold would make it fire constantly
+  return REFRESH_S > 0 ? setInterval(tick, Math.min(Math.max(REFRESH_S, 5), 86400) * 1000) : undefined;
 }
 
 // -- newer plugin system (opencode desktop) --------------------------------------------------

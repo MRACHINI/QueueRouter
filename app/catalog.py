@@ -34,7 +34,10 @@ async def fetch_models(client: httpx.AsyncClient, base_url: str, api_key: str, t
     if response.status_code != 200:
         reason = " ".join(error_message(response.content).split())[:160]
         raise ValueError(f"HTTP {response.status_code}" + (f": {reason}" if reason else ""))
-    data = response.json().get("data")
+    body = response.json()
+    data = (
+        body if isinstance(body, list) else body.get("data") if isinstance(body, dict) else None
+    )  # some send a bare list
     if not isinstance(data, list):
         raise ValueError("no 'data' list in the response")
     return [m for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)]

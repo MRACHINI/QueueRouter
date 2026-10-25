@@ -36,6 +36,11 @@ explain_chown_failure() { # $1 = error output; $owner = owner before we touched 
         echo "  Cause: the container lacks the CHOWN capability." >&2
         echo "  Fix:   add  cap_add: [CHOWN, SETUID, SETGID]  next to  cap_drop: [ALL],  then run" >&2
         echo "         docker compose up -d   (a plain restart does not apply capability changes)" >&2
+    elif ! has_cap 1 && ! has_cap 2 && [ "$owner" != "0:0" ] && [ "${owner%%:*}" != "$PUID" ]; then
+        # cap_drop: [ALL] also drops DAC_OVERRIDE: root can't look inside a private folder it doesn't own
+        echo "  Cause: $DATA_DIR is private to user ${owner%%:*}, and without the DAC_OVERRIDE capability" >&2
+        echo "         root can't look inside it to change its owner." >&2
+        echo "  Fix:   add DAC_OVERRIDE to cap_add for one start (docker compose up -d), then remove it" >&2
     else
         echo "  Cause: the filesystem refused the change (typical for NFS/SMB shares and some NAS" >&2
         echo "         paths, or folders the container can't read)." >&2

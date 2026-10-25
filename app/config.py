@@ -124,20 +124,29 @@ def parse_access_keys(entries: tuple[str, ...]) -> tuple[ParsedKey, ...]:
     return tuple(parsed)
 
 
+def _env(env: dict[str, str], name: str) -> str | None:
+    """The variable's value; None when unset or blank (compose files often leave ``NAME=`` empty)."""
+    value = env.get(name)
+    return value.strip() if value is not None and value.strip() else None
+
+
 def _int(env: dict[str, str], name: str, default: int) -> int:
-    return int(env.get(name, default))
+    value = _env(env, name)
+    return default if value is None else int(value)
 
 
 def _float(env: dict[str, str], name: str, default: float) -> float:
-    return float(env.get(name, default))
+    value = _env(env, name)
+    return default if value is None else float(value)
 
 
 def _bool(env: dict[str, str], name: str, default: bool) -> bool:
-    return env.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+    value = _env(env, name)
+    return default if value is None else value.lower() in {"1", "true", "yes", "on"}
 
 
 def _list(env: dict[str, str], name: str, default: str = "") -> list[str]:
-    return [p.strip() for p in env.get(name, default).split(",") if p.strip()]
+    return [p.strip() for p in (_env(env, name) or default).split(",") if p.strip()]
 
 
 def _networks(env: dict[str, str], name: str, default: str) -> tuple[Network, ...]:
