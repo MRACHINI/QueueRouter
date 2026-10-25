@@ -241,4 +241,10 @@ def client_identity(headers: Mapping[str, str], payload: object) -> str | None:
             if value not in (None, "", {}):
                 text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
                 found[f"body.{field}"] = text[:300]
-    return json.dumps(found, ensure_ascii=False, sort_keys=True)[:6000] if found else None
+    if not found:
+        return None
+    text = json.dumps(found, ensure_ascii=False, sort_keys=True)
+    while len(text) > 6000 and found:  # stay valid JSON: drop whole entries (the longest first), never cut it
+        del found[max(found, key=lambda k: len(found[k]))]
+        text = json.dumps(found, ensure_ascii=False, sort_keys=True)
+    return text if found else None

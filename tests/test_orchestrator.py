@@ -283,3 +283,31 @@ async def test_members_propose_and_the_orchestrator_adopts(make_stack):
     assert len(stack.mock["orch_requests"]) == 3  # adopting ended the step
     first_tools = {t["function"]["name"] for t in stack.mock["orch_requests"][0]["tools"]}
     assert {"queuerouter_adopt_proposals", "read_file"} <= first_tools
+
+
+async def test_trace_excerpts_need_the_content_permission(make_stack):
+    """Fable review: conversation excerpts in a trace are stored encrypted, shown only to admins allowed to read
+    logged content, and removed when logged content is purged."""
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    store = stack.app.state.store
+    stack.mock["orch_script"] = [
+        {"calls": [(ASK_NAME, {"member": "small-model", "task": "private task text"})]},
+        {"answer": "done"},
+    ]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await orchestrate_setup(c, stack)
+        client = store.list_clients()[0]
+        csrf = csrf_of((await c.get("/admin/clients")).text)
+        await c.post(f"/admin/clients/{client.id}/logging", data={"csrf": csrf, "enabled": "on", "hours": "1"})
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.status_code == 200
+        rows = await rows_with(store, lambda row: row["council"])
+        council = next(row for row in rows if row["council"])
+        assert "private task text" not in council["timeline"]  # encrypted at rest
+        trace = f"/admin/requests/{council['id']}/trace"
+        assert "private task text" not in (await c.get(trace)).text  # no content permission yet
+        owner = store.get_admin(username="owner")
+        store.update_admin(owner.id, "t", can_view_content=True)
+        assert "→ small-model: private task text" in (await c.get(trace)).text
+        store.purge_content(None, "t")
+        assert "→ small-model" not in (await c.get(trace)).text  # purged with the logged content

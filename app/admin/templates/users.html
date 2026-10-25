@@ -23,6 +23,7 @@
           {% for r in roles %}<option value="{{ r }}" {% if r == u.role %}selected{% endif %}>{{ r }}</option>{% endfor %}
         </select>
         <label class="check"><input type="checkbox" name="enabled" {% if u.enabled %}checked{% endif %}> enabled</label>
+        <label class="check" title="May read prompts and replies logged for clients with content logging on"><input type="checkbox" name="content" {% if u.can_view_content %}checked{% endif %}> can read logged content</label>
         <input type="password" name="password" placeholder="new password (optional)" minlength="12" autocomplete="new-password">
         <button type="submit" class="secondary">Save</button>
       </form>

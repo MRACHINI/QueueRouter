@@ -1051,15 +1051,19 @@ class Store:
     def update_client(self, client_id: int, actor: str, **fields: object) -> None:
         if "priority" in fields and fields["priority"] not in PRIORITIES:
             raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
-        if "name" in fields:  # its jobs, files, schedules... move with it
+        old = None
+        if "name" in fields:
             rows = self.query("SELECT name FROM clients WHERE id = ?", (client_id,))
-            if rows and rows[0]["name"] != fields["name"]:
-                with self.tx() as db:
-                    for table in CLIENT_DATA_TABLES:
-                        db.execute(f"UPDATE {table} SET client = ? WHERE client = ?", (fields["name"], rows[0]["name"]))  # noqa: S608
+            old = rows[0]["name"] if rows and rows[0]["name"] != fields["name"] else None
         if isinstance(fields.get("policy"), ClientPolicy):
             fields["policy"] = fields["policy"].to_json()
+        # renamed first (fails if the name is taken), then its jobs, files, schedules... move with it, so a failed
+        # rename never hands its data to the client that already has that name
         self._update("clients", client_id, {"name", "priority", "enabled", "expires_at", "notes", "policy"}, fields)
+        if old is not None:
+            with self.tx() as db:
+                for table in CLIENT_DATA_TABLES:
+                    db.execute(f"UPDATE {table} SET client = ? WHERE client = ?", (fields["name"], old))  # noqa: S608
         self.audit(actor, "client.update", str(client_id), fields)
 
     def regenerate_client_key(self, client_id: int, actor: str) -> str:
@@ -1080,6 +1084,7 @@ class Store:
                     cur = db.execute(f"DELETE FROM {table} WHERE client = ?", (row["name"],))  # noqa: S608
                     if cur.rowcount:
                         removed[table] = cur.rowcount
+                db.execute("UPDATE requests SET timeline = NULL WHERE client = ?", (row["name"],))  # its excerpts
             db.execute("DELETE FROM clients WHERE id = ?", (client_id,))
         self.audit(actor, "client.delete", str(client_id), {"name": row["name"] if row else None, "removed": removed})
 
@@ -1815,14 +1820,19 @@ class Store:
         with self.tx() as db:
             if client is None:
                 cur = db.execute("DELETE FROM request_content")
+                db.execute("UPDATE requests SET timeline = NULL WHERE timeline IS NOT NULL")
             else:
                 cur = db.execute("DELETE FROM request_content WHERE client = ?", (client,))
+                db.execute("UPDATE requests SET timeline = NULL WHERE client = ? AND timeline IS NOT NULL", (client,))
         self.audit(actor, "content.purge", client or "*", {"rows": cur.rowcount})
         return cur.rowcount
 
     def prune_content(self, keep_days: float) -> None:
         with self.tx() as db:
-            db.execute("DELETE FROM request_content WHERE ts < ?", (time.time() - keep_days * 86_400,))
+            cutoff = time.time() - keep_days * 86_400
+            db.execute("DELETE FROM request_content WHERE ts < ?", (cutoff,))
+            # council / orchestrator timelines may hold (encrypted) excerpts: kept as long as logged content
+            db.execute("UPDATE requests SET timeline = NULL WHERE ts < ? AND timeline IS NOT NULL", (cutoff,))
 
     # -- compaction summaries (saved only when "Save summaries" is on) --------------------
 

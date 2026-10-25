@@ -8,6 +8,7 @@ import dataclasses
 import io
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -414,7 +415,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     @app.post("/admin/login")
     async def login_submit(request: Request):
         form = dict(await request.form())
-        username = str(form.get("username", "")).strip()
+        username = str(form.get("username", "")).strip()[:100]  # bounded: it is kept for the lockout and audit
         nxt = _safe_next(str(form.get("next", "")))
         ip = client_ip(request, bootstrap.trusted_proxies)
         if login_guard.is_blocked(ip) or login_guard.is_blocked(f"user:{username}"):
@@ -581,6 +582,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                         values[name] = text
                 elif name in form and form[name] != "":
                     values[name] = kind(form[name])
+                    if not math.isfinite(values[name]):  # "nan" and "inf" parse as floats
+                        raise ValueError(name)
                     if values[name] < -1 or (name != "max_retries" and values[name] < 0):
                         raise ValueError(name)
         except ValueError:
@@ -1203,6 +1206,18 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             timeline = json.loads(main["timeline"] or "[]")
         except ValueError:
             timeline = []
+        # [seconds, note, encrypted excerpt]: excerpts of the conversation only for those who may read logged
+        # content (as on the content page); anything malformed is skipped rather than breaking the page
+        may_read = session.user.can("admin") and session.user.can_view_content
+        steps = []
+        for item in timeline if isinstance(timeline, list) else []:
+            if not (isinstance(item, list | tuple) and len(item) in (2, 3) and isinstance(item[0], int | float)):
+                continue
+            note = str(item[1])
+            if may_read and len(item) == 3 and item[2]:
+                note += store.reveal(str(item[2])) or ""
+            steps.append((float(item[0]), note))
+        timeline = steps
         calls = [r for r in family if r["id"] != request_id]
         totals = {
             "calls": len(calls),
@@ -1929,7 +1944,7 @@ def _opt(form: dict, name: str, kind: type, minimum: float):
     if raw == "":
         return None
     value = kind(raw)
-    if value < minimum:
+    if not math.isfinite(value) or value < minimum:  # "nan" and "inf" parse as floats
         raise ValueError(name)
     return value
 
