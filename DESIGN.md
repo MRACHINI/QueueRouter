@@ -1230,6 +1230,14 @@ Traefik/Caddy without TRUSTED_PROXIES in .env: set it to the proxy's network (RE
 requirements.txt via pip-compile; the image installs with --require-hashes), the base image pinned by digest, and CI
 fails on fixable HIGH vulnerabilities as well as CRITICAL ones.
 v0.36.1: the same as v0.36.0, with its version number set (v0.36.0 reported itself as 0.35.3).
+v0.37.0: strength order in opencode (Settings → opencode → Order models by strength): the model list is numbered,
+aliases first ("00 · …"), then the strongest models ("01 · …"), then models without a score; opencode's desktop app
+sorts by name, so the numbers carry the order (its terminal keeps the order sent). Scores: the administrator's own per
+model (Models page, also for aliases), else the Artificial Analysis index (intelligence, coding or agentic; free key,
+read daily into model-scores.json, credited on the Models page). Names are matched loosely: organisation prefixes,
+fine-tune and quantisation tags, trailing versions and dates are dropped, and the longest index name the model starts
+with wins at a word boundary, so GLM-4.6-Derestricted-v5 inherits GLM-4.6 (shown as "from GLM-4.6") and GLM-4.7
+isn't claimed by GLM-4. Migration 32: model_scores.
 
 ### Later (agreed, not scheduled)
 

@@ -28,7 +28,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from . import __version__, anthropic_api, content_log, metrics, responses_api, structured, tracing, websearch
+from . import __version__, anthropic_api, content_log, metrics, ranking, responses_api, structured, tracing, websearch
 from . import compaction as compaction_mod
 from . import council as council_mod
 from . import cron as cron_mod
@@ -297,6 +297,8 @@ def create_app(
 
     prices = PriceCatalog(os.path.join(bootstrap.data_dir, "models-dev-prices.json"))
     prices.load_file()
+    scores = ranking.Scores(os.path.join(bootstrap.data_dir, "model-scores.json"))  # strength, for opencode
+    scores.load_file()
     circuits = Circuits()
     alerts = Alerts(store, lambda: app.state.client)
     guard = AuthGuard(snapshot.settings.auth_fail_limit, snapshot.settings.auth_block_s)
@@ -495,6 +497,7 @@ def create_app(
             limiter.seed(client, requests[client], tokens.get(client, []))
 
     price_attempt = [0.0]  # last catalog download attempt (at most hourly when failing)
+    score_attempt = [0.0]  # the same for the strength index
     history: collections.deque[tuple[float, int, int]] = collections.deque(maxlen=HISTORY_POINTS)
 
     async def background() -> None:
@@ -549,6 +552,9 @@ def create_app(
             if cfg().price_catalog_enabled and prices.stale and time.time() - price_attempt[0] > 3600:
                 price_attempt[0] = time.time()
                 asyncio.ensure_future(prices.refresh(app.state.client))  # don't hold up the loop
+            if cfg().rank_key and scores.stale and time.time() - score_attempt[0] > 3600:
+                score_attempt[0] = time.time()
+                asyncio.ensure_future(scores.refresh(app.state.client, cfg().rank_key))
             if time.monotonic() - last_prune > 3600:
                 last_prune = time.monotonic()
                 try:
@@ -983,6 +989,44 @@ def create_app(
     async def refresh_prices() -> bool:
         return await prices.refresh(app.state.client)
 
+    async def refresh_scores() -> bool:
+        score_attempt[0] = time.time()
+        return bool(cfg().rank_key) and await scores.refresh(app.state.client, cfg().rank_key)
+
+    def strength_order(names: list[str], manual: dict[str, float]) -> tuple[list[tuple[str, str]], dict[str, dict]]:
+        """opencode order of models and aliases ([(name, number prefix)]) and why ({name: score, source}): your
+        own score first, else the index (fine-tunes get their base model's); aliases without one come first."""
+        index, info, ranked, first, rest = cfg().rank_index, {}, [], [], []
+        for name in names:
+            if name in manual:
+                info[name] = {"score": manual[name], "source": "yours", "inherited": False}
+                ranked.append((name, manual[name]))
+            elif name in snapshot.aliases:
+                info[name] = {"score": None, "source": "alias", "inherited": False}
+                first.append(name)
+            elif (hit := scores.score(name, index)) is not None:
+                info[name] = {"score": hit[0], "source": hit[1], "inherited": hit[2]}
+                ranked.append((name, hit[0]))
+            else:
+                info[name] = {"score": None, "source": "", "inherited": False}
+                rest.append(name)
+        return ranking.numbered(ranked, first, rest), info
+
+    def ranking_table() -> dict:
+        """The Models page's strength section: every offered model and alias, its score and place."""
+        names = sorted({m for ids in models_by_upstream().values() for m in ids} | set(snapshot.aliases))
+        order, info = strength_order(names, store.list_model_scores())
+        rows = [{"model": name, "prefix": prefix, **info[name]} for name, prefix in order]
+        return {
+            "rows": rows,
+            "index": cfg().rank_index,
+            "enabled": cfg().opencode_rank,
+            "has_key": bool(cfg().rank_key),
+            "fetched_at": scores.fetched_at,
+            "count": len(scores.models),
+            "error": scores.error,
+        }
+
     async def client_opencode_config(request: Request, client_name: str) -> dict | None:
         """The same config /v1/opencode-config gives that client (for the admin download)."""
         client = next((c for c in snapshot.clients.values() if c.name == client_name), None)
@@ -1019,6 +1063,9 @@ def create_app(
             context_table,
             upstream_models,
             model_choices,
+            scores,
+            refresh_scores,
+            ranking_table,
         ),
     )
 
@@ -1487,7 +1534,14 @@ def create_app(
                 ),
                 **({"limit": limits} if limits else {}),
             }
-        return result
+        if not cfg().opencode_rank:
+            return result
+        # opencode's desktop app sorts by name, so the order travels in the names; its terminal keeps this order
+        order, _ = strength_order(list(result), await asyncio.to_thread(store.list_model_scores))
+        return {
+            name: {**result[name], "name": f"{prefix} · {result[name]['name']}" if prefix else result[name]["name"]}
+            for name, prefix in order
+        }
 
     def with_providers(label: str, upstreams: list[str]) -> str:
         """``model · nvidia, arliai``: which upstreams serve it (the model ID itself stays as it is)."""
@@ -1503,7 +1557,8 @@ def create_app(
         client, denied = authenticate(request)
         if denied:
             return denied
-        body = json.dumps(provider_config(public_base(request), await opencode_models(client)), sort_keys=True).encode()
+        # keys in the order built (strongest first with ranking on): the terminal UI shows them in that order
+        body = json.dumps(provider_config(public_base(request), await opencode_models(client))).encode()
         # An ETag lets the opencode plugin check for new models and aliases cheaply (304 when unchanged).
         etag = '"' + hashlib.sha256(body).hexdigest()[:20] + '"'
         if request.headers.get("if-none-match") == etag:

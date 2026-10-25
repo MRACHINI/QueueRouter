@@ -281,6 +281,14 @@ curl -H "Authorization: Bearer <client key>" https://queuerouter.example.com/v1/
 Any OpenAI-compatible client works the same way: base URL `https://<domain>/v1`, API key = a
 client key.
 
+### Models in strength order
+
+Turn on **Settings → opencode → Order models by strength** and the opencode model list is numbered: your aliases
+first (`00 · smart`), then the strongest models (`01 · …`, `02 · …`), then models without a score. Scores come from
+the [Artificial Analysis](https://artificialanalysis.ai/) index (intelligence, coding or agentic; add a free API key
+in Settings, it's read once a day), or from your own score per model on the **Models** page, which wins. Fine-tunes
+and renamed variants get their base model's score: `GLM-4.6-Derestricted-v5` ranks as GLM-4.6.
+
 ## Environment variables (bootstrap only)
 
 Everything else is configured in the admin UI.

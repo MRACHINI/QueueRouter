@@ -227,10 +227,14 @@ TUNABLES: dict[str, type] = {
     "affinity_ttl_s": float,
     "affinity_wait_s": float,
     "lb_strategy": str,
+    "opencode_rank": bool,
+    "rank_index": str,
+    "rank_key": str,
     "circuit_threshold": int,
     "circuit_cooldown_s": float,
 }
-SECRET_TUNABLES = frozenset({"metrics_token", "otel_headers", "search_key"})  # stored encrypted, never shown back
+# stored encrypted, never shown back
+SECRET_TUNABLES = frozenset({"metrics_token", "otel_headers", "search_key", "rank_key"})
 
 
 @dataclass(frozen=True)
@@ -295,6 +299,9 @@ class Settings:
 
     # Several upstreams
     lb_strategy: str = "least-busy"  # least-busy | weighted | ordered (failover)
+    opencode_rank: bool = False  # order and number the opencode model list by strength (app/ranking.py)
+    rank_index: str = "intelligence"  # intelligence | coding | agentic (Artificial Analysis)
+    rank_key: str = ""  # Artificial Analysis API key (free tier)
     circuit_threshold: int = 5  # consecutive failures before an upstream is taken out
     circuit_cooldown_s: float = 60  # then one trial request decides whether it's back
 
