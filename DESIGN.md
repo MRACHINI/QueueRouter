@@ -1205,6 +1205,9 @@ refused only for real key shapes or secret parameters; calculator results over 4
 Config: blank env vars use defaults; Anthropic's "input length and max_tokens exceed context limit" is an overflow;
 overflow errors state the provider's own context; bare-list model lists accepted; api-key, x-goog-api-key and
 OpenAI organization/project headers not forwarded; plugin refresh kept within 5 s–1 day.
+v0.35.2: GET /v1/models/{id} answered by QueueRouter (aliases and model@upstream included); other unknown /v1/ GETs
+are refused unless their path is listed in Settings → "GET paths passed to the provider" (default none): they used to
+go to the first usable upstream with its key, so any client could read the provider account (credits, key details).
 
 ### Later (agreed, not scheduled)
 

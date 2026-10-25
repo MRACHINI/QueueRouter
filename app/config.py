@@ -213,6 +213,7 @@ TUNABLES: dict[str, type] = {
     "search_provider": str,
     "search_key": str,
     "search_url": str,
+    "passthrough_get_paths": str,
     "metrics_token": str,
     "otel_endpoint": str,
     "otel_headers": str,
@@ -278,6 +279,7 @@ class Settings:
     search_provider: str = "off"  # web search for council members: off | tavily | brave | searxng
     search_key: str = ""  # its API key (Tavily, Brave)
     search_url: str = ""  # SearXNG address, e.g. http://searxng:8080
+    passthrough_get_paths: str = ""  # /v1/ GET paths forwarded to the provider, comma-separated (default: none)
     metrics_token: str = ""  # /metrics needs "Authorization: Bearer <token>"; empty = /metrics is off
     otel_endpoint: str = ""  # OTLP/HTTP collector base URL (traces go to <it>/v1/traces); empty = off
     otel_headers: str = ""  # extra headers for the collector, "key=value,key2=value2"

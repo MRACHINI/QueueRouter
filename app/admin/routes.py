@@ -199,6 +199,12 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "SearXNG address",
         "Only for SearXNG, e.g. http://searxng:8080 (its JSON output must be enabled).",
     ),
+    "passthrough_get_paths": (
+        "Upstream",
+        "GET paths passed to the provider",
+        "Other /v1/ GETs are refused. Paths listed here (comma-separated, e.g. credits) go to the first usable "
+        "upstream with its key, so every client can read what they return.",
+    ),
     "structured_repair": (
         "Upstream",
         "Repair broken JSON",
