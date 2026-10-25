@@ -39,7 +39,7 @@ def test_bootstrap_from_env():
     b = Bootstrap.from_env({"DATA_DIR": "/tmp/qr", "ADMIN_ALLOWED_IPS": "10.0.0.0/8", "PUBLIC_URL": "https://x/"})
     assert b.data_dir == "/tmp/qr" and b.public_url == "https://x" and b.secret_key is None
     assert [str(n) for n in b.admin_allowed_ips] == ["10.0.0.0/8"]
-    assert len(b.trusted_proxies) == 4
+    assert [str(n) for n in b.trusted_proxies] == ["127.0.0.1/32", "::1/128"]  # only the machine itself
 
 
 def chat_body(system="sys", first_user="task", *more):
@@ -66,3 +66,16 @@ def test_session_key_explicit_header_and_fallbacks():
     assert session_key({}, "c", {"model": "m", "prompt": "hello"}) is not None
     assert session_key({}, "c", {"model": "m"}) is None
     assert session_key({}, "c", []) is None
+
+
+def test_untrusted_proxy_is_ignored_and_reported(caplog):
+    import ipaddress
+    from types import SimpleNamespace
+
+    from app.auth import client_ip
+
+    request = SimpleNamespace(client=SimpleNamespace(host="172.18.0.5"), headers={"x-forwarded-for": "10.9.9.9"})
+    with caplog.at_level("WARNING", logger="queuerouter"):
+        assert client_ip(request, (ipaddress.ip_network("127.0.0.1/32"),)) == "172.18.0.5"
+    assert "untrusted_proxy" in caplog.text
+    assert client_ip(request, (ipaddress.ip_network("172.18.0.0/16"),)) == "10.9.9.9"

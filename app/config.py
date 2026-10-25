@@ -16,7 +16,9 @@ from dataclasses import asdict, dataclass, field, fields
 from typing import NamedTuple
 
 PRIORITIES = ("high", "normal", "low")
-DEFAULT_TRUSTED_PROXIES = "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16,127.0.0.1/32"
+# Only the machine itself by default: anyone else could otherwise claim any address in X-Forwarded-For
+# (and pass ADMIN_ALLOWED_IPS or dodge per-IP limits). Behind a reverse proxy, set it to the proxy's network.
+DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,::1/128"
 
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 

@@ -1,0 +1,9 @@
+# Development tools. requirements-dev.txt is generated from this file with hashes:
+#   pip-compile --generate-hashes --allow-unsafe --strip-extras -o requirements-dev.txt requirements-dev.in
+-r requirements.in
+-c requirements.txt
+pytest==9.1.1
+pytest-asyncio==1.4.0
+ruff==0.17.1
+anthropic==1.15.0
+openai==3.35.1
