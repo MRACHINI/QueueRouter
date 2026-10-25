@@ -198,3 +198,29 @@ async def test_sticky_routing_returns_to_same_upstream(make_stack, make_mock):
             assert r.status_code == 200
     second_tags = [tag for event, tag in second["log"] if event == "start"]
     assert second_tags == ["turn1", "turn2", "turn3"]
+
+
+async def test_review_fixes_request_path(make_stack, make_mock):
+    """Fable review: a half-open trial that hits a used-up quota and fails over is released (not reserved
+    forever); dot-segment paths are refused; header text from clients can't break the response."""
+    from app.main import header_value, odd_path
+
+    stack = make_stack(limit=1, bootstrap=OWNER, circuit_threshold=1, circuit_cooldown_s=0.2, lb_strategy="ordered")
+    good_url, good = make_mock(limit=1)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await add_upstream(c, "backup", good_url)
+        original = stack.app.state.store.list_upstreams()[0]
+        circuits = stack.app.state.circuits
+        circuits.failure(original.id, "test")  # open, then half-open after the cooldown
+        await asyncio.sleep(0.3)
+        assert circuits.state(original.id) == "half-open"
+        stack.mock["daily_quota"] = True
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("trial"))
+        assert r.status_code == 200 and good["served"] == 1
+        assert circuits.allows(original.id)  # the trial isn't stuck
+
+        r = await c.get("/v1/%2e%2e/admin", headers=stack.headers)
+        assert r.status_code == 404
+    assert odd_path("../admin") and odd_path("a/./b") and odd_path("a\\b") and not odd_path("models/x.y")
+    assert header_value("m\r\nX-Evil: 1") == "mX-Evil: 1"

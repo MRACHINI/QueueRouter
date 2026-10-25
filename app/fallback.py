@@ -167,34 +167,38 @@ async def sniff_stream(response: httpx.Response) -> tuple[bool, Replay]:
     acting = False
     deadline = time.monotonic() + SNIFF_SECONDS
     ended = False
-    while len(text) < SNIFF_CHARS and finish is None and not acting:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        try:
-            chunk = await pump.get(remaining)
-        except TimeoutError:
-            break
-        if chunk is None:
-            ended = True
-            break
-        buffered.append(chunk)
-        pending += chunk
-        *lines, pending = pending.split(b"\n")
-        for line in lines:
-            if not line.startswith(b"data:") or line.strip() == b"data: [DONE]":
-                continue
+    try:
+        while len(text) < SNIFF_CHARS and finish is None and not acting:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                choice = (json.loads(line[5:]).get("choices") or [{}])[0]
-            except (ValueError, AttributeError, IndexError):
-                continue
-            delta = choice.get("delta") or {}
-            if delta.get("tool_calls"):
-                acting = True
-            if isinstance(delta.get("content"), str):
-                text += delta["content"]
-            elif isinstance(choice.get("text"), str):
-                text += choice["text"]
-            finish = choice.get("finish_reason") or finish
+                chunk = await pump.get(remaining)
+            except TimeoutError:
+                break
+            if chunk is None:
+                ended = True
+                break
+            buffered.append(chunk)
+            pending += chunk
+            *lines, pending = pending.split(b"\n")
+            for line in lines:
+                if not line.startswith(b"data:") or line.strip() == b"data: [DONE]":
+                    continue
+                try:
+                    choice = (json.loads(line[5:]).get("choices") or [{}])[0]
+                except (ValueError, AttributeError, IndexError):
+                    continue
+                delta = choice.get("delta") or {}
+                if delta.get("tool_calls"):
+                    acting = True
+                if isinstance(delta.get("content"), str):
+                    text += delta["content"]
+                elif isinstance(choice.get("text"), str):
+                    text += choice["text"]
+                finish = choice.get("finish_reason") or finish
+    except BaseException:  # cancelled while reading: don't leave the reader task behind
+        pump.stop()
+        raise
     refused = not acting and is_refusal_text(text, finish)
     return refused, Replay(response, b"".join(buffered), None if ended else pump.chunks(), complete=ended, pump=pump)

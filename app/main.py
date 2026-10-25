@@ -59,7 +59,6 @@ from .store import DataDirError
 from .upstream import (
     BUSY_STATUS,
     FAILURE_STATUS,
-    RETRYABLE_ERRORS,
     UsageSniffer,
     client_identity,
     describe_429,
@@ -90,6 +89,20 @@ def error_body(message: str, status: int, kind: str = "queuerouter_error") -> di
 
 def error_response(message: str, status: int, kind: str = "queuerouter_error", **headers: str) -> JSONResponse:
     return JSONResponse(error_body(message, status, kind), status_code=status, headers=headers or None)
+
+
+def odd_path(path: str) -> bool:
+    """Dot segments (or backslashes) would let a /v1/ path reach other paths on the provider."""
+    return "\\" in path or any(part in (".", "..") for part in path.split("/"))
+
+
+def header_value(text: str) -> str:
+    """Client-supplied text made safe for a response header (no line breaks or other control characters)."""
+    return "".join(ch for ch in text if ch.isprintable() and ord(ch) < 256)[:200]
+
+
+# ends whatever event the upstream left half-sent, so an error added mid-stream parses as its own event
+MID_STREAM = b"\n\n"
 
 
 def sse_error(message: str, status: int, kind: str = "upstream_error") -> bytes:
@@ -328,6 +341,10 @@ def create_app(
 
     def cfg() -> Settings:
         return snapshot.settings
+
+    def keepalive_s() -> float:
+        """The keep-alive interval, never so small that waiting turns into a busy loop."""
+        return max(0.1, cfg().keepalive_interval_s)
 
     def apply_snapshot() -> None:
         s = snapshot.settings
@@ -1063,6 +1080,11 @@ def create_app(
                 return
             excluded |= blocked
             while True:
+                if snapshot.mode == "maintenance":  # e.g. failing over after maintenance began: don't queue again
+                    yield Failed(
+                        503, snapshot.maintenance_message or "QueueRouter is in maintenance mode", "maintenance"
+                    )
+                    return
                 pool = tuple(c for c in adm.candidates if c.upstream_id not in excluded) or adm.candidates
                 preferred = sticky_upstream(adm.session)
                 ticket = queue.enqueue(
@@ -1081,7 +1103,7 @@ def create_app(
                     first_enqueued, first_seq = ticket.enqueued_at, ticket.seq
                     if not ticket.granted:
                         yield Queued(queue.position(ticket))
-                keepalive = cfg().keepalive_interval_s
+                keepalive = keepalive_s()
                 while not await queue.wait(ticket, step(adm, keepalive)):
                     if ticket.future.cancelled():  # evicted: maintenance mode
                         message = snapshot.maintenance_message or "QueueRouter is in maintenance mode"
@@ -1090,6 +1112,12 @@ def create_app(
                     max_wait = adm.policy.queue_timeout_s or cfg().max_queue_wait_s
                     if (max_wait and ticket.wait_s >= max_wait) or adm.expired():
                         yield None
+                        return
+                    # every upstream it could use was disabled or removed meanwhile: it would wait forever
+                    if not any(
+                        (t := snapshot.upstreams.get(c.upstream_id)) is not None and t.upstream.enabled for c in pool
+                    ):
+                        yield Failed(503, "no enabled upstream can serve this request now", "not_configured")
                         return
                     yield Waiting(queue.position(ticket), ticket.wait_s)
                 await queue.apply_spacing(ticket)
@@ -1109,7 +1137,9 @@ def create_app(
                     headers, response = None, None
                     try:
                         response = await app.state.client.send(build_request(adm, target), stream=True)
-                    except RETRYABLE_ERRORS as exc:
+                    except (
+                        httpx.TransportError
+                    ) as exc:  # any network failure (write errors too), not only the usual ones
                         reason = type(exc).__name__
                         adm.rlog.fields["error"] = f"{reason} talking to {target.upstream.name}"[:500]
                     else:
@@ -1134,6 +1164,7 @@ def create_app(
                                 if others:
                                     excluded.add(target.id)
                                     queue.cancel(ticket)
+                                    circuits.abandon(target.id)  # a half-open trial must not stay reserved
                                     ticket = None
                                     yield Backoff(0, retries, f"quota used up on {target.upstream.name}, failing over")
                                     break
@@ -1256,64 +1287,82 @@ def create_app(
                 adm.rlog.fields["compaction"] = step.compaction
                 adm.rlog.fields["estimate"] = step.estimate
             step_adm = dataclasses.replace(adm, candidates=step.candidates, body=step.body)
-            async with contextlib.aclosing(attempts(step_adm)) as events:
-                moved_on = False
-                async for event in events:
-                    if isinstance(event, Got):
-                        event, overflow = await check_overflow(adm, event, step.model)
-                        if overflow and not last and "context" in triggers:
-                            await event.response.aclose()
-                            yield fall("context (provider)")
-                            moved_on = True
-                            break
-                    if last or not isinstance(event, Got | Failed):
-                        yield event
-                        if isinstance(event, Got | Failed) or event is None:
+            held = None  # a response read here before it's handed on: closed if we're cancelled meanwhile
+            try:
+                async with contextlib.aclosing(attempts(step_adm)) as events:
+                    moved_on = False
+                    async for event in events:
+                        held = event.response if isinstance(event, Got) else None
+                        if isinstance(event, Got):
+                            event, overflow = await check_overflow(adm, event, step.model)
+                            held = event.response
+                            if overflow and not last and "context" in triggers:
+                                held = None
+                                await event.response.aclose()
+                                yield fall("context (provider)")
+                                moved_on = True
+                                break
+                        if last or not isinstance(event, Got | Failed):
+                            held = None
+                            yield event
+                            if isinstance(event, Got | Failed) or event is None:
+                                return
+                            continue
+                        if isinstance(event, Failed):
+                            quota_out = event.kind == "upstream_quota_exhausted" and triggers & {
+                                "unavailable",
+                                "errors",
+                            }
+                            if quota_out or (event.status >= 500 and "errors" in triggers):
+                                yield fall(event.message)
+                                moved_on = True
+                                break
+                            yield event
                             return
-                        continue
-                    if isinstance(event, Failed):
-                        quota_out = event.kind == "upstream_quota_exhausted" and triggers & {"unavailable", "errors"}
-                        if quota_out or (event.status >= 500 and "errors" in triggers):
-                            yield fall(event.message)
+                        response = event.response
+                        status = response.status_code
+                        if status >= 500 and "errors" in triggers:
+                            held = None
+                            await response.aclose()
+                            yield fall(f"HTTP {status}")
                             moved_on = True
                             break
+                        if "refused" in triggers:
+                            if 400 <= status < 500:
+                                content = await response.aread()
+                                if is_policy_error(status, content):
+                                    held = None
+                                    await response.aclose()
+                                    yield fall(f"refused (HTTP {status})")
+                                    moved_on = True
+                                    break
+                                held = None
+                                yield Got(Replay(response, content, complete=True), event.target)
+                                return
+                            if status == 200:
+                                if adm.rlog.fields["stream"]:
+                                    refused, replay = await sniff_stream(response)
+                                else:
+                                    content = await response.aread()
+                                    refused = is_refusal_text(*message_text(content))
+                                    replay = Replay(response, content, complete=True)
+                                held = None
+                                if refused:
+                                    await replay.aclose()
+                                    yield fall("refused")
+                                    moved_on = True
+                                    break
+                                yield Got(replay, event.target)
+                                return
+                        held = None
                         yield event
                         return
-                    response = event.response
-                    status = response.status_code
-                    if status >= 500 and "errors" in triggers:
-                        await response.aclose()
-                        yield fall(f"HTTP {status}")
-                        moved_on = True
-                        break
-                    if "refused" in triggers:
-                        if 400 <= status < 500:
-                            content = await response.aread()
-                            if is_policy_error(status, content):
-                                await response.aclose()
-                                yield fall(f"refused (HTTP {status})")
-                                moved_on = True
-                                break
-                            yield Got(Replay(response, content, complete=True), event.target)
-                            return
-                        if status == 200:
-                            if adm.rlog.fields["stream"]:
-                                refused, replay = await sniff_stream(response)
-                            else:
-                                content = await response.aread()
-                                refused = is_refusal_text(*message_text(content))
-                                replay = Replay(response, content, complete=True)
-                            if refused:
-                                await replay.aclose()
-                                yield fall("refused")
-                                moved_on = True
-                                break
-                            yield Got(replay, event.target)
-                            return
-                    yield event
-                    return
-                if not moved_on:
-                    return
+            except BaseException:
+                if held is not None:
+                    await held.aclose()
+                raise
+            if not moved_on:
+                return
 
     # -- routes ----------------------------------------------------------------------------
 
@@ -2166,7 +2215,7 @@ def create_app(
                         getter = asyncio.ensure_future(notes.get())
                         done, _ = await asyncio.wait(
                             {task, getter},
-                            timeout=max(1.0, cfg().keepalive_interval_s),
+                            timeout=max(1.0, keepalive_s()),
                             return_when=asyncio.FIRST_COMPLETED,
                         )
                         if getter not in done:
@@ -2243,7 +2292,7 @@ def create_app(
             try:
                 while not task.done():
                     yield b": compacting the conversation to fit the model (writing a summary)\n\n"
-                    await asyncio.wait({task}, timeout=max(1.0, cfg().keepalive_interval_s))
+                    await asyncio.wait({task}, timeout=max(1.0, keepalive_s()))
             finally:
                 inflight.pop(request_id, None)
             with contextlib.suppress(Exception):
@@ -2649,6 +2698,8 @@ def create_app(
             return denied
         if unavailable := not_configured():
             return unavailable
+        if odd_path(path):
+            return error_response("unsupported path", 404, "not_found")
         target = next(t for t in snapshot.upstreams.values() if t.usable)
         url = f"{target.upstream.base_url}/{path}" + (f"?{request.url.query}" if request.url.query else "")
         try:
@@ -2815,6 +2866,8 @@ def create_app(
         client, denied = authenticate(request)
         if denied:
             return denied
+        if odd_path(path):
+            return error_response("unsupported path", 404, "not_found")
         if unavailable := not_configured() or mode_refusal():
             return unavailable
 
@@ -3135,7 +3188,9 @@ def create_app(
                         headers = response_headers(response.headers)
                         headers.update(adm.hints)
                         headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])
-                        headers["X-QueueRouter-Model"] = rlog.fields["target_model"] or rlog.fields["model"] or ""
+                        headers["X-QueueRouter-Model"] = header_value(
+                            rlog.fields["target_model"] or rlog.fields["model"] or ""
+                        )
                         if verdict:
                             headers["X-QueueRouter-Structured"] = verdict
                         return Response(content, status, headers=headers)
@@ -3185,7 +3240,7 @@ def create_app(
                         yield f": {event.reason}, retry {event.attempt} in {event.delay:.0f}s\n\n".encode()
                         deadline = time.monotonic() + event.delay
                         while (remaining := deadline - time.monotonic()) > 0:
-                            await asyncio.sleep(min(remaining, cfg().keepalive_interval_s))
+                            await asyncio.sleep(min(remaining, keepalive_s()))
                             if deadline - time.monotonic() > 0:
                                 yield b": waiting to retry\n\n"
                     elif event is None:
@@ -3219,13 +3274,13 @@ def create_app(
                                 yield chunk
                                 if adm.expired():
                                     outcome, status = "timeout", 504
-                                    yield sse_error(
+                                    yield MID_STREAM + sse_error(
                                         "request exceeded this key's total time limit", 504, "request_timeout"
                                     )
                                     return
                         except httpx.HTTPError as exc:
                             status = 502
-                            yield sse_error(f"upstream stream interrupted: {type(exc).__name__}", 502)
+                            yield MID_STREAM + sse_error(f"upstream stream interrupted: {type(exc).__name__}", 502)
                             return
                         outcome = "done"
                         return
