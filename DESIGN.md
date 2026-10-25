@@ -1284,6 +1284,25 @@ offered by several upstreams once per provider.
   - *Phases:* 1) one-request orchestrator (delegation, web search + fetch, date/time, calculator, budgets, live
     progress, roles on rows); 2) plan notebook across steps; 3) member roles + trace page; 4) members proposing
     app tool calls that the orchestrator merges.
+- **Using Claude (Haiku / Sonnet) sparingly for the most intelligence** (discussed 2026-10-25). Claude cost =
+  input tokens (each call re-reads the conversation, often 50-150k in opencode) × Claude calls per step; the
+  OpenAI-compatible endpoint has no prompt caching. Advice given: Claude only where thinking matters, cheap models
+  (DeepSeek-V4.1-Flash, Qwen3.8, GLM on ArliAI) for the rest — opencode's plan agent on a Claude alias (or a
+  council with a Claude judge), build agent on a cheap model; council combine on planning steps with a Sonnet
+  judge (Haiku for picks / light review); compaction (summarise, cheap summary model) on Claude-facing aliases;
+  the orchestrator only for big jobs on its own alias with a tight budget (~3 rounds, ~4 tasks), Sonnet not
+  Haiku. To build, most valuable first:
+  - **Native Anthropic upstream with prompt caching.** Talk to Claude through the Messages API (not the
+    compatibility layer): convert chat requests to /v1/messages and back (QueueRouter already converts the other
+    way for /v1/messages clients), mark the stable start of the conversation (system prompt, tools, older turns)
+    with cache_control so repeats cost ~10%; report cached tokens; thinking returned as reasoning; workspace
+    header and API version settable. Makes every Claude setup above cheaper.
+  - **Escalation alias:** a cheap model does the step; Claude is called only when needed (repeated tool
+    failures / errors in the conversation, the cheap model saying it is unsure, or a refusal). Hard to judge
+    reliably; start with explicit signals (failed tests twice, error loops).
+  - **Plan-then-build alias:** the first step after a user message goes to one model (Claude), every following
+    tool step of that turn to another (cheap) — like the council's planning-steps mode, with one model, no judge,
+    and without switching agents in opencode.
 - **QueueRouter's own tools** (for council members and the orchestrator; switched on per alias, counted in
   budgets, shown on the Requests page). Server-side only: anything touching the user's machine (files, shell,
   git) stays with the app; nothing that writes outside QueueRouter (posting, sending, deploying).
