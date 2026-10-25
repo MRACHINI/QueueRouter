@@ -55,8 +55,8 @@ def bare(model_id: str) -> tuple[str, bool]:
     tokens = [t for t in re.split(r"[-_\s:]+", name) if t]
     kept = [t for t in tokens if t.lower() not in _TAGS]
     tagged = len(kept) != len(tokens)
-    while len(kept) > 1 and _VERSION.fullmatch(kept[-1].lower()):
-        kept.pop()
+    while len(kept) > 1 and (_VERSION.fullmatch(kept[-1].lower()) or kept[-1].lower() == "free"):
+        kept.pop()  # "-free" / ":free": the same model, offered for free
     return _norm("".join(kept)), tagged
 
 
