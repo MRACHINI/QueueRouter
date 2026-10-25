@@ -1561,15 +1561,9 @@ def create_app(
             "month": month_view(client),
         }
 
-    @app.get("/v1/models")
-    async def models(request: Request):
-        """Union of all usable upstreams' model lists (cached; doesn't use a slot), limited to the
-        client's allowed models."""
-        client, denied = authenticate(request)
-        if denied:
-            return denied
-        if unavailable := not_configured():
-            return unavailable
+    async def model_entries(client: ClientKey) -> list[dict] | JSONResponse:
+        """Union of all usable upstreams' model lists (cached; doesn't use a slot) plus the aliases, limited
+        to the client's allowed models."""
         targets = [t for t in snapshot.upstreams.values() if t.usable]
         stale = [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s)]
         if stale:
@@ -1587,14 +1581,43 @@ def create_app(
         for alias in snapshot.aliases.values():
             merged[alias.name] = alias_entry(alias, everything.get(alias.target_model))
         allowed = client.policy.allowed_models
-        data = [
+        return [
             m
             for m in merged.values()
             if not allowed
             or m["id"] in allowed
             or (m["id"] in snapshot.aliases and snapshot.aliases[m["id"]].target_model in allowed)
         ]
-        return {"object": "list", "data": data}
+
+    @app.get("/v1/models")
+    async def models(request: Request):
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        if unavailable := not_configured():
+            return unavailable
+        data = await model_entries(client)
+        return data if isinstance(data, Response) else {"object": "list", "data": data}
+
+    @app.get("/v1/models/{model_id:path}")
+    async def model_info(model_id: str, request: Request):
+        """One model ("retrieve model" in the SDKs), answered from the same list; "model@upstream" names
+        the model on that upstream."""
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        if unavailable := not_configured():
+            return unavailable
+        data = await model_entries(client)
+        if isinstance(data, Response):
+            return data
+        bare, pin = split_pin(model_id)
+        found = next((m for m in data if m["id"] == model_id), None)
+        if found is None and pin and (not client.policy.allowed_models or bare in client.policy.allowed_models):
+            found = next(({**m, "id": model_id} for m in catalogs.models(pin[0]) if m["id"] == bare), None)
+        if found is None:
+            return error_response(f"The model '{model_id}' does not exist", 404, "model_not_found")
+        return found
 
     async def _never_disconnects() -> dict:
         await asyncio.Event().wait()
@@ -2738,9 +2761,15 @@ def create_app(
             await asyncio.to_thread(jobs_mod.finish_batch_if_done, store, batch_id)
         return jobs_mod.batch_view(store, await asyncio.to_thread(store.get_batch, batch_id))
 
+    def passthrough_allowed(path: str) -> bool:
+        allowed = (p.strip().strip("/").removeprefix("v1/") for p in cfg().passthrough_get_paths.split(","))
+        return any(path == p or path.startswith(f"{p}/") for p in allowed if p)
+
     @app.get("/v1/{path:path}")
     async def passthrough_get(path: str, request: Request):
-        """Non-generation GETs go to the first usable upstream and don't use a slot."""
+        """Other GETs: refused, unless the path is one the admin lets through (Settings): then it goes to the
+        first usable upstream, with that upstream's key, without a slot. Open by default it would let any
+        client read the provider account behind the key (credits, key details)."""
         _, denied = authenticate(request)
         if denied:
             return denied
@@ -2748,6 +2777,12 @@ def create_app(
             return unavailable
         if odd_path(path):
             return error_response("unsupported path", 404, "not_found")
+        if not passthrough_allowed(path):
+            return error_response(
+                f"GET /v1/{path} isn't served by QueueRouter (an admin can let it through to the provider in Settings)",
+                404,
+                "not_found",
+            )
         target = next(t for t in snapshot.upstreams.values() if t.usable)
         url = f"{target.upstream.base_url}/{path}" + (f"?{request.url.query}" if request.url.query else "")
         try:

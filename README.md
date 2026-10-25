@@ -306,6 +306,7 @@ Everything else is configured in the admin UI.
 | `POST /v1/messages` | **Anthropic Messages API** (Claude SDKs and tools), translated to chat completions; streaming, tools, images; `/v1/messages/count_tokens` estimates |
 | `POST /v1/responses` | **OpenAI Responses API** (Agents SDK, newer clients); streaming, function tools, structured output, `previous_response_id` (kept encrypted 7 days; `store: false` keeps nothing) |
 | `GET /v1/models` | all upstreams' models + aliases, filtered to the client's allowed models |
+| `GET /v1/models/{id}` | one model (aliases and `model@upstream` too); other `/v1/` GETs are refused unless listed in Settings → "GET paths passed to the provider" |
 | `GET /v1/queue` | queue depth, your client's queued/active, estimated wait |
 | `GET /v1/opencode-config` | generated opencode provider config for your key |
 | `GET /opencode/queuerouter.js` | opencode plugin (session/task tags, priorities, model list) |

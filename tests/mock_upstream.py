@@ -45,6 +45,11 @@ def create_mock(limit: int = 2) -> FastAPI:
         extra = [{"id": m, "object": "model"} for m in state.get("extra_models", [])]  # no size reported
         return {"object": "list", "data": [{"id": "mock-model", "object": "model", "max_model_len": 262144}, *extra]}
 
+    @app.get("/v1/credits")
+    async def credits(request: Request):
+        """A provider account endpoint (like OpenRouter's): only reachable when an admin lets it through."""
+        return {"credits": 5, "key": request.headers.get("authorization", "")}
+
     @app.get("/page")
     async def page():
         """A web page for QueueRouter's web_fetch."""

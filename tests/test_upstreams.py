@@ -224,3 +224,24 @@ async def test_review_fixes_request_path(make_stack, make_mock):
         assert r.status_code == 404
     assert odd_path("../admin") and odd_path("a/./b") and odd_path("a\\b") and not odd_path("models/x.y")
     assert header_value("m\r\nX-Evil: 1") == "mX-Evil: 1"
+
+
+async def test_get_passthrough_needs_a_listed_path(make_stack):
+    """Unknown /v1/ GETs are refused unless listed in Settings; "retrieve model" is answered by QueueRouter."""
+    stack = make_stack()
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        r = await c.get("/v1/credits", headers=stack.headers)
+        assert r.status_code == 404 and "Settings" in r.json()["error"]["message"]
+        stack.app.state.store.set_tunables({"passthrough_get_paths": " /v1/credits/ , other"}, "t")
+        stack.app.state.reload()
+        r = await c.get("/v1/credits", headers=stack.headers)
+        assert r.status_code == 200 and r.json() == {"credits": 5, "key": "Bearer upstream-secret"}
+        assert (await c.get("/v1/creditsx", headers=stack.headers)).status_code == 404
+
+        model = (await c.get("/v1/models/mock-model", headers=stack.headers)).json()
+        assert model["id"] == "mock-model" and model["max_model_len"] == 262144
+        missing = await c.get("/v1/models/no/such-model", headers=stack.headers)
+        assert missing.status_code == 404 and missing.json()["error"]["type"] == "model_not_found"
+        upstream = stack.app.state.store.list_upstreams()[0].name
+        pinned = (await c.get(f"/v1/models/mock-model@{upstream}", headers=stack.headers)).json()
+        assert pinned["id"] == f"mock-model@{upstream}"
