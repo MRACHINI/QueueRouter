@@ -153,3 +153,42 @@ async def test_responses_function_calls(make_stack):
 
     rows = stack.app.state.stats.recent
     assert any("api:responses" in (r.get("tags") or "") for r in rows)
+
+
+def test_review_fixes_adapters():
+    """Fable review: tool-calling replies are "tool_use" even when the server says "stop"; image tool results
+    are noted, not lost; offset-less job times are UTC; adapter endpoints can't run as jobs; passing refusals
+    are retried with back-off."""
+    import pytest
+
+    from app import anthropic_api, jobs
+
+    body = {
+        "id": "x",
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {
+                    "content": None,
+                    "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}],
+                },
+            }
+        ],
+    }
+    assert anthropic_api.from_chat(body, "m")["stop_reason"] == "tool_use"
+    request = {
+        "model": "m",
+        "max_tokens": 10,
+        "messages": [
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": [
+                {"type": "text", "text": "shot:"}, {"type": "image", "source": {"type": "base64", "data": "x"}}]}]},
+        ],
+    }  # fmt: skip
+    chat = anthropic_api.to_chat(request)
+    assert "image in this tool result was left out" in chat["messages"][0]["content"]
+    assert jobs.parse_time("2026-11-01T09:00:00") == jobs.parse_time("2026-11-01T09:00:00Z")
+    for endpoint in ("/v1/messages", "/v1/responses", "/v1/../admin"):
+        with pytest.raises(jobs.JobError):
+            jobs.check_endpoint(endpoint)
+    assert jobs.retry_after(429, 1) == 15 and jobs.retry_after(503, 3) == 60 and jobs.retry_after(400, 1) is None
+    assert jobs.retry_after(429, jobs.RETRY_ATTEMPTS) is None

@@ -278,18 +278,19 @@ async def stream(
     started = False
 
     def text_done() -> list[bytes]:
-        nonlocal text_item
+        nonlocal text_item, text
         if text_item is None:
             return []
         index = output.index(text_item)
         text_item.update(_message_item(text_item["id"], text))
         item_id, done = text_item["id"], text_item
         text_item = None
-        part = {"type": "output_text", "text": text, "annotations": []}
+        finished, text = text, ""  # a later message item (after a tool call) starts its own text
+        part = {"type": "output_text", "text": finished, "annotations": []}
         return [
             event(
                 "response.output_text.done",
-                {"item_id": item_id, "output_index": index, "content_index": 0, "text": text},
+                {"item_id": item_id, "output_index": index, "content_index": 0, "text": finished},
             ),
             event(
                 "response.content_part.done",
