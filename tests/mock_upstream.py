@@ -5,6 +5,7 @@ Request body extras (all optional) steer its behaviour:
   "mock_chunks":  number of content chunks to stream (default 5)
   "mock_status":  force this HTTP status
   "mock_fail":    fail this many times per "mock_key" with 503 before succeeding
+  state["daily_quota"]: answer every request with a daily-quota 429 (set on the mock's state)
 """
 
 from __future__ import annotations
@@ -180,7 +181,7 @@ def create_mock(limit: int = 2) -> FastAPI:
         model = body.get("model")
         state.setdefault("models", []).append(model)
         # Google-style 429s: a used-up daily quota, or a per-minute limit for the first N tries.
-        if (body.get("mock_429_models") or {}).get(model) == "daily":
+        if state.get("daily_quota") or (body.get("mock_429_models") or {}).get(model) == "daily":
             return JSONResponse(
                 _google_429("GenerateRequestsPerDayPerProjectPerModel-FreeTier", "45s"), status_code=429
             )
