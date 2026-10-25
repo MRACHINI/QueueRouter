@@ -1793,7 +1793,10 @@ def create_app(
         def progress(note: str, private: str = "") -> None:
             """A step of the work: streamed whole to the app; on the trace page ``private`` (excerpts of the
             conversation: tasks, queries, addresses) only for clients with content logging on."""
-            timeline.append([round(time.monotonic() - began_at, 1), (note + private if keep_content else note)[:400]])
+            # excerpts of the conversation are stored encrypted, apart from the note, and only with content logging
+            # on; the trace page shows them only to admins allowed to read logged content
+            excerpt = store.encrypt(private[:400]) if keep_content and private else ""
+            timeline.append([round(time.monotonic() - began_at, 1), note[:200], excerpt])
             if stream:
                 notes.put_nowait(note + private)
 

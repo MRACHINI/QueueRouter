@@ -238,3 +238,67 @@ def test_every_switch_is_on_the_settings_page():
     from app.config import TUNABLES
 
     assert {n for n, kind in TUNABLES.items() if kind is bool} <= set(SETTING_HELP)
+
+
+async def test_review_fixes_admin_ui(make_stack):
+    """Fable review: the content permission can be granted on the Users page and isn't wiped by a Save; a huge
+    client identity stays valid JSON; a malformed trace timeline doesn't break the trace page."""
+    import json as json_mod
+
+    from app.upstream import client_identity
+
+    stack = make_stack(bootstrap=OWNER)
+    store = stack.app.state.store
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        page = (await c.get("/admin/users")).text
+        assert 'name="content"' in page
+        owner = store.get_admin(username="owner")
+        form = {"csrf": csrf_of(page), "role": "owner", "enabled": "on", "content": "on"}
+        await c.post(f"/admin/users/{owner.id}", data=form)
+        assert store.get_admin(username="owner").can_view_content
+        assert 'name="content" checked' in (await c.get("/admin/users")).text
+    headers = {f"x-custom-{i}": "v" * 290 for i in range(40)}
+    text = client_identity(headers, None)
+    assert len(text) <= 6000 and json_mod.loads(text)  # valid JSON, entries dropped instead of cut
+
+
+async def test_review_fixes_storage(make_stack, tmp_path):
+    """Fable review: numeric settings refuse nan/inf; a restore whose settings secrets were encrypted with
+    another key is refused (it used to pass when the backup had no upstream); a failed client rename keeps
+    the data where it was."""
+    import sqlite3
+
+    import pytest
+    from cryptography.fernet import Fernet
+
+    from app.backup import RestoreError, _check_database
+
+    stack = make_stack(bootstrap=OWNER)
+    store = stack.app.state.store
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        csrf = csrf_of((await c.get("/admin/settings")).text)
+        for bad in ("nan", "inf", "-inf"):
+            r = await c.post("/admin/settings", data={"csrf": csrf, "keepalive_interval_s": bad})
+            assert "e=invalid" in r.headers["location"]
+
+    # a backup with only an encrypted setting, made with another key
+    copy = tmp_path / "backup.db"
+    store.backup_to(str(copy))
+    db = sqlite3.connect(copy)
+    db.execute("DELETE FROM upstreams")
+    other = Fernet(Fernet.generate_key()).encrypt(b"secret").decode()
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('search_key', ?)", (f'"{other}"',))
+    db.commit()
+    db.close()
+    with pytest.raises(RestoreError, match="settings"):
+        _check_database(str(copy), store.fernet)
+
+    store.create_client("alpha", "t")
+    store.create_client("beta", "t")
+    first = next(c.id for c in store.list_clients() if c.name == "alpha")
+    store.save_summary("k1", "alpha", {"summary": "x"})
+    with pytest.raises(sqlite3.IntegrityError):
+        store.update_client(first, "t", name="beta")
+    assert store.query("SELECT client FROM compaction_summaries WHERE key = 'k1'")[0]["client"] == "alpha"

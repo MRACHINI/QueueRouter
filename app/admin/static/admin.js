@@ -424,11 +424,15 @@ function liveDashboard(root) {
 
   // Live stream (server-sent events); polling every 2 s if it can't connect.
   let polling = null;
+  let refreshOnShow = false;
   const startPolling = () => {
     if (polling) return;
     refresh();
     polling = setInterval(refresh, 2000);
-    document.addEventListener("visibilitychange", refresh);
+    if (!refreshOnShow) { // once: the stream can drop and come back many times
+      refreshOnShow = true;
+      document.addEventListener("visibilitychange", () => { if (polling) refresh(); });
+    }
   };
   if (window.EventSource && root.dataset.stream) {
     const source = new EventSource(root.dataset.stream);

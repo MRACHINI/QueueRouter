@@ -128,13 +128,27 @@ def _check_database(path: str, fernet: Fernet) -> dict:
                 else "That isn't a QueueRouter database."
             )
         owners = db.execute("SELECT COUNT(*) FROM admin_users WHERE role = 'owner' AND enabled = 1").fetchone()[0]
-        sample = db.execute("SELECT api_key_enc FROM upstreams WHERE api_key_enc != '' LIMIT 1").fetchone()
-        if sample is not None:
+        # One encrypted value of each kind must open with the key that will be used: a backup with no upstream
+        # but, say, encrypted settings or 2FA secrets would otherwise pass and then fail at startup.
+        samples = (
+            ("upstream keys", "SELECT api_key_enc FROM upstreams WHERE api_key_enc LIKE 'gAAAAA%' LIMIT 1"),
+            ("settings", "SELECT value FROM settings WHERE value LIKE '%gAAAAA%' LIMIT 1"),
+            ("webhooks", "SELECT url FROM webhooks WHERE url LIKE 'gAAAAA%' LIMIT 1"),
+            ("two-factor secrets", "SELECT totp_secret FROM admin_users WHERE totp_secret LIKE 'gAAAAA%' LIMIT 1"),
+        )
+        for what, query in samples:
             try:
-                fernet.decrypt(sample[0].encode())
+                sample = db.execute(query).fetchone()
+            except sqlite3.Error:  # an older schema without that table or column
+                continue
+            if sample is None:
+                continue
+            token = str(sample[0]).strip('"')  # settings values are stored as JSON strings
+            try:
+                fernet.decrypt(token.encode())
             except InvalidToken as exc:
                 raise RestoreError(
-                    "The upstream keys in this backup were encrypted with a different key. Use a backup "
+                    f"The {what} in this backup were encrypted with a different key. Use a backup "
                     "that includes its encryption key (or set the matching SECRET_KEY)."
                 ) from exc
         return {
