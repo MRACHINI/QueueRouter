@@ -1229,6 +1229,7 @@ Traefik/Caddy without TRUSTED_PROXIES in .env: set it to the proxy's network (RE
 "untrusted_proxy" log line points it out. Supply chain: every Python package pinned with hashes (requirements.in →
 requirements.txt via pip-compile; the image installs with --require-hashes), the base image pinned by digest, and CI
 fails on fixable HIGH vulnerabilities as well as CRITICAL ones.
+v0.36.1: the same as v0.36.0, with its version number set (v0.36.0 reported itself as 0.35.3).
 
 ### Later (agreed, not scheduled)
 
