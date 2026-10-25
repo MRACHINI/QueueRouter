@@ -809,7 +809,7 @@ Agents SDK) against the mock upstream.
 | `SECRET_KEY` | auto-generated in `/data/secret.key` | encrypts secrets at rest |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | unset | optional unattended first admin |
 | `ADMIN_ALLOWED_IPS` | unset (any) | CIDR allow-list for `/admin` |
-| `TRUSTED_PROXIES` | `172.16.0.0/12` | trust `X-Forwarded-For` from these |
+| `TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | trust `X-Forwarded-For` / `X-Forwarded-Proto` from these (set to the reverse proxy's network) |
 | `PUBLIC_URL` | unset | used in UI and alert links |
 | `LOG_LEVEL` | `INFO` | |
 | `DOMAIN` | — | Traefik router rule / Caddy TLS |
@@ -1223,6 +1223,12 @@ schedule is switched off; "anonymous" reserved. Admin: inf hours/thresholds refu
 refused; viewers can't mark notifications read; content links only where they open; emptied numbers go back to their
 default; CSV cells can't start a formula; more than 20 allowed apps refused. Config: float clamps keep fractions; Groq
 context sizes and limits read; blank DATA_DIR/LOG_LEVEL/UPSTREAM_URL use defaults; the plugin retries a failed reload.
+v0.36.0: TRUSTED_PROXIES defaults to 127.0.0.1 and ::1 only (was every private range, so any LAN or Docker peer
+could claim any address in X-Forwarded-For and pass ADMIN_ALLOWED_IPS or dodge per-IP limits). Upgrading behind
+Traefik/Caddy without TRUSTED_PROXIES in .env: set it to the proxy's network (README → Behind a reverse proxy); an
+"untrusted_proxy" log line points it out. Supply chain: every Python package pinned with hashes (requirements.in →
+requirements.txt via pip-compile; the image installs with --require-hashes), the base image pinned by digest, and CI
+fails on fixable HIGH vulnerabilities as well as CRITICAL ones.
 
 ### Later (agreed, not scheduled)
 

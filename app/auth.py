@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ipaddress
+import json
+import logging
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -12,19 +14,45 @@ from fastapi import Request
 from .config import ClientKey, Network
 from .store import hash_key
 
+log = logging.getLogger("queuerouter")
+
 
 def client_ip(request: Request, trusted_proxies: Iterable[Network]) -> str:
     """Peer address, or the right-most untrusted X-Forwarded-For hop when behind our proxy."""
     trusted = tuple(trusted_proxies)
     peer = request.client.host if request.client else "unknown"
     forwarded = request.headers.get("x-forwarded-for")
-    if not forwarded or not ip_in(peer, trusted):
+    if not forwarded:
+        return peer
+    if not ip_in(peer, trusted):
+        _warn_untrusted(peer)
         return peer
     hops = [h.strip() for h in forwarded.split(",") if h.strip()]
     for hop in reversed(hops):
         if not ip_in(hop, trusted):
             return hop
     return hops[0] if hops else peer
+
+
+_warned: set[str] = set()
+
+
+def _warn_untrusted(peer: str) -> None:
+    """Once per address (a few at most): a reverse proxy left out of TRUSTED_PROXIES makes every client look
+    like the proxy, which is easy to miss."""
+    if peer in _warned or len(_warned) >= 10:
+        return
+    _warned.add(peer)
+    log.warning(
+        json.dumps(
+            {
+                "event": "untrusted_proxy",
+                "peer": peer,
+                "message": "X-Forwarded-For from an address not in TRUSTED_PROXIES was ignored; if this is your "
+                "reverse proxy, add its address or network to TRUSTED_PROXIES",
+            }
+        )
+    )
 
 
 def ip_in(ip: str, networks: Iterable[Network]) -> bool:

@@ -1,4 +1,5 @@
-FROM python:3.14-slim
+# Pinned by digest (Dependabot updates it): the image that was tested and scanned is the one that ships.
+FROM python:3.14-slim@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,7 +16,8 @@ VOLUME /data
 WORKDIR /srv
 COPY requirements.txt .
 # pip isn't needed at runtime; removing it also drops its own bundled (often older) certifi copy.
-RUN pip install -r requirements.txt && pip uninstall -y pip
+# Every package, dependencies included, is pinned with its hashes (requirements.in lists the direct ones).
+RUN pip install --require-hashes -r requirements.txt && pip uninstall -y pip
 COPY app ./app
 COPY docker/entrypoint.sh /usr/local/bin/queuerouter-entrypoint
 RUN chmod 755 /usr/local/bin/queuerouter-entrypoint

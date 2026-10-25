@@ -292,9 +292,28 @@ Everything else is configured in the admin UI.
 | `PUBLIC_URL` | — | used in setup hints and generated snippets |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | create the first owner without the setup token |
 | `ADMIN_ALLOWED_IPS` | any | CIDR allow-list for `/admin` (others get 404) |
-| `TRUSTED_PROXIES` | Docker/private ranges | where `X-Forwarded-For` is trusted |
+| `TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | your reverse proxy's address or network: only there are `X-Forwarded-For` / `-Proto` believed (see [Behind a reverse proxy](#behind-a-reverse-proxy)) |
 | `LOG_LEVEL` | `INFO` | |
 | `ARLIAI_API_KEY`, `UPSTREAM_URL`, `MAX_CONCURRENCY`, `ACCESS_KEYS`, … | — | **imported once** on the first start (see [.env.example](.env.example)) |
+
+### Behind a reverse proxy
+
+QueueRouter believes `X-Forwarded-For` (the client's real address, used for the admin allow-list, sign-in
+throttling and the Requests page) and `X-Forwarded-Proto` (secure cookies) only from addresses in
+`TRUSTED_PROXIES`. The default is the machine itself (`127.0.0.1/32,::1/128`), so without a proxy nobody can
+fake their address. Behind Traefik or Caddy in Docker, set it to the proxy's network, ideally that network's own
+subnet:
+
+```sh
+docker network inspect traefik --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'   # e.g. 172.18.0.0/16
+```
+
+```env
+TRUSTED_PROXIES=172.18.0.0/16
+```
+
+If it's missing, every request appears to come from the proxy (one address for everyone), and the log says so
+once: `untrusted_proxy`.
 
 ## API
 
