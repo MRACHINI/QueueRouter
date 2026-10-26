@@ -1260,6 +1260,10 @@ pool with a monthly price (ArliAI), the upstream's own price from its model list
 models.dev match; the highest when several upstreams serve a model. Plain aliases get their target's price; councils
 none (their extra calls aren't visible to opencode). Calls opencode can't see (councils, summaries) stay on the Usage
 page only.
+v0.39.1: images in opencode through QueueRouter. The plugin declared every model text-only, so opencode refused to
+send images (its read tool: "this model does not support image input"). Models now declare image input where a list
+says so: ArliAI's vlm, OpenRouter's architecture.input_modalities, a plain input_modalities, else OpenRouter's public
+list by name (so Synthetic's hf:deepseek-ai/DeepSeek-V4.1-Flash-1017 reads images); unknown stays text-only.
 
 ### Later (agreed, not scheduled)
 

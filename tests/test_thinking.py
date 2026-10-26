@@ -120,3 +120,23 @@ async def test_prices_for_opencode(make_stack):
         assert found["paid-model"]["cost"]["input"] == 0.0 and found["mock-model"]["cost"]["input"] == 2.0  # yours wins
         plain = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
         assert "cost" not in plain["paid-model"]  # the remote config opencode reads itself is unchanged
+
+
+async def test_image_input_for_opencode(make_stack):
+    """opencode refuses to send images to a model not declared to read them: declare it where the lists say so."""
+    assert thinking.takes_images({"vlm": True}) is True
+    assert thinking.takes_images({"architecture": {"input_modalities": ["text", "image"]}}) is True
+    assert thinking.takes_images({"input_modalities": ["text"]}) is False
+    assert thinking.takes_images({"id": "x"}) is None
+    reference = thinking.Reference()
+    items = [{"id": "deepseek/deepseek-v4.1-flash-1017", "hugging_face_id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+              "architecture": {"input_modalities": ["text", "image"]}}]  # fmt: skip
+    reference.use(thinking.Reference.slim(items), 1)
+    assert reference.images("hf:deepseek-ai/DeepSeek-V4.1-Flash-1017") is True
+
+    stack = make_stack(models_cache_s=0)
+    stack.mock["extra_model_entries"] = [{"id": "eyes", "object": "model", "vlm": True}]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        config = (await c.get("/v1/opencode-config?plugin=2", headers=stack.headers)).json()
+        models = config["provider"]["queuerouter"]["models"]
+        assert models["eyes"]["input"] == ["text", "image"] and "input" not in models["mock-model"]
