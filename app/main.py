@@ -33,6 +33,7 @@ from . import compaction as compaction_mod
 from . import council as council_mod
 from . import cron as cron_mod
 from . import jobs as jobs_mod
+from . import thinking as thinking_mod
 from . import tools as tools_mod
 from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
@@ -299,6 +300,10 @@ def create_app(
     prices.load_file()
     scores = ranking.Scores(os.path.join(bootstrap.data_dir, "model-scores.json"))  # strength, for opencode
     scores.load_file()
+    # OpenRouter's public model list (no key): thinking levels by model name, and index scores without a key
+    reference = thinking_mod.Reference(os.path.join(bootstrap.data_dir, "openrouter-models.json"))
+    reference.load_file()
+    reference_scores = ranking.Scores()  # the index from the reference list, used while there's no key
     circuits = Circuits()
     alerts = Alerts(store, lambda: app.state.client)
     guard = AuthGuard(snapshot.settings.auth_fail_limit, snapshot.settings.auth_block_s)
@@ -498,6 +503,7 @@ def create_app(
 
     price_attempt = [0.0]  # last catalog download attempt (at most hourly when failing)
     score_attempt = [0.0]  # the same for the strength index
+    reference_attempt = [0.0]  # and for the reference model list
     history: collections.deque[tuple[float, int, int]] = collections.deque(maxlen=HISTORY_POINTS)
 
     async def background() -> None:
@@ -552,6 +558,9 @@ def create_app(
             if cfg().price_catalog_enabled and prices.stale and time.time() - price_attempt[0] > 3600:
                 price_attempt[0] = time.time()
                 asyncio.ensure_future(prices.refresh(app.state.client))  # don't hold up the loop
+            if reference.stale and time.time() - reference_attempt[0] > 3600:
+                reference_attempt[0] = time.time()
+                asyncio.ensure_future(reference.refresh(app.state.client))
             if cfg().rank_key and scores.stale and time.time() - score_attempt[0] > 3600:
                 score_attempt[0] = time.time()
                 asyncio.ensure_future(scores.refresh(app.state.client, cfg().rank_key))
@@ -1004,7 +1013,7 @@ def create_app(
             elif name in snapshot.aliases:
                 info[name] = {"score": None, "source": "alias", "inherited": False}
                 first.append(name)
-            elif (hit := scores.score(name, index)) is not None:
+            elif (hit := index_book()[0].score(name, index)) is not None:
                 info[name] = {"score": hit[0], "source": hit[1], "inherited": hit[2]}
                 ranked.append((name, hit[0]))
             else:
@@ -1012,19 +1021,70 @@ def create_app(
                 rest.append(name)
         return ranking.numbered(ranked, first, rest), info
 
+    def index_book() -> tuple[ranking.Scores, str]:
+        """The strength index in use: Artificial Analysis's own (with a key), else its scores as OpenRouter's
+        public list carries them."""
+        if scores.models:
+            return scores, ""
+        if reference_scores.fetched_at != reference.fetched_at:
+            reference_scores.use(reference.index_entries(), reference.fetched_at)
+        return reference_scores, "OpenRouter"
+
+    def thinking_for(model_id: str, pairs: list, manual: dict[str, str]) -> thinking_mod.Thinking | None:
+        """A model's thinking levels: yours, else what the upstream's own list says, else the reference list
+        by name; shaped for how that upstream is asked (app/thinking.py)."""
+        if model_id in manual:
+            efforts = thinking_mod.ordered(manual[model_id].split(","))
+            return thinking_mod.Thinking(thinking_mod.levels(efforts), None, "yours") if efforts else None
+        for target, entry in pairs:
+            style = thinking_mod.style_of(target.upstream.base_url, entry)
+            if style == "none":
+                continue
+            found = thinking_mod.from_block(entry.get("reasoning"), entry.get("supported_parameters") or ())
+            source = target.upstream.name
+            if found is None or found == ("none", "high"):  # nothing, or only on / off: the reference may know more
+                ref = reference.thinking(model_id)
+                if ref is not None and (found is not None or style in ("openai", "openrouter")):
+                    found, source = ref, "OpenRouter (reference)"
+            if found is None or (style == "unknown" and source != target.upstream.name):
+                continue  # an unknown API: only levels its own list states
+            return thinking_mod.Thinking(thinking_mod.for_style(style, found), found[1], source)
+        return None
+
     def ranking_table() -> dict:
         """The Models page's strength section: every offered model and alias, its score and place."""
         names = sorted({m for ids in models_by_upstream().values() for m in ids} | set(snapshot.aliases))
         order, info = strength_order(names, store.list_model_scores())
         rows = [{"model": name, "prefix": prefix, **info[name]} for name, prefix in order]
+        book, via = index_book()
         return {
             "rows": rows,
             "index": cfg().rank_index,
             "enabled": cfg().opencode_rank,
             "has_key": bool(cfg().rank_key),
-            "fetched_at": scores.fetched_at,
-            "count": len(scores.models),
-            "error": scores.error,
+            "fetched_at": book.fetched_at,
+            "count": len(book.models),
+            "error": scores.error if book is scores or cfg().rank_key else reference.error,
+            "via": via,
+        }
+
+    def thinking_table() -> dict:
+        """The Models page's thinking section: per offered model, the levels found (and where), and yours."""
+        pairs: dict[str, list] = {}
+        for target in snapshot.upstreams.values():
+            if target.usable:
+                for entry in catalogs.models(target.id):
+                    pairs.setdefault(entry["id"], []).append((target, entry))
+        manual = store.list_model_thinking()
+        rows = []
+        for model in sorted(pairs):
+            found = thinking_for(model, pairs[model], {})
+            rows.append({"model": model, "found": found, "yours": manual.get(model)})
+        return {
+            "rows": rows,
+            "fetched_at": reference.fetched_at,
+            "count": len(reference.models),
+            "error": reference.error,
         }
 
     async def client_opencode_config(request: Request, client_name: str) -> dict | None:
@@ -1066,6 +1126,7 @@ def create_app(
             scores,
             refresh_scores,
             ranking_table,
+            thinking_table,
         ),
     )
 
@@ -1103,13 +1164,19 @@ def create_app(
         s = cfg()
         url = f"{target.upstream.base_url}/{adm.path}" + (f"?{adm.query}" if adm.query else "")
         body = adm.body
-        if target.upstream.params and body:  # this provider's own rules (e.g. fields it rejects)
+        thinking = bool(body) and b'"reasoning_effort"' in body  # asked the way this provider understands
+        if body and (target.upstream.params or thinking):  # this provider's own rules (e.g. fields it rejects)
             try:
                 payload = json.loads(body)
             except ValueError:
                 payload = None
             if isinstance(payload, dict):
                 apply_rules(payload, rules_of(target.upstream.params), {})
+                if thinking:
+                    entry = next(
+                        (m for m in catalogs.models(target.id, raw=True) if m.get("id") == payload.get("model")), None
+                    )
+                    thinking_mod.translate(payload, thinking_mod.style_of(target.upstream.base_url, entry))
                 body = json.dumps(payload).encode()
         headers = upstream_headers(adm.headers, target.api_key)
         original_ua = next((v for k, v in headers.items() if k.lower() == "user-agent"), "")
@@ -1463,8 +1530,9 @@ def create_app(
             host = request.headers.get("x-forwarded-host", host).split(",")[0].strip()
         return f"{scheme}://{host}"
 
-    async def opencode_models(client: ClientKey) -> dict[str, dict]:
-        """Every model and alias ``client`` may use, with opencode limits (plan caps applied)."""
+    async def opencode_models(client: ClientKey, with_thinking: bool = False) -> dict[str, dict]:
+        """Every model and alias ``client`` may use, with opencode limits (plan caps applied). ``with_thinking``:
+        each model's thinking levels too (for the plugin, which turns them into opencode's level selector)."""
         targets = [t for t in snapshot.upstreams.values() if t.usable]
         stale = [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s)]
         if stale:
@@ -1502,6 +1570,7 @@ def create_app(
             return limits_on(bare, [t for t in on if not ids or t.id in ids])
 
         offered_by = {m: [t.upstream.name for t, _ in pairs] for m, pairs in listed.items()}  # shown in opencode
+        manual_thinking = await asyncio.to_thread(store.list_model_thinking) if with_thinking else {}
         allowed = client.policy.allowed_models
         result: dict[str, dict] = {}
         for model_id in sorted(served):
@@ -1510,6 +1579,8 @@ def create_app(
                 limits = limits_on(model_id, serving)
                 name = with_providers(model_id, [t.upstream.name for t in serving])
                 result[model_id] = {"name": name, **({"limit": limits} if limits else {})}
+                if with_thinking and (levels := thinking_for(model_id, served[model_id], manual_thinking)):
+                    result[model_id]["thinking"] = {"variants": levels.variants, "default": levels.default}
         for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
             if allowed and alias.name not in allowed and alias.target_model not in allowed:
                 continue
@@ -1534,6 +1605,10 @@ def create_app(
                 ),
                 **({"limit": limits} if limits else {}),
             }
+            plain = alias.council == "off"  # a council's members and judge are asked as they are
+            pairs = [(t, e) for t, e in listed.get(target, []) if t in pinned]
+            if with_thinking and plain and (levels := thinking_for(target, pairs, manual_thinking)):
+                result[alias.name]["thinking"] = {"variants": levels.variants, "default": levels.default}
         if not cfg().opencode_rank:
             return result
         # opencode's desktop app sorts by name, so the order travels in the names; its terminal keeps this order
@@ -1558,7 +1633,8 @@ def create_app(
         if denied:
             return denied
         # keys in the order built (strongest first with ranking on): the terminal UI shows them in that order
-        body = json.dumps(provider_config(public_base(request), await opencode_models(client))).encode()
+        plugin = request.query_params.get("plugin") == "2"  # the opencode 2.x plugin also reads thinking levels
+        body = json.dumps(provider_config(public_base(request), await opencode_models(client, plugin))).encode()
         # An ETag lets the opencode plugin check for new models and aliases cheaply (304 when unchanged).
         etag = '"' + hashlib.sha256(body).hexdigest()[:20] + '"'
         if request.headers.get("if-none-match") == etag:

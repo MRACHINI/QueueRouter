@@ -1240,6 +1240,15 @@ with wins at a word boundary, so GLM-4.6-Derestricted-v5 inherits GLM-4.6 (shown
 isn't claimed by GLM-4. Migration 32: model_scores.
 v0.37.1: Settings checkboxes with long help text no longer shrink to a dot (the "Order models by strength" box couldn't
 be seen); "-free" / ":free" model names take their base model's score.
+v0.38.0: thinking levels. opencode 2.x shows a level selector next to models that can think (through the plugin;
+re-install it once): the levels come from the upstream's own list (OpenRouter's reasoning block: supported_efforts,
+default_effort, mandatory; ArliAI's "reasoning": true gives on/off), else from OpenRouter's public model list by name
+(read daily, no key), or from the administrator (Models → Thinking levels; "-" = no selector). opencode sends the
+choice as reasoning_effort, translated per upstream in build_request: OpenRouter gets reasoning.effort, vLLM servers
+(ArliAI, or engine "vllm") get chat_template_kwargs enable_thinking/thinking plus low/medium/high, OpenAI-style APIs
+get reasoning_effort as is, Claude's OpenAI-compatible endpoint (which ignores it) none. The remote config
+opencode reads itself is unchanged; the plugin asks /v1/opencode-config?plugin=2. Without an Artificial Analysis key the
+strength order uses the index scores in OpenRouter's public list. Migration 33: model_thinking.
 
 ### Later (agreed, not scheduled)
 

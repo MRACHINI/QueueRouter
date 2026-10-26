@@ -44,7 +44,7 @@ async function fetchModels(previousTag) {
   const key = readKey();
   if (!key) return null;
   try {
-    const res = await fetch(`${BASE}/v1/opencode-config`, {
+    const res = await fetch(`${BASE}/v1/opencode-config?plugin=2`, { // with thinking levels
       headers: { Authorization: `Bearer ${key}`, ...(previousTag ? { "If-None-Match": previousTag } : {}) },
       signal: AbortSignal.timeout(10000),
     });
@@ -113,6 +113,14 @@ async function setupCatalog(ctx) {
   return () => clearInterval(timer);
 }
 
+// A model's thinking levels as opencode 2.x variants: each sends its level as reasoning_effort.
+function variantsOf(item) {
+  const variants = Array.isArray(item?.thinking?.variants) ? item.thinking.variants : [];
+  return variants
+    .filter((v) => Array.isArray(v) && typeof v[0] === "string" && typeof v[1] === "string")
+    .map(([id, effort]) => ({ id, settings: { reasoningEffort: effort } }));
+}
+
 // opencode 2.x: QueueRouter as a provider with complete model definitions.
 function applyProviders(editor, current) {
   if (!current?.provider) return;
@@ -130,7 +138,7 @@ function applyProviders(editor, current) {
     name: item.name ?? id,
     package: OPENCODE2_PACKAGE,
     capabilities: { tools: true, input: ["text"], output: ["text"] },
-    variants: [],
+    variants: variantsOf(item), // the thinking levels selector (QueueRouter asks each upstream its own way)
     time: { released: 0 },
     cost: [],
     status: "active",

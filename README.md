@@ -281,12 +281,22 @@ curl -H "Authorization: Bearer <client key>" https://queuerouter.example.com/v1/
 Any OpenAI-compatible client works the same way: base URL `https://<domain>/v1`, API key = a
 client key.
 
+### Thinking levels
+
+Models that can think get a level selector in opencode 2.x (next to the model; ctrl+t in the terminal): `none`,
+`low`, `high`… as the model offers them, or `off` / `thinking` for models that can only switch thinking on and off.
+QueueRouter finds the levels in each upstream's model list (OpenRouter lists them; ArliAI says which models think)
+or, by name, in OpenRouter's public list, and asks each upstream its own way (OpenRouter `reasoning.effort`, ArliAI's
+chat-template switch, OpenAI-style `reasoning_effort`). Correct a model on **Models → Thinking levels**. Needs the
+QueueRouter plugin (re-install it once after upgrading to 0.38).
+
 ### Models in strength order
 
 Turn on **Settings → opencode → Order models by strength** and the opencode model list is numbered: your aliases
 first (`00 · smart`), then the strongest models (`01 · …`, `02 · …`), then models without a score. Scores come from
-the [Artificial Analysis](https://artificialanalysis.ai/) index (intelligence, coding or agentic; add a free API key
-in Settings, it's read once a day), or from your own score per model on the **Models** page, which wins. Fine-tunes
+the [Artificial Analysis](https://artificialanalysis.ai/) index (intelligence, coding or agentic): as published in
+OpenRouter's public model list with no setup, or the full index with a free API key in Settings (read once a day), or
+from your own score per model on the **Models** page, which wins. Fine-tunes
 and renamed variants get their base model's score: `GLM-4.6-Derestricted-v5` ranks as GLM-4.6.
 
 ## Environment variables (bootstrap only)

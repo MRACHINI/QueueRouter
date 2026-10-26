@@ -43,6 +43,7 @@ def create_mock(limit: int = 2) -> FastAPI:
     @app.get("/v1/models")
     async def models():
         extra = [{"id": m, "object": "model"} for m in state.get("extra_models", [])]  # no size reported
+        extra += state.get("extra_model_entries", [])  # whole entries, e.g. {"id", "reasoning": true, "engine"}
         return {"object": "list", "data": [{"id": "mock-model", "object": "model", "max_model_len": 262144}, *extra]}
 
     @app.get("/v1/credits")
