@@ -137,6 +137,19 @@ def translate(payload: dict, style: str) -> bool:
     return True
 
 
+def takes_images(entry: dict | None) -> bool | None:
+    """Whether a model list entry says the model reads images (True / False), or None when it doesn't say:
+    ArliAI's ``vlm``, OpenRouter's ``architecture.input_modalities``, a plain ``input_modalities``."""
+    entry = entry or {}
+    if isinstance(entry.get("vlm"), bool):
+        return entry["vlm"]
+    for holder in (entry.get("architecture"), entry):
+        modalities = holder.get("input_modalities") if isinstance(holder, dict) else None
+        if isinstance(modalities, list):
+            return "image" in modalities
+    return None
+
+
 class Reference:
     """OpenRouter's public model list, slimmed: thinking levels and Artificial Analysis scores per model."""
 
@@ -171,6 +184,7 @@ class Reference:
                     "hf": str(item.get("hugging_face_id") or ""),
                     "reasoning": item.get("reasoning") if isinstance(item.get("reasoning"), dict) else None,
                     "params": [p for p in params if isinstance(p, str)] if isinstance(params, list) else [],
+                    "images": takes_images(item),
                     "scores": scores,
                 }
             )
@@ -178,7 +192,8 @@ class Reference:
 
     def use(self, models: list[dict], fetched_at: float) -> None:
         self.models, self.fetched_at = models, fetched_at
-        self.names = NameIndex(((m["id"], m["hf"], m["name"]), m) for m in models)
+        # by the name without its organisation ("deepseek/…", "deepseek-ai/…") as well as the display name
+        self.names = NameIndex(((m["id"].rsplit("/", 1)[-1], m["hf"].rsplit("/", 1)[-1], m["name"]), m) for m in models)
 
     def load_file(self) -> bool:
         if not self.path or not os.path.exists(self.path):
@@ -187,6 +202,8 @@ class Reference:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             self.use(list(data["models"]), float(data["fetched_at"]))
+            if self.models and "images" not in self.models[0]:  # saved by an older version: read it again soon
+                self.fetched_at = 0.0
             return True
         except (OSError, ValueError, KeyError, TypeError) as exc:
             log.warning(json.dumps({"event": "reference_models_unreadable", "error": repr(exc)[:200]}))
@@ -230,6 +247,12 @@ class Reference:
             if (levels_ := from_block(entry["reasoning"], entry["params"])) is not None:
                 return levels_
         return None
+
+    def images(self, model_id: str) -> bool | None:
+        """Whether a model reads images, by name (None: not in the list)."""
+        found = self.names.find(model_id)
+        said = [m.get("images") for m in (found[0] if found else [])]
+        return True if True in said else False if False in said else None
 
     def index_entries(self) -> list[dict]:
         """The Artificial Analysis scores in the strength index's own shape (app/ranking.py Scores)."""

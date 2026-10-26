@@ -83,7 +83,7 @@ function applyCatalog(catalog, current) {
     catalog.model.update(PROVIDER, id, (model) => {
       model.name = info.name ?? id;
       model.api = { id, type: "aisdk", package: "@ai-sdk/openai-compatible" }; // URL and key from the provider
-      model.capabilities = { tools: true, input: ["text"], output: ["text"] };
+      model.capabilities = { tools: true, input: inputOf(info), output: ["text"] };
       model.limit = { context: info.limit?.context ?? DEFAULT_CONTEXT, output: info.limit?.output ?? DEFAULT_OUTPUT };
       model.status = "active";
       model.enabled = true;
@@ -111,6 +111,11 @@ async function setupCatalog(ctx) {
     }
   });
   return () => clearInterval(timer);
+}
+
+// What a model reads: text, plus images where QueueRouter knows it does (opencode refuses images otherwise).
+function inputOf(item) {
+  return Array.isArray(item?.input) && item.input.includes("image") ? ["text", "image"] : ["text"];
 }
 
 // A model's price (USD per million tokens) as opencode 2.x costs; none when QueueRouter doesn't know it.
@@ -146,7 +151,7 @@ function applyProviders(editor, current) {
     providerID: PROVIDER,
     name: item.name ?? id,
     package: OPENCODE2_PACKAGE,
-    capabilities: { tools: true, input: ["text"], output: ["text"] },
+    capabilities: { tools: true, input: inputOf(item), output: ["text"] }, // images where the model reads them
     variants: variantsOf(item), // the thinking levels selector (QueueRouter asks each upstream its own way)
     time: { released: 0 },
     cost: costOf(item), // QueueRouter's price: opencode works out the session cost from it

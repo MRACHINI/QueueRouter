@@ -1610,6 +1610,8 @@ def create_app(
                     result[model_id]["thinking"] = {"variants": levels.variants, "default": levels.default}
                 if with_thinking and (price := model_price(model_id, served[model_id], overrides)):
                     result[model_id]["cost"] = price_json(price)
+                if with_thinking and reads_images(model_id, served[model_id]):
+                    result[model_id]["input"] = ["text", "image"]
         for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
             if allowed and alias.name not in allowed and alias.target_model not in allowed:
                 continue
@@ -1641,6 +1643,8 @@ def create_app(
             # a council makes several calls opencode never sees: no price rather than a low one
             if with_thinking and plain and (price := model_price(target, pairs, overrides)):
                 result[alias.name]["cost"] = price_json(price)
+            if with_thinking and reads_images(target, pairs):
+                result[alias.name]["input"] = ["text", "image"]
         if not cfg().opencode_rank:
             return result
         # opencode's desktop app sorts by name, so the order travels in the names; its terminal keeps this order
@@ -1649,6 +1653,16 @@ def create_app(
             name: {**result[name], "name": f"{prefix} · {result[name]['name']}" if prefix else result[name]["name"]}
             for name, prefix in order
         }
+
+    def reads_images(model: str, pairs: list) -> bool:
+        """Whether opencode may send a model images: an upstream's own list says so, else the reference list by
+        name. Unknown: no (opencode then refuses images for it, rather than the provider failing on them)."""
+        said = [thinking_mod.takes_images(e) for _, e in pairs]
+        if True in said:
+            return True
+        if False in said:
+            return False
+        return bool(reference.images(model))
 
     def price_json(price: Price) -> dict:
         """USD per million tokens, for the plugin (opencode works out the session cost from it)."""
