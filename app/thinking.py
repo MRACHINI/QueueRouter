@@ -79,13 +79,18 @@ def from_block(block, params=()) -> tuple[tuple[str, ...], str | None] | None:
 
 
 def style_of(base_url: str, entry: dict | None) -> str:
-    """How an upstream is asked for a level: openrouter | vllm | openai | none (ignored) | unknown."""
+    """How an upstream is asked for a level: openrouter | vllm | openai | none (ignored: no levels offered, the
+    field is dropped) | fixed (no levels offered, requests passed on as they are) | unknown."""
     url = (base_url or "").lower()
     if "openrouter.ai" in url:
         return "openrouter"
     if "api.anthropic.com" in url:
         return "none"  # its OpenAI-compatible endpoint ignores reasoning_effort
-    if "arliai.com" in url or (entry or {}).get("engine") == "vllm":
+    if "arliai.com" in url:
+        # tested live (2026-10): its reasoning models think whatever is sent (chat-template switch, reasoning,
+        # thinking, reasoning_effort, /no_think), and effort makes no steady difference: a selector would mislead
+        return "fixed"
+    if (entry or {}).get("engine") == "vllm":
         return "vllm"
     if "api.openai.com" in url or "generativelanguage.googleapis.com" in url or "api.groq.com" in url:
         return "openai"
@@ -108,7 +113,7 @@ def for_style(style: str, found: tuple[tuple[str, ...], str | None]) -> tuple[tu
 def translate(payload: dict, style: str) -> bool:
     """Rewrite ``reasoning_effort`` for an upstream of ``style``; True when something changed."""
     effort = payload.get("reasoning_effort")
-    if not isinstance(effort, str) or style in ("openai", "unknown"):
+    if not isinstance(effort, str) or style in ("openai", "unknown", "fixed"):
         return False
     effort = effort.lower()
     if style == "none":

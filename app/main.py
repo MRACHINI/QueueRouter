@@ -1038,7 +1038,7 @@ def create_app(
             return thinking_mod.Thinking(thinking_mod.levels(efforts), None, "yours") if efforts else None
         for target, entry in pairs:
             style = thinking_mod.style_of(target.upstream.base_url, entry)
-            if style == "none":
+            if style in ("none", "fixed"):  # no levels to offer there
                 continue
             found = thinking_mod.from_block(entry.get("reasoning"), entry.get("supported_parameters") or ())
             source = target.upstream.name

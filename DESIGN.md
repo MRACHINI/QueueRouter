@@ -1242,13 +1242,18 @@ v0.37.1: Settings checkboxes with long help text no longer shrink to a dot (the 
 be seen); "-free" / ":free" model names take their base model's score.
 v0.38.0: thinking levels. opencode 2.x shows a level selector next to models that can think (through the plugin;
 re-install it once): the levels come from the upstream's own list (OpenRouter's reasoning block: supported_efforts,
-default_effort, mandatory; ArliAI's "reasoning": true gives on/off), else from OpenRouter's public model list by name
+default_effort, mandatory; ArliAI: none, see v0.38.1), else from OpenRouter's public model list by name
 (read daily, no key), or from the administrator (Models → Thinking levels; "-" = no selector). opencode sends the
 choice as reasoning_effort, translated per upstream in build_request: OpenRouter gets reasoning.effort, vLLM servers
 (ArliAI, or engine "vllm") get chat_template_kwargs enable_thinking/thinking plus low/medium/high, OpenAI-style APIs
 get reasoning_effort as is, Claude's OpenAI-compatible endpoint (which ignores it) none. The remote config
 opencode reads itself is unchanged; the plugin asks /v1/opencode-config?plugin=2. Without an Artificial Analysis key the
 strength order uses the index scores in OpenRouter's public list. Migration 33: model_thinking.
+v0.38.1: no thinking levels for ArliAI. Tested live through QueueRouter and directly: DeepSeek-V4.1-Flash-1017 and
+Qwen3.8-Flash-Next think whatever is sent (chat_template_kwargs enable_thinking/thinking, top-level enable_thinking,
+reasoning {enabled/effort}, thinking {type: disabled}, reasoning_effort none/low, /no_think), with 400-6,000 thinking
+tokens for the same prompt either way. ArliAI is style "fixed": nothing offered, requests passed on unchanged. Other vLLM
+servers (engine "vllm") keep the chat-template switch.
 
 ### Later (agreed, not scheduled)
 
