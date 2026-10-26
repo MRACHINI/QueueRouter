@@ -86,7 +86,7 @@ async def test_opencode_list_is_numbered_by_strength(make_stack):
         assert models["small-model"]["name"].startswith("02 · small-model")
         assert not models["other-model"]["name"][0].isdigit()
         page = (await c.get("/admin/models")).text
-        assert "Strength order in opencode" in page and "Artificial Analysis" in page
+        assert "Strength order in opencode" in page and "Artificial Analysis" in page and "Thinking levels" in page
 
 
 async def test_settings_page_saves_the_ranking_switch(make_stack):

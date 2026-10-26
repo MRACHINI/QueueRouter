@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Iterable
 
 import httpx
 
@@ -66,6 +67,35 @@ def _index_keys(text: str) -> set[str]:
     return {k for k in (_norm(text), _norm(plain)) if k}
 
 
+class NameIndex:
+    """Entries found by a model's name, loosely: exactly first (versions and dates kept), else the longest entry
+    name the model's bare name starts with, at a word boundary (GLM-4 doesn't claim GLM-4.6)."""
+
+    def __init__(self, entries: Iterable[tuple[Iterable[str], dict]] = ()) -> None:
+        keys: dict[str, list[dict]] = {}
+        for texts, entry in entries:
+            for text in texts:
+                for key in _index_keys(text or ""):
+                    if entry not in keys.setdefault(key, []):
+                        keys[key].append(entry)
+        self._exact = keys
+        self._keys = sorted(keys.items(), key=lambda x: -len(x[0]))
+
+    def find(self, model_id: str) -> tuple[list[dict], bool] | None:
+        """(the entries of the best name, inherited?) — inherited when the model is a variant (a fine-tune,
+        another version) of what was found."""
+        whole = _norm(model_id.rsplit("/", 1)[-1])
+        if whole in self._exact:
+            return self._exact[whole], False
+        name, tagged = bare(model_id)
+        if not name:
+            return None
+        for key, entries in self._keys:
+            if name.startswith(key) and not name[len(key) : len(key) + 1].isdigit():
+                return entries, tagged or name != key
+        return None
+
+
 class Scores:
     """The index, kept in a small JSON file in the data directory between restarts."""
 
@@ -74,17 +104,11 @@ class Scores:
         self.models: list[dict] = []  # {"name", "slug", "creator", "scores": {index: value}}
         self.fetched_at = 0.0
         self.error = ""
-        self._keys: list[tuple[str, dict]] = []  # (bare key, entry), longest first
+        self.names = NameIndex()
 
     def use(self, models: list[dict], fetched_at: float) -> None:
         self.models, self.fetched_at = models, fetched_at
-        keys = {}
-        for entry in models:
-            for text in (entry.get("slug") or "", entry.get("name") or ""):
-                for key in _index_keys(text):
-                    if entry not in keys.setdefault(key, []):
-                        keys[key].append(entry)
-        self._keys = sorted(((k, e) for k, entries in keys.items() for e in entries), key=lambda x: -len(x[0]))
+        self.names = NameIndex(((e.get("slug"), e.get("name")), e) for e in models)
 
     def load_file(self) -> bool:
         if not self.path or not os.path.exists(self.path):
@@ -155,33 +179,15 @@ class Scores:
             json.dump({"fetched_at": self.fetched_at, "models": self.models}, f)
         os.replace(tmp, self.path)
 
-    def match(self, model_id: str) -> tuple[dict, bool] | None:
-        """(the index entry for ``model_id``, inherited?) — inherited when the model is a variant of it (a
-        fine-tune, another version). The longest index name the bare name starts with, at a word boundary
-        (GLM-4 doesn't claim GLM-4.6); several entries of one name (reasoning or not): the strongest."""
-        name, tagged = bare(model_id)
-        if not name:
-            return None
-        best: list[dict] = []
-        best_key = ""
-        for key, entry in self._keys:
-            if best_key and len(key) < len(best_key):
-                break
-            if name.startswith(key) and not name[len(key) : len(key) + 1].isdigit():
-                best_key = key
-                best.append(entry)
-        if not best:
-            return None
-        entry = max(best, key=lambda e: max(e["scores"].values()))
-        return entry, tagged or name != best_key
-
     def score(self, model_id: str, index: str) -> tuple[float, str, bool] | None:
-        """(score, the index's name for it, inherited?) or None."""
-        found = self.match(model_id)
-        if found is None or index not in found[0]["scores"]:
+        """(score, the index's name for it, inherited?) or None. Several entries of one name (reasoning or
+        not): the strongest."""
+        found = self.names.find(model_id)
+        scored = [e for e in (found[0] if found else []) if index in e["scores"]]
+        if not scored:
             return None
-        entry, inherited = found
-        return entry["scores"][index], entry["name"], inherited
+        entry = max(scored, key=lambda e: e["scores"][index])
+        return entry["scores"][index], entry["name"], found[1]
 
 
 def numbered(ranked: list[tuple[str, float]], aliases: list[str], unranked: list[str]) -> list[tuple[str, str]]:

@@ -430,6 +430,14 @@ MIGRATIONS: list[str] = [
         updated_at REAL NOT NULL
     );
     """,
+    # 33: the administrator's own thinking levels per model ("none,low,high", or "-" for no selector; app/thinking.py)
+    """
+    CREATE TABLE model_thinking (
+        model TEXT PRIMARY KEY,
+        levels TEXT NOT NULL,
+        updated_at REAL NOT NULL
+    );
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -1229,6 +1237,22 @@ class Store:
                 (upstream_id, model),
             )
         self.audit(actor, "model_limit.forget", model, {"upstream_id": upstream_id})
+
+    def list_model_thinking(self) -> dict[str, str]:
+        return {r["model"]: r["levels"] for r in self.query("SELECT model, levels FROM model_thinking")}
+
+    def set_model_thinking(self, model: str, actor: str, levels: str | None) -> None:
+        """The administrator's thinking levels for a model (None removes them: detection decides again)."""
+        with self.tx() as db:
+            if levels is None:
+                db.execute("DELETE FROM model_thinking WHERE model = ?", (model,))
+            else:
+                db.execute(
+                    "INSERT INTO model_thinking (model, levels, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(model) DO UPDATE SET levels = excluded.levels, updated_at = excluded.updated_at",
+                    (model, levels, time.time()),
+                )
+        self.audit(actor, "model.thinking", model, {"levels": levels})
 
     def list_model_scores(self) -> dict[str, float]:
         return {r["model"]: r["score"] for r in self.query("SELECT model, score FROM model_scores")}

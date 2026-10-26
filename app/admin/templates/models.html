@@ -106,7 +106,8 @@ when you set one here (same scale as the index; it can also move an alias into t
 fine-tunes get their base model's score (marked "from …").</p>
 <div class="card row wrap">
   <span class="small">
-  {% if not ranking.has_key %}No Artificial Analysis key yet: add one in <a href="/admin/settings">Settings</a> (free), or set scores by hand.
+  {% if ranking.via and ranking.fetched_at %}Index: {{ ranking.count }} models with Artificial Analysis scores from OpenRouter's public list (no key needed), read <time data-ts="{{ ranking.fetched_at }}">{{ ranking.fetched_at | int }}</time>. An Artificial Analysis key in <a href="/admin/settings">Settings</a> gives the full index.
+  {% elif ranking.via %}No index yet: OpenRouter's public list is read shortly after start (or add an Artificial Analysis key in <a href="/admin/settings">Settings</a>).
   {% elif ranking.fetched_at %}Index: {{ ranking.count }} models, read <time data-ts="{{ ranking.fetched_at }}">{{ ranking.fetched_at | int }}</time>.
   {% else %}Index not read yet.{% endif %}
   {% if ranking.error %}<span class="badge">last refresh failed: {{ ranking.error }}</span>{% endif %}
@@ -150,7 +151,48 @@ fine-tunes get their base model's score (marked "from …").</p>
   </table>
   </div>
 </details>
-<p class="muted small">Index scores: <a href="{{ credit[1] }}" rel="noopener" target="_blank">{{ credit[0] }}</a>.</p>
+<p class="muted small">Index scores: <a href="{{ credit[1] }}" rel="noopener" target="_blank">{{ credit[0] }}</a>{% if ranking.via %} (as published in OpenRouter's model list){% endif %}.</p>
+
+<h2 id="thinking">Thinking levels</h2>
+<p class="muted small">Levels opencode offers next to a model (low / medium / high…), so you can choose how much it thinks
+before answering. They come from the upstream's own model list (OpenRouter states them; ArliAI says whether a model
+thinks), else from OpenRouter's public list by name. QueueRouter asks each upstream its own way: OpenRouter
+<span class="mono">reasoning.effort</span>, ArliAI and other vLLM servers the chat template's thinking switch (and
+low/medium/high), OpenAI-style APIs <span class="mono">reasoning_effort</span>. Claude's OpenAI-compatible endpoint
+ignores levels, so none are offered there. Set your own list to correct a model (e.g. <span class="mono">none, low,
+high</span>), or <span class="mono">-</span> for no selector; blank goes back to what's detected. opencode shows them
+through the QueueRouter plugin (opencode 2.x; re-install the plugin once to get this).</p>
+<details class="card" {% if thinking.rows | selectattr("yours") | list %}open{% endif %}>
+  <summary><strong>{{ thinking.rows | length }} models</strong>
+    <span class="badge">{{ thinking.rows | selectattr("found") | list | length }} with levels</span>
+    {% if thinking.error %}<span class="badge">reference list: {{ thinking.error }}</span>{% endif %}</summary>
+  <div class="table-wrap">
+  <table class="cards">
+    <thead><tr><th>Model</th><th>Detected</th><th>Yours</th></tr></thead>
+    <tbody>
+    {% for r in thinking.rows %}
+    <tr>
+      <td data-label="Model" class="mono small wrap-any">{{ r.model }}</td>
+      <td data-label="Detected" class="small">
+        {% if r.found %}{{ r.found.summary }} <span class="muted">· {{ r.found.source }}</span>
+        {% else %}<span class="muted">none</span>{% endif %}</td>
+      <td data-label="Yours">
+        <form method="post" action="/admin/model-thinking" class="row wrap">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="model" value="{{ r.model }}">
+          <input name="levels" value="{{ (r.yours or '') | replace(',', ', ') }}" placeholder="e.g. none, low, high" aria-label="Your levels" class="grow">
+          <button type="submit" class="secondary">Save</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3" class="muted">No models loaded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</details>
+<p class="muted small">Levels you can use: {{ efforts | join(", ") }}.</p>
 
 <h2 id="pricing">Reference prices</h2>
 <p class="muted small">What your tokens would cost at official API prices (USD per million tokens), used for the

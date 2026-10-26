@@ -50,6 +50,7 @@ from ..ranking import INDEXES as RANK_INDEXES
 from ..slots import STRATEGIES
 from ..state import MODES
 from ..store import ROLES, Store
+from ..thinking import EFFORTS as THINKING_EFFORTS
 from ..upstream import UA_MODES
 from ..websearch import PROVIDERS as SEARCH_PROVIDERS
 from .charts import usage_charts
@@ -316,6 +317,7 @@ class AdminContext:
     scores: Scores
     refresh_scores: Callable[[], Awaitable[bool]]
     ranking_table: Callable[[], dict]
+    thinking_table: Callable[[], dict]
 
 
 class NeedLogin(Exception):
@@ -1376,6 +1378,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             catalog_age_h=round((time.time() - ctx.prices.fetched_at) / 3600, 1) if ctx.prices.fetched_at else None,
             contexts=ctx.context_table(),
             ranking=ctx.ranking_table(),
+            thinking=ctx.thinking_table(),
+            efforts=THINKING_EFFORTS,
             rank_indexes=RANK_INDEXES,
             credit=(CREDIT, CREDIT_URL),
         )
@@ -1423,6 +1427,17 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         except ValueError:
             return back("/admin/models#ranking", error="invalid")
         return back("/admin/models#ranking", "saved")
+
+    @app.post("/admin/model-thinking")
+    async def model_thinking_update(request: Request):
+        session, form = await require_post(request, "admin")
+        model = str(form.get("model", "")).strip()
+        levels = " ".join(str(form.get("levels", "")).lower().replace(",", " ").split())
+        if not model or len(model) > 200 or any(e not in (*THINKING_EFFORTS, "-") for e in levels.split()):
+            return back("/admin/models#thinking", error="invalid")
+        # blank: detection decides again; "-": no level selector for this model
+        store.set_model_thinking(model, session.user.username, ",".join(levels.split()) if levels else None)
+        return back("/admin/models#thinking", "saved")
 
     @app.post("/admin/model-scores/refresh")
     async def model_scores_refresh(request: Request):
