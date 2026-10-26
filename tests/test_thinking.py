@@ -89,3 +89,34 @@ async def test_opencode_variants_and_translation(make_stack):
         store.set_model_thinking("think-model", "t", "-")
         config = (await c.get("/v1/opencode-config?plugin=2", headers=stack.headers)).json()
         assert "thinking" not in config["provider"]["queuerouter"]["models"]["think-model"]
+
+
+async def test_prices_for_opencode(make_stack):
+    """The plugin gets each model's price: the upstream's own (OpenRouter-style list), yours, or nothing extra on
+    a monthly plan; the highest when several upstreams serve it."""
+    stack = make_stack(models_cache_s=0)
+    stack.mock["extra_model_entries"] = [
+        {"id": "paid-model", "object": "model", "pricing": {"prompt": "0.000001", "completion": "0.000004"}},
+        {"id": "free-model", "object": "model", "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "router", "object": "model", "pricing": {"prompt": "-1", "completion": "-1"}},
+    ]
+    store = stack.app.state.store
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+
+        async def models():
+            config = (await c.get("/v1/opencode-config?plugin=2", headers=stack.headers)).json()
+            return config["provider"]["queuerouter"]["models"]
+
+        found = await models()
+        assert found["paid-model"]["cost"] == {"input": 1.0, "output": 4.0, "cache_read": 1.0}
+        assert found["free-model"]["cost"] == {"input": 0.0, "output": 0.0, "cache_read": 0.0}
+        assert "cost" not in found["router"] and "cost" not in found["mock-model"]  # unknown: opencode shows $0
+        store.set_model_price("mock-model", "t", None, 2.0, 8.0, 0.5)
+        assert (await models())["mock-model"]["cost"] == {"input": 2.0, "output": 8.0, "cache_read": 0.5}
+        pool = store.list_pools()[0]
+        store.update_pool(pool.id, "t", monthly_price=20.0)  # a monthly plan: nothing extra per request
+        stack.app.state.reload()
+        found = await models()
+        assert found["paid-model"]["cost"]["input"] == 0.0 and found["mock-model"]["cost"]["input"] == 2.0  # yours wins
+        plain = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
+        assert "cost" not in plain["paid-model"]  # the remote config opencode reads itself is unchanged

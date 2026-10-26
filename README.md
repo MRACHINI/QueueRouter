@@ -290,6 +290,13 @@ list, and asks each upstream its own way (OpenRouter `reasoning.effort`, a self-
 switch, OpenAI-style `reasoning_effort`). ArliAI's models get none: they think whatever is sent. Correct a model on **Models → Thinking levels**. Needs the
 QueueRouter plugin (re-install it once after upgrading to 0.38).
 
+### Cost in opencode
+
+opencode shows a session cost next to the context size, worked out from each model's price. Through the plugin
+QueueRouter gives it that price: yours (**Models → Reference prices**), else nothing extra on a pool with a monthly
+price (e.g. ArliAI), the upstream's own price (OpenRouter), or the models.dev match, the highest when several
+upstreams serve a model. Councils and summaries make calls opencode can't see; the **Usage** page counts everything.
+
 ### Models in strength order
 
 Turn on **Settings → opencode → Order models by strength** and the opencode model list is numbered: your aliases
