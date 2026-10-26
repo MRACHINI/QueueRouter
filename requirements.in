@@ -1,6 +1,6 @@
 # Direct dependencies. requirements.txt is generated from this file with hashes:
 #   pip-compile --generate-hashes --allow-unsafe --strip-extras -o requirements.txt requirements.in
-fastapi==0.146.0
+fastapi==0.161.1
 starlette==1.9.0
 pydantic==2.14.1
 uvicorn[standard]==0.54.0
