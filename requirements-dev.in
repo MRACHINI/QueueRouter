@@ -4,6 +4,6 @@
 -c requirements.txt
 pytest==9.1.1
 pytest-asyncio==1.4.0
-ruff==0.17.1
+ruff==0.17.2
 anthropic==1.15.0
 openai==3.35.1
