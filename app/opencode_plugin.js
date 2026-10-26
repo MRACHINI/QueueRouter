@@ -113,6 +113,15 @@ async function setupCatalog(ctx) {
   return () => clearInterval(timer);
 }
 
+// A model's price (USD per million tokens) as opencode 2.x costs; none when QueueRouter doesn't know it.
+function costOf(item) {
+  const c = item?.cost;
+  const ok = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+  if (!c || !ok(c.input) || !ok(c.output)) return [];
+  const read = ok(c.cache_read) ? c.cache_read : c.input;
+  return [{ input: c.input, output: c.output, cache: { read, write: c.input } }];
+}
+
 // A model's thinking levels as opencode 2.x variants: each sends its level as reasoning_effort.
 function variantsOf(item) {
   const variants = Array.isArray(item?.thinking?.variants) ? item.thinking.variants : [];
@@ -140,7 +149,7 @@ function applyProviders(editor, current) {
     capabilities: { tools: true, input: ["text"], output: ["text"] },
     variants: variantsOf(item), // the thinking levels selector (QueueRouter asks each upstream its own way)
     time: { released: 0 },
-    cost: [],
+    cost: costOf(item), // QueueRouter's price: opencode works out the session cost from it
     status: "active",
     enabled: true,
     limit: { context: item.limit?.context ?? DEFAULT_CONTEXT, output: item.limit?.output ?? DEFAULT_OUTPUT },

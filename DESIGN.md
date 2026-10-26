@@ -1254,6 +1254,12 @@ Qwen3.8-Flash-Next think whatever is sent (chat_template_kwargs enable_thinking/
 reasoning {enabled/effort}, thinking {type: disabled}, reasoning_effort none/low, /no_think), with 400-6,000 thinking
 tokens for the same prompt either way. ArliAI is style "fixed": nothing offered, requests passed on unchanged. Other vLLM
 servers (engine "vllm") keep the chat-template switch.
+v0.39.0: prices in opencode. The plugin tells opencode each model's price, so its session cost (bottom bar) counts
+QueueRouter models too: your manual price (Models → Reference prices) when set, else per upstream nothing extra on a
+pool with a monthly price (ArliAI), the upstream's own price from its model list (OpenRouter's pricing), or the
+models.dev match; the highest when several upstreams serve a model. Plain aliases get their target's price; councils
+none (their extra calls aren't visible to opencode). Calls opencode can't see (councils, summaries) stay on the Usage
+page only.
 
 ### Later (agreed, not scheduled)
 

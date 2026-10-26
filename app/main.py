@@ -50,7 +50,7 @@ from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sn
 from .limits import OVERFLOW_STATUS, ModelLimits, error_message, overflow_body, overflow_of
 from .opencode import DEFAULT_OUTPUT, PLUGIN_PATH, model_limits, plugin_source, provider_config, wellknown_manifest
 from .params import CHARS_PER_TOKEN, apply_rules, estimate_prompt_tokens, parse_rules, requested_output, too_long
-from .pricing import PriceCatalog, resolve, token_cost
+from .pricing import Price, PriceCatalog, resolve, token_cost
 from .quotas import MonthlyUsage, month_of, over_quota, quota_share, seconds_to_next_month
 from .ratelimit import RateLimiter
 from .sessions import session_key
@@ -433,6 +433,32 @@ def create_app(
     usage_version = [0]  # bumped whenever usage rows are written (the Usage page refreshes)
 
     price_overrides: dict = {}
+
+    def price_on(model: str, target: Target, entry: dict | None, overrides: dict) -> Price | None:
+        """What one request to ``model`` costs on ``target``: nothing extra on a monthly plan, the upstream's own
+        price where its model list states one (OpenRouter), else QueueRouter's price for the name."""
+        if target.pool.monthly_price:
+            return Price(0.0, 0.0, 0.0, source="plan")
+        listed = (entry or {}).get("pricing")
+        if isinstance(listed, dict):
+            try:  # USD per token, as strings
+                rates = [
+                    float(listed.get(k) or listed.get("prompt") or 0)
+                    for k in ("prompt", "completion", "input_cache_read")
+                ]
+            except (TypeError, ValueError):
+                rates = []
+            if len(rates) == 3 and min(rates) >= 0:  # -1: priced per request (routers)
+                return Price(*(r * 1e6 for r in rates), source="upstream")
+        return resolve(model, overrides, prices)
+
+    def model_price(model: str, pairs: list, overrides: dict) -> Price | None:
+        """The price opencode is told: yours when set, else the highest across the upstreams serving it (so it
+        never shows less than a request may cost)."""
+        if model in overrides:
+            return resolve(model, overrides, prices)
+        known = [p for p in (price_on(model, t, e, overrides) for t, e in pairs) if p is not None]
+        return max(known, key=lambda p: (p.input + p.output, p.output)) if known else None
 
     def cost_of(model: str, prompt: int, completion: int, cached: int) -> float:
         costs = token_cost(resolve(model, price_overrides, prices), prompt, completion, cached)
@@ -1532,7 +1558,7 @@ def create_app(
 
     async def opencode_models(client: ClientKey, with_thinking: bool = False) -> dict[str, dict]:
         """Every model and alias ``client`` may use, with opencode limits (plan caps applied). ``with_thinking``:
-        each model's thinking levels too (for the plugin, which turns them into opencode's level selector)."""
+        each model's thinking levels and price too (for the plugin: opencode's level selector and its session cost)."""
         targets = [t for t in snapshot.upstreams.values() if t.usable]
         stale = [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s)]
         if stale:
@@ -1571,6 +1597,7 @@ def create_app(
 
         offered_by = {m: [t.upstream.name for t, _ in pairs] for m, pairs in listed.items()}  # shown in opencode
         manual_thinking = await asyncio.to_thread(store.list_model_thinking) if with_thinking else {}
+        overrides = await asyncio.to_thread(store.list_model_prices) if with_thinking else {}  # yours, current
         allowed = client.policy.allowed_models
         result: dict[str, dict] = {}
         for model_id in sorted(served):
@@ -1581,6 +1608,8 @@ def create_app(
                 result[model_id] = {"name": name, **({"limit": limits} if limits else {})}
                 if with_thinking and (levels := thinking_for(model_id, served[model_id], manual_thinking)):
                     result[model_id]["thinking"] = {"variants": levels.variants, "default": levels.default}
+                if with_thinking and (price := model_price(model_id, served[model_id], overrides)):
+                    result[model_id]["cost"] = price_json(price)
         for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
             if allowed and alias.name not in allowed and alias.target_model not in allowed:
                 continue
@@ -1609,6 +1638,9 @@ def create_app(
             pairs = [(t, e) for t, e in listed.get(target, []) if t in pinned]
             if with_thinking and plain and (levels := thinking_for(target, pairs, manual_thinking)):
                 result[alias.name]["thinking"] = {"variants": levels.variants, "default": levels.default}
+            # a council makes several calls opencode never sees: no price rather than a low one
+            if with_thinking and plain and (price := model_price(target, pairs, overrides)):
+                result[alias.name]["cost"] = price_json(price)
         if not cfg().opencode_rank:
             return result
         # opencode's desktop app sorts by name, so the order travels in the names; its terminal keeps this order
@@ -1616,6 +1648,14 @@ def create_app(
         return {
             name: {**result[name], "name": f"{prefix} · {result[name]['name']}" if prefix else result[name]["name"]}
             for name, prefix in order
+        }
+
+    def price_json(price: Price) -> dict:
+        """USD per million tokens, for the plugin (opencode works out the session cost from it)."""
+        return {
+            "input": round(price.input, 6),
+            "output": round(price.output, 6),
+            "cache_read": round(price.cached_input, 6),
         }
 
     def with_providers(label: str, upstreams: list[str]) -> str:
