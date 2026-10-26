@@ -16,9 +16,9 @@ annotated-types==0.8.0 \
     # via
     #   -c requirements.txt
     #   pydantic
-anthropic==1.15.0 \
-    --hash=sha256:10189a7993c5c71a0a2d4bb80020ca6a2fd27679f51e627405da37251d15ff49 \
-    --hash=sha256:90caa9df83e2fc8bddb4ddeb83b7191bce255f635c03eae055deec521741df08
+anthropic==2.2.0 \
+    --hash=sha256:6b28d4b7299587a3a0edbcbd7431b0a06d749a2f4196efaf044fe6dc474ec144 \
+    --hash=sha256:ba8388e843521b3eb3cfadf99ec415f13e124a8d1587236969b0a3d84e427d36
     # via -r requirements-dev.in
 anyio==4.15.1 \
     --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101 \
@@ -1054,10 +1054,13 @@ typing-extensions==4.16.0 \
     #   anthropic
     #   anyio
     #   fastapi
+    #   httpx2
     #   openai
     #   opentelemetry-api
     #   pydantic
     #   pydantic-core
+    #   pytest-asyncio
+    #   starlette
     #   typing-inspection
 typing-inspection==0.4.4 \
     --hash=sha256:547274fa6b0a561ccf549cc9524b999a578e737d015d8709d021f9d0d13bea47 \
