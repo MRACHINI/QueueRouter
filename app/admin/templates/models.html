@@ -155,11 +155,11 @@ fine-tunes get their base model's score (marked "from …").</p>
 
 <h2 id="thinking">Thinking levels</h2>
 <p class="muted small">Levels opencode offers next to a model (low / medium / high…), so you can choose how much it thinks
-before answering. They come from the upstream's own model list (OpenRouter states them; ArliAI says whether a model
-thinks), else from OpenRouter's public list by name. QueueRouter asks each upstream its own way: OpenRouter
-<span class="mono">reasoning.effort</span>, ArliAI and other vLLM servers the chat template's thinking switch (and
-low/medium/high), OpenAI-style APIs <span class="mono">reasoning_effort</span>. Claude's OpenAI-compatible endpoint
-ignores levels, so none are offered there. Set your own list to correct a model (e.g. <span class="mono">none, low,
+before answering. They come from the upstream's own model list (OpenRouter states them), else from OpenRouter's public
+list by name. QueueRouter asks each upstream its own way: OpenRouter <span class="mono">reasoning.effort</span>,
+self-hosted vLLM servers the chat template's thinking switch (and low/medium/high), OpenAI-style APIs
+<span class="mono">reasoning_effort</span>. None are offered for ArliAI (its models think whatever is sent; tested) or
+Claude's OpenAI-compatible endpoint (it ignores levels). Set your own list to correct a model (e.g. <span class="mono">none, low,
 high</span>), or <span class="mono">-</span> for no selector; blank goes back to what's detected. opencode shows them
 through the QueueRouter plugin (opencode 2.x; re-install the plugin once to get this).</p>
 <details class="card" {% if thinking.rows | selectattr("yours") | list %}open{% endif %}>

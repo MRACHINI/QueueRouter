@@ -29,7 +29,8 @@ def test_levels_from_model_lists():
     )
     assert thinking.for_style("vllm", found) == (("none", "none"), ("low", "low"), ("high", "high"))
     assert thinking.for_style("vllm", (("none", "high"), None)) == thinking.TOGGLE
-    assert thinking.style_of("https://api.arliai.com/v1", None) == "vllm"
+    assert thinking.style_of("https://api.arliai.com/v1", None) == "fixed"  # it ignores every switch
+    assert not thinking.translate({"reasoning_effort": "none"}, "fixed")
     assert thinking.style_of("https://openrouter.ai/api/v1", None) == "openrouter"
     assert thinking.style_of("https://api.anthropic.com/v1", None) == "none"
     assert thinking.style_of("http://10.0.0.5:8000/v1", {"engine": "vllm"}) == "vllm"

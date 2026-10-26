@@ -285,9 +285,9 @@ client key.
 
 Models that can think get a level selector in opencode 2.x (next to the model; ctrl+t in the terminal): `none`,
 `low`, `high`… as the model offers them, or `off` / `thinking` for models that can only switch thinking on and off.
-QueueRouter finds the levels in each upstream's model list (OpenRouter lists them; ArliAI says which models think)
-or, by name, in OpenRouter's public list, and asks each upstream its own way (OpenRouter `reasoning.effort`, ArliAI's
-chat-template switch, OpenAI-style `reasoning_effort`). Correct a model on **Models → Thinking levels**. Needs the
+QueueRouter finds the levels in each upstream's model list (OpenRouter lists them) or, by name, in OpenRouter's public
+list, and asks each upstream its own way (OpenRouter `reasoning.effort`, a self-hosted vLLM server's chat-template
+switch, OpenAI-style `reasoning_effort`). ArliAI's models get none: they think whatever is sent. Correct a model on **Models → Thinking levels**. Needs the
 QueueRouter plugin (re-install it once after upgrading to 0.38).
 
 ### Models in strength order
