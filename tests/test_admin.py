@@ -220,6 +220,52 @@ async def test_client_lifecycle_applies_live(admin_stack):
         assert "<strong>n8n</strong>" not in (await c.get("/admin/clients")).text
 
 
+async def test_rename_show_key_and_timed_logging(admin_stack):
+    """A client can be renamed (same key; its requests and usage move with it), its key shown again (audited;
+    keys made before 0.42 only have a hash), and timed content logging no longer breaks the Clients page."""
+    from tests.conftest import eventually
+
+    store = admin_stack.app.state.store
+    api = f"{admin_stack.url}/v1/chat/completions"
+    body = {"model": "mock-model", "messages": [{"role": "user", "content": "hi"}]}
+    async with httpx.AsyncClient(base_url=admin_stack.url) as c:
+        await login(c, admin_stack.url)
+        csrf = csrf_of((await c.get("/admin/clients")).text)
+        created = await c.post("/admin/clients", data={"csrf": csrf, "name": "bilal", "priority": "normal"})
+        key = key_of(created.text)
+        auth = {"Authorization": f"Bearer {key}"}
+        client = next(x for x in store.list_clients() if x.name == "bilal")
+        assert client.key_kept and "Show</button>" in (await c.get("/admin/clients")).text
+        assert (await c.post(api, json=body, headers=auth)).status_code == 200
+        await eventually(lambda: store.query("SELECT 1 FROM usage_daily WHERE client = 'bilal'"), timeout=10)
+
+        shown = await c.post(f"/admin/clients/{client.id}/key", headers={"X-CSRF-Token": csrf})
+        assert shown.json() == {"key": key} and shown.headers["cache-control"] == "no-store"
+        assert (await c.post(f"/admin/clients/{client.id}/key", headers={"X-CSRF-Token": "forged"})).status_code == 403
+        assert store.query("SELECT target FROM audit_log WHERE action = 'client.show_key'")[0]["target"] == "bilal"
+
+        store.create_client("taken", "t")
+        form = {"csrf": csrf, "priority": "normal", "enabled": "on"}
+        r = await c.post(f"/admin/clients/{client.id}", data={**form, "name": "taken"})
+        assert "e=exists" in r.headers["location"]
+        r = await c.post(f"/admin/clients/{client.id}", data={**form, "name": "bilal-pc"})
+        assert "m=saved" in r.headers["location"]
+        assert (await c.post(api, json=body, headers=auth)).status_code == 200  # the same key
+        for table in ("requests", "usage_daily"):
+            names = {r["client"] for r in store.query(f"SELECT DISTINCT client FROM {table}")}
+            assert "bilal" not in names and "bilal-pc" in names, (table, names)
+
+        r = await c.post(f"/admin/clients/{client.id}/logging", data={"csrf": csrf, "enabled": "on", "hours": "2"})
+        assert "m=saved" in r.headers["location"]
+        page = await c.get("/admin/clients")
+        assert page.status_code == 200 and "On until" in page.text
+
+        with store.tx() as db:  # a key made before 0.42: only its hash
+            db.execute("UPDATE clients SET key_secret = NULL WHERE id = ?", (client.id,))
+        assert "only its hash is kept" in (await c.get("/admin/clients")).text
+        assert (await c.post(f"/admin/clients/{client.id}/key", headers={"X-CSRF-Token": csrf})).status_code == 404
+
+
 async def test_clients_page_needs_admin_role(admin_stack):
     async with httpx.AsyncClient(base_url=admin_stack.url) as owner:
         await login(owner, admin_stack.url)

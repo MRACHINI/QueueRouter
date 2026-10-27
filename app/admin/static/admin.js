@@ -62,6 +62,29 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  // Client keys: <button data-show-key="url" data-target="#code" data-csrf>; shows the key, then copies it.
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-show-key]");
+    if (!button) return;
+    const target = document.querySelector(button.dataset.target);
+    try {
+      const response = await fetch(button.dataset.showKey, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "X-CSRF-Token": button.dataset.csrf },
+      });
+      const data = await response.json();
+      if (!response.ok || !data.key) throw new Error(data.error || `HTTP ${response.status}`);
+      if (target) target.textContent = data.key;
+      button.removeAttribute("data-show-key");
+      button.dataset.copyText = data.key;  // the click-to-copy handler above takes the next click
+      button.textContent = "Copy";
+    } catch (error) {
+      button.textContent = "Couldn't show it";
+      button.title = String(error.message || error);
+    }
+  });
+
   // Local times for <time data-ts="unix seconds">.
   localTimes(document);
 
