@@ -789,15 +789,17 @@ def create_app(
 
     def candidates_for(model: str | None, only: tuple[int, ...] = (), raw: bool = False) -> tuple[Candidate, ...]:
         """Usable upstreams for ``model``: those that list it, or all of them if none does
-        (the upstream then decides; lists may be stale or incomplete). ``only`` restricts the
-        choice (an alias pinned to some upstreams). A model hidden on an upstream (Upstreams page)
-        isn't sent there, except with ``raw``: an alias, summary model or council member names it."""
+        (the upstream then decides; lists may be stale or incomplete), plus those whose list isn't fetched
+        yet (just added). One whose list can't be fetched only gets models no list names: a Claude account
+        must not get "hf:..." models another upstream lists. ``only`` restricts the choice (an alias pinned
+        to some upstreams). A model hidden on an upstream (Upstreams page) isn't sent there, except with
+        ``raw``: an alias, summary model or council member names it."""
         usable = [t for t in snapshot.upstreams.values() if t.usable and (not only or t.id in only)]
         if model:
             listing = [t for t in usable if (ids := catalogs.ids(t.id, raw)) is not None and model in ids]
-            unknown = [t for t in usable if catalogs.ids(t.id) is None]
+            pending = [t for t in usable if catalogs.ids(t.id) is None and not catalogs.failed(t.id)]
             if listing:
-                usable = listing + unknown
+                usable = listing + pending
             elif not raw:
                 usable = [t for t in usable if catalogs.offered(t.id, model)]
         order = {uid: i for i, uid in enumerate(snapshot.upstreams)}
@@ -1382,6 +1384,28 @@ def create_app(
                                 continue
                             yield Got(Replay(response, content, complete=True), target)  # pass the 429 through
                             return
+                        if status == 404:  # this upstream hasn't got the model (its list unknown): try another
+                            others = [
+                                c
+                                for c in adm.candidates
+                                if c.upstream_id not in excluded | {target.id} and available(c.upstream_id)
+                            ]
+                            if others and not adm.expired():
+                                try:
+                                    content = await response.aread()
+                                except httpx.HTTPError:
+                                    content = b""
+                                finally:
+                                    await response.aclose()
+                                note_error(adm.rlog, status, content, target)
+                                circuits.success(target.id)  # it answered: not broken
+                                verdict = True
+                                excluded.add(target.id)
+                                queue.cancel(ticket)
+                                ticket = None
+                                retries += 1
+                                yield Backoff(0, retries, f"HTTP 404 on {target.upstream.name}, failing over")
+                                break
                         if status not in FAILURE_STATUS:
                             circuits.success(target.id)
                             verdict = True

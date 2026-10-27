@@ -142,6 +142,54 @@ async def test_paused_upstream_gets_no_traffic_and_models_merge(make_stack, make
     assert stack.mock["served"] == 0 and second["served"] == 3
 
 
+async def test_upstream_without_model_list_gets_no_listed_model(make_stack, make_mock):
+    """An upstream whose model list can't be fetched (e.g. a Claude account) gets no model another upstream
+    lists, even when the listing one is busy (it used to get council members' "hf:..." models and answer 404)."""
+    from tests.test_aliases import add_alias  # it imports this module
+
+    stack = make_stack(limit=1, bootstrap=OWNER, models_cache_s=0)  # lists fetched again when asked
+    stack.mock["extra_models"] = ["hf:listed"]
+    claude_url, claude = make_mock(limit=4)
+    claude["models_status"] = 500
+    claude["missing_models"] = ["hf:listed"]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await add_upstream(c, "claude", claude_url, max_concurrency=4)
+        for _ in range(100):  # its list is fetched in the background: wait until that has failed
+            if "HTTP 500: no model list" in (await c.get("/admin/upstreams")).text:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("the model list didn't fail")
+        await add_alias(c, "member", "hf:listed")  # aliases and council members name models "raw"
+        assert "hf:listed" in [m["id"] for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]]
+        api = f"{stack.url}/v1/chat/completions"
+        results = await asyncio.gather(
+            *(
+                c.post(api, headers=stack.headers, json=chat(f"l{i}", model=model, mock_delay=0.05))
+                for i, model in enumerate(["hf:listed", "member"] * 3)
+            )
+        )
+    assert all(r.status_code == 200 for r in results), [r.text for r in results]
+    assert "hf:listed" not in claude.get("models", []) and stack.mock["served"] == 6
+
+
+async def test_404_fails_over_to_another_upstream(make_stack, make_mock):
+    """A model no list names goes to any upstream; one that answers 404 ("no such model") passes it on."""
+    stack = make_stack(limit=1, bootstrap=OWNER, lb_strategy="ordered")
+    stack.mock["missing_models"] = ["elsewhere"]
+    other_url, other = make_mock(limit=1)
+    other["models_status"] = 500
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await add_upstream(c, "other", other_url)
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("e", model="elsewhere"))
+        assert r.status_code == 200, r.text
+        stats = (await c.get("/admin/api/stats")).json()
+    assert stack.mock["models"] == ["elsewhere"] and other["served"] == 1
+    assert all(u["state"] == "closed" for u in stats["upstreams"])  # a 404 isn't a broken upstream
+
+
 async def test_upstream_test_button_and_pool_rules(make_stack):
     stack = make_stack(bootstrap=OWNER)
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
