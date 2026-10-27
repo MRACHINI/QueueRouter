@@ -1284,6 +1284,8 @@ toast. A failed try waits an hour; copies in other project folders see the file 
 Settings → opencode (opencode_plugin_updates; no header is sent); on one machine: QUEUEROUTER_AUTO_UPDATE=0; never
 for a plugin loaded from node_modules or not from a file. Not done: signing the plugin in CI (a compromised server
 could hand out code; the README says so). Plugins from before 0.41 need one manual re-install.
+v0.41.1: the update message no longer insists on a restart: tested on Windows, the opencode desktop app reloads the
+plugin as soon as its file changes (the reloaded copy carries the served fingerprint, so it doesn't update again).
 
 ### Later (agreed, not scheduled)
 
