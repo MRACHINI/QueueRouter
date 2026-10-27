@@ -1421,6 +1421,29 @@ plugin as soon as its file changes (the reloaded copy carries the served fingerp
   the same model still can). New models a provider adds later: an "offer new models automatically" switch
   per upstream (on = they appear, off = only the ticked ones). Aliases can still point at a hidden model
   explicitly (or should they? decide when building).
+- **Team board: opencode sessions of different people cooperating through QueueRouter** (designed 2026-10-27,
+  not scheduled). For e.g. two people (two client keys) on one shared project.
+  - *Teams* (admin): a name, member client keys, the project's git remote(s). A session joins when its folder's git
+    remote matches (the plugin reads it and sends it), so paths may differ per machine. A key sees only its teams.
+  - *Board* per team (stored encrypted, like summaries): tasks (open / claimed / blocked / done, owner, branch,
+    closing summary), messages (to one member or all, read state), notes (decisions, conventions), file claims
+    that expire unless renewed.
+  - *Tools* as an MCP server QueueRouter serves (/team/mcp, client key): team_status (one short digest: who's on
+    what, open tasks, unread messages, recent notes), team_post, team_task_add, team_claim (with files), team_done
+    (summary, branch), team_note. MCP rather than plugin tools because opencode 2.x plugin tools need its `effect`
+    Schema, which a single-file plugin can't import; MCP also lets other MCP clients join. The plugin adds the
+    MCP server automatically (2.x ctx.mcp.transform; 1.19 config hook) — verify on both first; fallback: an
+    `mcp` entry for opencode.json shown on the Clients page.
+  - *Hints*: when a member's board changed, QueueRouter adds one short line at the END of that member's next
+    request ("Team Acme: 2 new messages from Bilal, a task finished. Call team_status."), so prompt caching holds.
+  - *Team page* (admin): the board live; add tasks, step in.
+  - Code moves through git (a branch per task); the board says which branch holds what.
+  - Limits: identity is per person, not per session (opencode sends one set of MCP headers), fine between people;
+    idle sessions only see news when they next run (waking them via 2.x ctx.session.prompt: later, opt-in, it
+    spends tokens unasked); cooperation quality depends on the model; messages size-limited and checked for
+    secrets like web search queries.
+  - Releases: 1) teams, board, MCP tools, Team page, plugin adds the MCP server (VM test: two clients, 2.x and
+    1.19); 2) the hint line; 3) optional waking of idle sessions.
 
 ---
 
