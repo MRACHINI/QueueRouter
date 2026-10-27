@@ -236,6 +236,15 @@ tr.unread td { background: color-mix(in srgb, var(--danger) 6%, transparent); }
 .chart .line { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .chart .line.s1 { stroke: var(--accent); }
 .chart .line.s3 { stroke: var(--danger); }
+/* one color per line on the Response times chart */
+.chart .l1, .legend.l1::before { --c: var(--accent); }
+.chart .l2, .legend.l2::before { --c: #d9822b; }
+.chart .l3, .legend.l3::before { --c: #2a9d8f; }
+.chart .l4, .legend.l4::before { --c: #9b5de5; }
+.chart .l5, .legend.l5::before { --c: #c2185b; }
+.chart .line[class*=" l"] { stroke: var(--c); }
+.chart .dot { fill: var(--c); }
+.legend[class*=" l"]::before { background: var(--c); }
 .legend { font-weight: 400; font-size: 0.85em; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
 .legend::before { content: ""; width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .qr svg { display: block; width: 220px; height: 220px; margin: 8px 0; border-radius: 6px; }

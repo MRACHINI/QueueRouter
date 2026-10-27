@@ -72,6 +72,52 @@ def stacked_bars(title: str, labels: list[str], series: list[tuple[str, str, lis
     return f'<figure class="chart-box"><figcaption>{escape(title)} {legend}</figcaption>{"".join(parts)}</figure>'
 
 
+def lines(title: str, labels: list[str], series: list[tuple[str, str, list[float | None]]], unit: str = "") -> str:
+    """Line chart; a None value leaves a gap. ``series`` = [(name, css class, values per label)]."""
+    top = _nice_max(max((v for _, _, values in series for v in values if v is not None), default=0))
+    plot_w, plot_h = WIDTH - LEFT - RIGHT, HEIGHT - TOP - BOTTOM
+    slot = plot_w / max(len(labels), 1)
+    parts = [f'<svg class="chart" viewBox="0 0 {WIDTH} {HEIGHT}" role="img" aria-label="{escape(title)}" >']
+    for i in range(5):
+        value = top * i / 4
+        y = TOP + plot_h - plot_h * i / 4
+        parts.append(f'<line class="grid" x1="{LEFT}" x2="{WIDTH - RIGHT}" y1="{y:.1f}" y2="{y:.1f}"/>')
+        parts.append(
+            f'<text class="axis" x="{LEFT - 6}" y="{y + 4:.1f}" text-anchor="end">{compact(value)}{unit}</text>'
+        )
+
+    def point(i: int, v: float) -> tuple[float, float]:
+        return LEFT + slot * i + slot / 2, TOP + plot_h - plot_h * v / top
+
+    for _, css, values in series:
+        run: list[tuple[float, float]] = []
+        for i, v in enumerate([*values, None]):
+            if v is not None:
+                run.append(point(i, v))
+                continue
+            if len(run) > 1:
+                pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in run)
+                parts.append(f'<polyline class="line {css}" points="{pts}"/>')
+            elif run:
+                parts.append(f'<circle class="dot {css}" cx="{run[0][0]:.1f}" cy="{run[0][1]:.1f}" r="3"/>')
+            run = []
+    label_every = max(1, math.ceil(len(labels) / 8))
+    for i, label in enumerate(labels):
+        tip = [label] + [f"{name}: {compact(values[i])}{unit}" for name, _, values in series if values[i] is not None]
+        parts.append(f"<g><title>{escape(' · '.join(tip))}</title>")
+        parts.append(
+            f'<rect class="hit" x="{LEFT + slot * i:.1f}" y="{TOP}" width="{slot:.1f}" height="{plot_h}"/></g>'
+        )
+        if i % label_every == 0:
+            cx = LEFT + slot * i + slot / 2
+            parts.append(
+                f'<text class="axis" x="{cx:.1f}" y="{HEIGHT - 8}" text-anchor="middle">{escape(label)}</text>'
+            )
+    parts.append("</svg>")
+    legend = "".join(f'<span class="legend {css}">{escape(name)}</span>' for name, css, _ in series)
+    return f'<figure class="chart-box"><figcaption>{escape(title)} {legend}</figcaption>{"".join(parts)}</figure>'
+
+
 def usage_charts(rows: list[dict], days: int, today: date | None = None) -> list[str]:
     """Per-day charts for the Usage page from its rows (one per day/client[/model])."""
     labels = day_range(days, today)

@@ -1268,6 +1268,13 @@ v0.39.2: the Requests page refreshes cheaply. An open Requests page fetched the 
 opencode's identifiers) after every finished request, which on a busy day kept the 0.5-CPU container busy and slowed
 streaming. It now fetches only the rows written since its newest one (/admin/requests/rows?after=, same filters) and
 adds them on top, and a hidden tab fetches nothing until it is shown again.
+v0.40.0: response times per model and upstream. Each streamed request now records the provider's own timings, from
+when its (last) attempt was sent: headers (the provider's queue), first token (thinking included), first answer token,
+output speed (completion tokens / first to last token, from 16 tokens and 0.5 s), longest pause between tokens; and,
+for any request, the time waited before retries. A Response times page (nav) shows per model and upstream the median
+and worst 5% over 1 h / 24 h / 7 d, and a chart of the busiest pairs' median first token. The Requests page shows them
+per row. Alert "Slow first token" (off by default): worst-5% first token over N s in the window, at least 5 requests.
+Not done: typical speeds from Artificial Analysis (needs its key; its field names unverified), Prometheus metrics.
 
 ### Later (agreed, not scheduled)
 

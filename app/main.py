@@ -158,7 +158,15 @@ class RequestLog:
             "role": None,  # e.g. "council member 1/2", "council judge", "summary": made by QueueRouter for...
             "parent": None,  # ...this request (its id)
             "timeline": None,  # council / orchestrator: [[seconds, note], ...] (Requests > trace page)
+            # The provider's own timings, streamed requests only, in ms from when the (last) attempt was sent:
+            "headers_ms": None,  # its response started (time spent in the provider's own queue)
+            "first_token_ms": None,  # first generated token, thinking included (prefill)
+            "answer_ms": None,  # first token of the answer itself, after any thinking
+            "tokens_per_s": None,  # output speed from the first token to the last
+            "stall_ms": None,  # longest pause between tokens
+            "backoff_ms": None,  # waited before retries (429s, errors), any request
         }
+        self.sent_at: float | None = None  # monotonic: the current attempt went to the provider
 
     def finish(self, stats: Stats, **fields) -> None:
         self.fields.update(fields)
@@ -183,6 +191,11 @@ class RequestLog:
         if self.content is not None and stats.content_sink:
             stats.content_sink(f["id"], f["client"] or "default", *self.content)
         log.info(json.dumps(f))
+
+
+def note_backoff(rlog: RequestLog, event: Backoff) -> None:
+    """Time spent waiting to retry (a 429, an error), added up per request."""
+    rlog.fields["backoff_ms"] = (rlog.fields["backoff_ms"] or 0) + round(event.delay * 1000)
 
 
 @dataclass
@@ -1311,7 +1324,11 @@ def create_app(
                 while True:  # attempts on this slot
                     headers, response = None, None
                     try:
-                        response = await app.state.client.send(build_request(adm, target), stream=True)
+                        outgoing = build_request(adm, target)
+                        adm.rlog.sent_at = time.monotonic()
+                        response = await app.state.client.send(outgoing, stream=True)
+                        if adm.rlog.fields["stream"]:  # a non-streamed answer's headers come with all of it
+                            adm.rlog.fields["headers_ms"] = round((time.monotonic() - adm.rlog.sent_at) * 1000)
                     except (
                         httpx.TransportError
                     ) as exc:  # any network failure (write errors too), not only the usual ones
@@ -3491,6 +3508,7 @@ def create_app(
             async with asyncio.timeout(remaining), contextlib.aclosing(chained(adm)) as events:
                 async for event in events:
                     if isinstance(event, Backoff):
+                        note_backoff(rlog, event)
                         await asyncio.sleep(event.delay)
                     elif event is None:
                         outcome, status = "timeout", 504
@@ -3575,6 +3593,7 @@ def create_app(
                     elif isinstance(event, Waiting):
                         yield f": queued position={event.position} waited={int(event.waited_s)}s\n\n".encode()
                     elif isinstance(event, Backoff):
+                        note_backoff(rlog, event)
                         yield f": {one_line(event.reason)}, retry {event.attempt} in {event.delay:.0f}s\n\n".encode()
                         deadline = time.monotonic() + event.delay
                         while (remaining := deadline - time.monotonic()) > 0:
@@ -3604,7 +3623,7 @@ def create_app(
                             return
                         try:
                             async for chunk in response.aiter_bytes():
-                                sniffer.feed(chunk)
+                                sniffer.feed(chunk, time.monotonic())
                                 if rlog.fields["ttft_ms"] is None:
                                     rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
                                 if captured is not None and len(captured) < CONTENT_CAPTURE_MAX:
@@ -3646,6 +3665,7 @@ def create_app(
                 completion_tokens=sniffer.completion_tokens,
                 cached_tokens=sniffer.cached_tokens,
                 finish_reason=sniffer.finish_reason,
+                **(sniffer.timings(rlog.sent_at) if response is not None and status == 200 else {}),
             )
             limiter.record_tokens(adm.client, (sniffer.prompt_tokens or 0) + (sniffer.completion_tokens or 0))
             if adm.run is not None:

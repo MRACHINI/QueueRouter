@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% macro secs(ms) -%}
+{%- if ms is none -%}—{%- elif ms >= 10000 -%}{{ "%.0f" | format(ms / 1000) }} s{%- elif ms >= 1000 -%}{{ "%.1f" | format(ms / 1000) }} s{%- else -%}{{ "%.0f" | format(ms) }} ms{%- endif -%}
+{%- endmacro %}
+{% block title %}Response times{% endblock %}
+{% block content %}
+<div class="row between wrap">
+  <h1>Response times</h1>
+  <form method="get" action="/admin/response-times" class="row wrap">
+    <select name="window" aria-label="Period">
+      {% for w in windows %}<option value="{{ w }}" {% if w == window %}selected{% endif %}>last {{ w }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="secondary">Show</button>
+  </form>
+</div>
+<p class="muted small">How fast each provider answers, timed from when QueueRouter sent the request (queue time not
+included), for streamed requests. Median, and the worst 5% where it says so. Requests from before v0.40.0 have no
+timings.</p>
+{% if not keeps_rows %}
+<p class="card">Per-request rows aren't kept (Settings → request log days is 0), so there's nothing to show.</p>
+{% endif %}
+
+{% if chart %}{{ chart | safe }}{% endif %}
+
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr>
+    <th>Model</th><th>Upstream</th><th>Requests</th>
+    <th title="Sent → the provider's response starts: time in its own queue">Provider queue</th>
+    <th title="Sent → first generated token, thinking included: grows with the prompt">First token</th>
+    <th title="Slowest 5% of first tokens">First token, worst 5%</th>
+    <th title="First token → first token of the answer, for models that think first">Thinking</th>
+    <th title="Output tokens per second, from the first token to the last">Speed</th>
+    <th title="The slowest 5% of output speeds">Speed, slowest 5%</th>
+    <th title="Longest pause between tokens, worst 5%">Longest pause</th>
+    <th title="Requests that waited to retry (429s, errors), and the total wait">Retries</th>
+  </tr></thead>
+  <tbody>
+  {% for s in summaries %}
+  <tr>
+    <td data-label="Model" class="wrap-any">{{ s.model }}</td>
+    <td data-label="Upstream">{{ s.upstream }}</td>
+    <td data-label="Requests">{{ "{:,}".format(s.requests) }}{% if s.timed != s.requests %} <span class="muted small" title="streamed and timed">({{ "{:,}".format(s.timed) }} timed)</span>{% endif %}</td>
+    <td data-label="Provider queue">{{ secs(s.headers_med) }}</td>
+    <td data-label="First token">{{ secs(s.first_med) }}</td>
+    <td data-label="First token, worst 5%">{{ secs(s.first_p95) }}</td>
+    <td data-label="Thinking">{{ secs(s.thinking_med) }}</td>
+    <td data-label="Speed">{% if s.speed_med is not none %}{{ "%.0f" | format(s.speed_med) }} tok/s{% else %}—{% endif %}</td>
+    <td data-label="Speed, slowest 5%">{% if s.speed_p5 is not none %}{{ "%.0f" | format(s.speed_p5) }} tok/s{% else %}—{% endif %}</td>
+    <td data-label="Longest pause">{{ secs(s.stall_p95) }}</td>
+    <td data-label="Retries">{% if s.retried %}{{ s.retried }} <span class="muted small">· {{ "%.0f" | format(s.backoff_s) }} s waited</span>{% else %}—{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="11" class="muted">No requests in the last {{ window }}.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted small">An alert can tell you when a model's worst-5% first token gets too slow: Alerts → "Slow first token".</p>
+{% endblock %}
