@@ -1290,6 +1290,10 @@ v0.41.2: an upstream whose model list is unknown (a Claude account whose /models
 upstreams list: a council with "hf:..." members sent some of them there by load, and they came back 404. Such an
 upstream only gets models no list names. A 404 from an upstream fails over to the next candidate (not counted
 against its circuit breaker).
+v0.41.3: the real cause of that council case: QueueRouter's own requests (council members, judge, summaries) were
+routed like a client's, so a member model hidden on Synthetic (Upstreams page) could only go to the upstream without
+a list. They now route like an alias (hidden models allowed, as documented), and a model listed but hidden somewhere
+never goes to an upstream whose list can't be fetched (a client asking for it gets 503, as with no upstream).
 
 ### Later (agreed, not scheduled)
 
