@@ -1271,20 +1271,45 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         }
         return page(request, "request_trace.html", session, r=main, timeline=timeline, calls=calls, totals=totals)
 
-    @app.get("/admin/requests")
-    async def requests_log(request: Request):
-        session = require(request, "viewer")
+    REQUEST_ROWS = 300  # shown on the Requests page
+
+    async def request_rows(request: Request, session: AdminSession, after: float | None = None):
         filters = {k: request.query_params.get(k, "") for k in ("client", "outcome", "model", "upstream", "tag")}
-        rows = await asyncio.to_thread(store.list_requests, 300, **filters)
-        options = await asyncio.to_thread(store.request_filter_values)
+        rows = await asyncio.to_thread(store.list_requests, REQUEST_ROWS, after, **filters)
         with_content = (
             await asyncio.to_thread(store.content_ids, [r["id"] for r in rows])
             if session.user.can("admin") and session.user.can_view_content  # as the content page requires
             else set()
         )
+        return filters, rows, with_content
+
+    @app.get("/admin/requests")
+    async def requests_log(request: Request):
+        session = require(request, "viewer")
+        filters, rows, with_content = await request_rows(request, session)
+        options = await asyncio.to_thread(store.request_filter_values)
         return page(
-            request, "requests.html", session, rows=rows, filters=filters, options=options, with_content=with_content
+            request,
+            "requests.html",
+            session,
+            rows=rows,
+            filters=filters,
+            options=options,
+            with_content=with_content,
+            limit=REQUEST_ROWS,
         )
+
+    @app.get("/admin/requests/rows")
+    async def requests_log_rows(request: Request):
+        """Only the rows written since ``after`` (same filters): the open page adds them as requests finish,
+        instead of fetching the whole page again each time."""
+        session = require(request, "viewer")
+        try:
+            after = float(request.query_params.get("after", ""))
+        except ValueError:
+            return JSONResponse({"error": {"message": "after must be a timestamp", "code": 400}}, status_code=400)
+        _, rows, with_content = await request_rows(request, session, after)
+        return templates.TemplateResponse(request, "requests_rows.html", {"rows": rows, "with_content": with_content})
 
     async def usage_summary(request: Request):
         days = _clamp_int(request.query_params.get("days"), 30, 1, 366)

@@ -1145,8 +1145,12 @@ class Store:
         oldest first."""
         return self.query("SELECT * FROM requests WHERE id = ? OR parent = ? ORDER BY ts", (request_id, request_id))
 
-    def list_requests(self, limit: int = 200, **filters: str) -> list[sqlite3.Row]:
+    def list_requests(self, limit: int = 200, after: float | None = None, **filters: str) -> list[sqlite3.Row]:
+        """Newest first; ``after`` keeps rows written at or after that time (the page's live refresh)."""
         clauses, params = [], []
+        if after is not None:
+            clauses.append("ts >= ?")
+            params.append(after)
         for column in ("client", "outcome", "model", "upstream"):
             if value := filters.get(column):
                 clauses.append(f"{column} = ?")

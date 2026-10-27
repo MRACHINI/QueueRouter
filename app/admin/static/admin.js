@@ -629,25 +629,42 @@ function liveRequests(root) {
     });
   }, 500);
 
-  // The finished list: reloaded in place (same filters) when new requests have been written.
+  // The finished list: when new requests have been written, only the rows since the newest shown are
+  // fetched (same filters) and added on top; the whole page was ~1 MB per finished request on a busy day.
+  // A hidden tab fetches nothing and catches up once it is shown again.
+  const finished = document.getElementById("finished-requests");
+  const limit = Number(finished?.dataset.limit) || 300;
   let version = null;
   let timer = null;
+  let missed = false;
   const reload = async () => {
     timer = null;
+    if (!finished) return;
+    if (document.hidden) {
+      missed = true;
+      return;
+    }
+    missed = false;
+    const query = new URLSearchParams(window.location.search);
+    query.set("after", finished.querySelector("tr[data-id] time[data-ts]")?.dataset.ts || "0");
     try {
-      const response = await fetch(window.location.href, { credentials: "same-origin" });
+      const response = await fetch(`${finished.dataset.rows}?${query}`, { credentials: "same-origin" });
       if (!response.ok || response.redirected) return;
-      const page = new DOMParser().parseFromString(await response.text(), "text/html");
-      const fresh = page.getElementById("finished-requests");
-      const current = document.getElementById("finished-requests");
-      if (fresh && current) {
-        current.replaceChildren(...fresh.childNodes);
-        localTimes(current);
-      }
+      const parsed = new DOMParser().parseFromString(`<table><tbody>${await response.text()}</tbody></table>`, "text/html");
+      const shown = new Set([...finished.querySelectorAll("tr[data-id]")].map((tr) => tr.dataset.id));
+      const fresh = [...parsed.querySelectorAll("tr[data-id]")].filter((tr) => !shown.has(tr.dataset.id));
+      if (!fresh.length) return;
+      finished.querySelectorAll("tr:not([data-id])").forEach((tr) => tr.remove()); // "No requests logged yet."
+      finished.prepend(...fresh);
+      fresh.forEach(localTimes);
+      [...finished.querySelectorAll("tr[data-id]")].slice(limit).forEach((tr) => tr.remove());
     } catch (_) {
       /* next update tries again */
     }
   };
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && missed && !timer) timer = setTimeout(reload, 0);
+  });
 
   const source = new EventSource(root.dataset.stream);
   source.onmessage = (event) => {
