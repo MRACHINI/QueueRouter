@@ -91,6 +91,28 @@ def _normalised(call: dict) -> dict:
     return call
 
 
+IMAGE_NOTE = "[An image was attached here; this model can't see images.]"
+
+
+def without_images(payload: dict) -> dict:
+    """``payload`` with image parts replaced by a note, for a model that reads text only (a member asked the
+    conversation the app sent with images would be refused: "does not support image inputs")."""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return payload
+    changed, result = False, []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in content):
+            parts = [
+                {"type": "text", "text": IMAGE_NOTE} if isinstance(p, dict) and p.get("type") == "image_url" else p
+                for p in content
+            ]
+            message, changed = {**message, "content": parts}, True
+        result.append(message)
+    return {**payload, "messages": result} if changed else payload
+
+
 def render(message: dict, limit: int = CANDIDATE_CHARS) -> str:
     parts = []
     if isinstance(message.get("content"), str) and message["content"].strip():

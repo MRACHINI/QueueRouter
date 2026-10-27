@@ -9,6 +9,7 @@ Request body extras (all optional) steer its behaviour:
   state["daily_quota"]: answer every request with a daily-quota 429 (set on the mock's state)
   state["models_status"]: answer GET /v1/models with this status (no usable model list)
   state["missing_models"]: answer requests for these models with a 404
+  state["text_only_models"]: refuse requests with images for these models (400); state["saw_images"]: who got some
 """
 
 from __future__ import annotations
@@ -193,6 +194,11 @@ def create_mock(limit: int = 2) -> FastAPI:
         state.setdefault("models", []).append(model)
         if model in state.get("missing_models", []):  # an Anthropic-style "no such model"
             return JSONResponse({"error": {"type": "not_found_error", "message": f"model: {model}"}}, status_code=404)
+        if "image_url" in json.dumps(body.get("messages")):
+            if model in state.get("text_only_models", []):  # like Synthetic for a text-only model
+                message = f"Model {model} does not appear to support image inputs."
+                return JSONResponse({"error": {"message": message}}, status_code=400)
+            state.setdefault("saw_images", []).append(model)
         # Google-style 429s: a used-up daily quota, or a per-minute limit for the first N tries.
         if state.get("daily_quota") or (body.get("mock_429_models") or {}).get(model) == "daily":
             return JSONResponse(
