@@ -1264,6 +1264,10 @@ v0.39.1: images in opencode through QueueRouter. The plugin declared every model
 send images (its read tool: "this model does not support image input"). Models now declare image input where a list
 says so: ArliAI's vlm, OpenRouter's architecture.input_modalities, a plain input_modalities, else OpenRouter's public
 list by name (so Synthetic's hf:deepseek-ai/DeepSeek-V4.1-Flash-1017 reads images); unknown stays text-only.
+v0.39.2: the Requests page refreshes cheaply. An open Requests page fetched the whole page again (300 rows, ~1 MB with
+opencode's identifiers) after every finished request, which on a busy day kept the 0.5-CPU container busy and slowed
+streaming. It now fetches only the rows written since its newest one (/admin/requests/rows?after=, same filters) and
+adds them on top, and a hidden tab fetches nothing until it is shown again.
 
 ### Later (agreed, not scheduled)
 

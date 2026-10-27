@@ -55,6 +55,33 @@ async def test_request_log_and_usage_pages(make_stack):
         assert row.split(",")[1:8] == ["client1", "mock-model", "3", "1", "20", "7", "0"]
 
 
+async def test_requests_page_fetches_only_new_rows(make_stack):
+    stack = make_stack(bootstrap=OWNER)
+    store = stack.app.state.store
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await c.post("/v1/chat/completions", headers=stack.headers, json=chat("old"))
+        await c.post("/v1/chat/completions", headers=stack.headers, json=chat("x", mock_status=400))
+        await flushed(stack, 2)
+        error_row, old = await asyncio.to_thread(store.list_requests, 10)
+        page = (await c.get("/admin/requests")).text
+        assert f'<tr data-id="{old["id"]}">' in page and 'data-rows="/admin/requests/rows"' in page
+
+        await c.post("/v1/chat/completions", headers=stack.headers, json=chat("new"))
+        await flushed(stack, 3)
+        new = (await asyncio.to_thread(store.list_requests, 1))[0]
+        rows = await c.get(f"/admin/requests/rows?after={error_row['ts']}")
+        assert rows.status_code == 200 and "<html" not in rows.text  # just the rows, not a page
+        assert rows.text.count("<tr data-id=") == 2  # the newest shown (same time counts) and the new one
+        assert new["id"] in rows.text and error_row["id"] in rows.text and old["id"] not in rows.text
+        assert (await c.get(f"/admin/requests/rows?after={new['ts'] + 1}")).text.strip() == ""
+        filtered = (await c.get("/admin/requests/rows?after=0&outcome=error")).text
+        assert filtered.count("<tr data-id=") == 1 and error_row["id"] in filtered
+        assert (await c.get("/admin/requests/rows?after=soon")).status_code == 400
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as anonymous:
+        assert (await anonymous.get("/admin/requests/rows?after=0")).status_code in (303, 401)
+
+
 async def test_no_content_is_stored(make_stack):
     stack = make_stack(bootstrap=OWNER)
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
