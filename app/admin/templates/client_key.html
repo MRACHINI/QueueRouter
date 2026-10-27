@@ -2,8 +2,8 @@
 {% block title %}Key for {{ name }}{% endblock %}
 {% block content %}
 <h1>{% if regenerated %}New key{% else %}Client created{% endif %}: {{ name }}</h1>
-<p class="notice err" role="alert">Copy this key now — it is stored only as a hash and can't be shown again.
-{% if regenerated %}The previous key has stopped working.{% endif %}</p>
+{% if regenerated %}<p class="notice err" role="alert">The previous key has stopped working.</p>{% endif %}
+<p class="muted">The key is kept encrypted: <em>Show</em> on the Clients page displays it again.</p>
 
 <div class="secret">
   <code id="new-key">{{ key }}</code>

@@ -875,11 +875,29 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 "notes": str(form.get("notes", ""))[:500],
                 "expires_at": _parse_date(str(form.get("expires", ""))),
             }
+            name = str(form.get("name", "")).strip()
+            if name:  # renamed: its history, jobs, files... move with it (the key stays the same)
+                if not CLIENT_NAME.fullmatch(name) or name == "anonymous":
+                    raise ValueError("name")
+                fields["name"] = name
             store.update_client(client_id, session.user.username, **fields)
+        except sqlite3.IntegrityError:
+            return back("/admin/clients", error="exists")
         except (ValueError, KeyError):
             return back("/admin/clients", error="invalid")
         ctx.reload()
         return back("/admin/clients", "saved")
+
+    @app.post("/admin/clients/{client_id}/key")
+    async def clients_show_key(client_id: int, request: Request):
+        """A client's key, for the Show button (audited); 404 when only its hash is kept."""
+        session = require(request, "admin")
+        if not csrf_ok(session, request.headers.get("x-csrf-token")):
+            raise PermissionError("csrf")
+        key = store.client_key(client_id, session.user.username)
+        if key is None:
+            return JSONResponse({"error": "only this key's hash is kept: issue a new key to see it"}, status_code=404)
+        return JSONResponse({"key": key}, headers={"Cache-Control": "no-store"})
 
     @app.post("/admin/clients/{client_id}/policy")
     async def clients_policy(client_id: int, request: Request):

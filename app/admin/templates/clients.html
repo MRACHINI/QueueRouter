@@ -2,8 +2,9 @@
 {% block title %}Clients{% endblock %}
 {% block content %}
 <h1>Clients</h1>
-<p class="muted">Each app (opencode, scripts, n8n…) gets its own key. Keys are stored only as hashes and
-shown once when created. Changes apply immediately.</p>
+<p class="muted">Each app (opencode, scripts, n8n…) gets its own key. Keys are kept encrypted: <em>Show</em> displays
+one again (each view is in the audit log). Renaming a client keeps its key and moves its history with it. Changes
+apply immediately.</p>
 
 <details class="card">
   <summary><strong>opencode plugin</strong> (optional add-on, recommended)</summary>
@@ -24,7 +25,7 @@ shown once when created. Changes apply immediately.</p>
   <thead><tr><th>Client</th><th>Key</th><th>Now</th><th>Settings</th><th></th></tr></thead>
   <tbody>
   {% for c in clients %}
-  {% set now = live.get(c.name, {"active": 0, "queued": 0}) %}
+  {% set busy = live.get(c.name, {"active": 0, "queued": 0}) %}
   <tr>
     <td data-label="Client">
       <strong>{{ c.name }}</strong>
@@ -33,11 +34,19 @@ shown once when created. Changes apply immediately.</p>
       {% if c.expired %}<span class="badge high">expired</span>{% endif %}
       {% if c.notes %}<div class="small muted">{{ c.notes }}</div>{% endif %}
     </td>
-    <td data-label="Key"><code>{{ c.key_prefix }}…</code></td>
-    <td data-label="Now">{{ now.active }} active · {{ now.queued }} queued</td>
+    <td data-label="Key">
+      <code id="key-{{ c.id }}" class="wrap-any">{{ c.key_prefix }}…</code>
+      {% if c.key_kept %}
+      <button type="button" class="secondary" data-show-key="/admin/clients/{{ c.id }}/key" data-target="#key-{{ c.id }}" data-csrf="{{ csrf }}">Show</button>
+      {% else %}
+      <div class="small muted">Made before 0.42: only its hash is kept. <em>New key</em> makes it showable.</div>
+      {% endif %}
+    </td>
+    <td data-label="Now">{{ busy.active }} active · {{ busy.queued }} queued</td>
     <td data-label="">
       <form method="post" action="/admin/clients/{{ c.id }}" class="row wrap">
         <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input name="name" value="{{ c.name }}" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" aria-label="Name" title="Name (renaming keeps the key; its history moves with it)" autocomplete="off">
         <select name="priority" aria-label="Priority">
           {% for p in priorities %}<option value="{{ p }}" {% if p == c.priority %}selected{% endif %}>{{ p }}</option>{% endfor %}
         </select>

@@ -669,7 +669,7 @@ Pico.css (or similar classless CSS); no Node build. Served at `/admin`.
 | Page | Contents |
 |---|---|
 | Dashboard | live slots per upstream, queue by lane with waiting requests, recent requests, error rate, tokens today, **mode toggle (running/paused/draining/maintenance)**, cancel a queued request |
-| Clients | list, create (key shown once, copy button), edit policy incl. params/tags/logging, enable/disable, regenerate key, expiry |
+| Clients | list, create (copy button; Show displays a key again, audited), rename (history moves with it), edit policy incl. params/tags/logging, enable/disable, regenerate key, expiry |
 | Upstreams | add from **preset** or custom, edit (URL, key, concurrency, weight), pause, circuit state, "Test" and "Refresh models" |
 | Models & Aliases | models per upstream with context length, aliases + fallback chains, param rules, effective-request preview, prices |
 | Playground | chat with any model/alias **as a chosen client** (that client's policy applies), streaming, shows queue wait, upstream, fallback, tokens; raw request/response view |
@@ -1298,6 +1298,14 @@ v0.41.4: council members and judges (and summaries) whose model reads text only 
 replaced by a note ("an image was attached here; this model can't see images") instead of being refused (Synthetic:
 "does not appear to support image inputs"). Whether a model reads images is judged as for opencode: its upstream's
 list, else the reference list, else text only.
+v0.42.0: Clients page. Fixed: timed content logging ("for N hours") made the page fail (500): the template's
+per-client live counts were named `now`, hiding the current time it compared with. Clients can be renamed (the Save
+form's name field): the key stays the same; jobs, files, batches, schedules, saved conversations, logged content and
+now also the request log and daily usage move with it (usage rows merge with any the new name already has; monthly
+budgets follow within a minute). Keys are kept encrypted too (clients.key_secret, schema 35, with SECRET_KEY like
+upstream keys): Show on the Clients page fetches one (POST /admin/clients/{id}/key, CSRF header, no-store; audited as
+client.show_key). Keys made before 0.42 only have their hash: New key makes them showable.
+Admin pages use the whole window width (was capped at 1100 px; phones keep a 16 px margin).
 
 ### Later (agreed, not scheduled)
 

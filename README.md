@@ -127,7 +127,7 @@ from a **web admin UI**.
 - **Alerts**: upstream down/recovered, queue backed up, long waits, high error rate, clients hitting
   their limits, keys about to expire, daily tokens — shown in the admin (unread badge) and sent to
   Discord, Slack, ntfy or a signed JSON webhook, with per-rule thresholds and cooldowns.
-- **Admin UI**: dashboard, clients (keys shown once, stored hashed), upstreams, models, usage,
+- **Admin UI**: dashboard, clients (keys kept encrypted, shown again on request; rename a client and its history follows), upstreams, models, usage,
   requests, settings, users with roles (owner / admin / operator / viewer), audit log. Dark mode
   and phone-friendly. Changes apply instantly.
 - **Secure by default**: two-factor sign-in (authenticator apps, recovery codes), upstream keys
@@ -200,8 +200,8 @@ Open `https://queuerouter.example.com/admin`, enter the setup token from the log
 owner account. Then:
 
 1. **Upstreams** → add ArliAI (pick your plan) with your API key.
-2. **Clients** → create a client per app (e.g. `opencode`, priority `high`); copy its key — it's
-   shown once, with a ready-made opencode config.
+2. **Clients** → create a client per app (e.g. `opencode`, priority `high`); copy its key (shown
+   with a ready-made opencode config; **Show** on the Clients page displays it again later).
 3. Optionally **Models** → add aliases.
 
 No Traefik? Use [docker-compose.caddy.yml](docker-compose.caddy.yml) (Caddy gets certificates

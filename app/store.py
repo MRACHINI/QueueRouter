@@ -447,6 +447,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE requests ADD COLUMN stall_ms INTEGER;
     ALTER TABLE requests ADD COLUMN backoff_ms INTEGER;
     """,
+    # 35: client keys kept encrypted too, so an admin can show one again (NULL: made before, only the hash known)
+    """
+    ALTER TABLE clients ADD COLUMN key_secret TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -556,6 +560,7 @@ class Client:
     notes: str
     created_at: float
     policy: ClientPolicy = ClientPolicy()
+    key_kept: bool = False  # its key can be shown again (made or renewed since 0.42; older ones: only the hash)
 
     @property
     def expired(self) -> bool:
@@ -850,8 +855,9 @@ class Store:
                 summary["upstream"] = seed.upstream_url
             for p in parsed:
                 db.execute(
-                    "INSERT INTO clients (name, key_hash, key_prefix, priority, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (p.name, hash_key(p.key), p.key[:6], p.priority, time.time()),
+                    "INSERT INTO clients (name, key_hash, key_prefix, key_secret, priority, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (p.name, hash_key(p.key), p.key[:6], self.encrypt(p.key), p.priority, time.time()),
                 )
                 summary["clients"].append(p.name)
             db.execute("INSERT INTO meta (key, value) VALUES ('initialized', ?)", (str(time.time()),))
@@ -1059,6 +1065,7 @@ class Store:
                 r["notes"],
                 r["created_at"],
                 ClientPolicy.from_json(r["policy"]),
+                r["key_secret"] is not None,
             )
             for r in self.query("SELECT * FROM clients ORDER BY name")
         ]
@@ -1066,15 +1073,15 @@ class Store:
     def create_client(
         self, name: str, actor: str, priority: str = "normal", notes: str = "", expires_at: float | None = None
     ) -> str:
-        """Create a client and return its new key (shown once, stored only hashed)."""
+        """Create a client and return its new key (hashed to check requests, encrypted to show it again)."""
         if priority not in PRIORITIES:
             raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
         key = new_client_key()
         with self.tx() as db:
             db.execute(
-                "INSERT INTO clients (name, key_hash, key_prefix, priority, notes, expires_at, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (name, hash_key(key), key[:6], priority, notes, expires_at, time.time()),
+                "INSERT INTO clients (name, key_hash, key_prefix, key_secret, priority, notes, expires_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, hash_key(key), key[:6], self.encrypt(key), priority, notes, expires_at, time.time()),
             )
         self.audit(actor, "client.create", name, {"priority": priority})
         return key
@@ -1092,16 +1099,42 @@ class Store:
         # rename never hands its data to the client that already has that name
         self._update("clients", client_id, {"name", "priority", "enabled", "expires_at", "notes", "policy"}, fields)
         if old is not None:
+            new = fields["name"]
             with self.tx() as db:
                 for table in CLIENT_DATA_TABLES:
-                    db.execute(f"UPDATE {table} SET client = ? WHERE client = ?", (fields["name"], old))  # noqa: S608
+                    db.execute(f"UPDATE {table} SET client = ? WHERE client = ?", (new, old))  # noqa: S608
+                # its history too (Requests, Usage, monthly budgets); usage rows merge with any the name already has
+                db.execute("UPDATE requests SET client = ? WHERE client = ?", (new, old))
+                keys = ("day", "client", "model", "upstream")
+                counts = [r["name"] for r in db.execute("PRAGMA table_info(usage_daily)") if r["name"] not in keys]
+                db.execute(
+                    f"INSERT INTO usage_daily ({', '.join(keys + tuple(counts))}) "  # noqa: S608
+                    f"SELECT day, ?, model, upstream, {', '.join(counts)} FROM usage_daily WHERE client = ? "
+                    f"ON CONFLICT(day, client, model, upstream) DO UPDATE SET "
+                    + ", ".join(f"{c} = {c} + excluded.{c}" for c in counts),
+                    (new, old),
+                )
+                db.execute("DELETE FROM usage_daily WHERE client = ?", (old,))
         self.audit(actor, "client.update", str(client_id), fields)
 
     def regenerate_client_key(self, client_id: int, actor: str) -> str:
         key = new_client_key()
-        fields = {"key_hash": hash_key(key), "key_prefix": key[:6]}
+        fields = {"key_hash": hash_key(key), "key_prefix": key[:6], "key_secret": self.encrypt(key)}
         self._update("clients", client_id, set(fields), fields)
         self.audit(actor, "client.regenerate_key", str(client_id))
+        return key
+
+    def client_key(self, client_id: int, actor: str) -> str | None:
+        """A client's key, to show it again (audited); None when only its hash is kept (made before 0.42) or
+        it can't be decrypted (another SECRET_KEY)."""
+        rows = self.query("SELECT name, key_secret FROM clients WHERE id = ?", (client_id,))
+        if not rows or not rows[0]["key_secret"]:
+            return None
+        try:
+            key = self.decrypt(rows[0]["key_secret"])
+        except RuntimeError:
+            return None
+        self.audit(actor, "client.show_key", rows[0]["name"])
         return key
 
     def delete_client(self, client_id: int, actor: str) -> None:
