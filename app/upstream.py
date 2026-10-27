@@ -109,8 +109,20 @@ def finish_reason_from_body(body: bytes) -> str | None:
     return match.group(1).decode() if match else None
 
 
+# A streamed event that carries generated text: thinking, or the answer itself (text, a tool call's arguments,
+# a Responses-API delta). Only non-empty strings count: many providers open with an empty "content":"".
+_THINKING_TOKEN = re.compile(rb'"(?:reasoning_content|reasoning|thinking)"\s*:\s*"(?!")')
+_ANSWER_TOKEN = re.compile(rb'"(?:content|text|arguments|delta)"\s*:\s*"(?!")')
+_RESPONSES_REASONING = re.compile(rb'"type"\s*:\s*"response\.reasoning')
+
+MIN_SPEED_TOKENS = 16  # fewer output tokens than this say nothing about generation speed
+MIN_SPEED_S = 0.5
+
+
 class UsageSniffer:
-    """Watches an SSE byte stream for usage (usually the last chunk) and the finish reason."""
+    """Watches an SSE byte stream for usage (usually the last chunk) and the finish reason, and times it:
+    when the first token came (thinking included), when the answer itself began, the longest pause between
+    tokens, and when the last token came. Times are ``time.monotonic()`` values passed in with each chunk."""
 
     def __init__(self) -> None:
         self._buffer = b""
@@ -118,8 +130,12 @@ class UsageSniffer:
         self.completion_tokens: int | None = None
         self.cached_tokens: int | None = None
         self.finish_reason: str | None = None
+        self.first_token_at: float | None = None
+        self.answer_at: float | None = None
+        self.last_token_at: float | None = None
+        self.longest_pause_s = 0.0
 
-    def feed(self, chunk: bytes) -> None:
+    def feed(self, chunk: bytes, now: float | None = None) -> None:
         self._buffer += chunk
         *lines, self._buffer = self._buffer.split(b"\n")
         if len(self._buffer) > 1_000_000:  # never hold a runaway partial line
@@ -127,6 +143,8 @@ class UsageSniffer:
         for line in lines:
             if not line.startswith(b"data:"):
                 continue
+            if now is not None:
+                self._time(line, now)
             if b'"finish_reason"' in line and (reason := finish_reason_from_body(line)):
                 self.finish_reason = reason
             if b'"usage"' in line:
@@ -134,6 +152,34 @@ class UsageSniffer:
                 prompt, completion, cached = usage_from_body(payload)
                 if prompt is not None or completion is not None:
                     self.prompt_tokens, self.completion_tokens, self.cached_tokens = prompt, completion, cached
+
+    def _time(self, line: bytes, now: float) -> None:
+        thinking = _RESPONSES_REASONING.search(line) is not None  # its reasoning comes as a "delta" too
+        answer = not thinking and _ANSWER_TOKEN.search(line) is not None
+        if not (answer or thinking or _THINKING_TOKEN.search(line)):
+            return
+        if self.first_token_at is None:
+            self.first_token_at = now
+        elif self.last_token_at is not None:
+            self.longest_pause_s = max(self.longest_pause_s, now - self.last_token_at)
+        if answer and self.answer_at is None:
+            self.answer_at = now
+        self.last_token_at = now
+
+    def timings(self, sent_at: float | None) -> dict:
+        """Request-log fields, in ms from ``sent_at`` (when the request went to the provider): first token,
+        first answer token, output speed after the first token (tokens/s), longest pause between tokens."""
+        if sent_at is None or self.first_token_at is None:
+            return {}
+        fields = {
+            "first_token_ms": round((self.first_token_at - sent_at) * 1000),
+            "answer_ms": round((self.answer_at - sent_at) * 1000) if self.answer_at is not None else None,
+            "stall_ms": round(self.longest_pause_s * 1000),
+        }
+        span = (self.last_token_at or self.first_token_at) - self.first_token_at
+        if (self.completion_tokens or 0) >= MIN_SPEED_TOKENS and span >= MIN_SPEED_S:
+            fields["tokens_per_s"] = round(self.completion_tokens / span, 1)
+        return fields
 
 
 # Only these mean "waiting won't help". Google's per-minute 429s also say "quota exceeded" and

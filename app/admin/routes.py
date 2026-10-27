@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .. import __version__, totp
+from .. import __version__, latency, totp
 from .. import cron as cron_mod
 from .. import jobs as jobs_mod
 from ..agents import parse_tags
@@ -53,7 +53,7 @@ from ..store import ROLES, Store
 from ..thinking import EFFORTS as THINKING_EFFORTS
 from ..upstream import UA_MODES
 from ..websearch import PROVIDERS as SEARCH_PROVIDERS
-from .charts import usage_charts
+from .charts import lines, usage_charts
 from .security import (
     AdminSession,
     Sessions,
@@ -1335,6 +1335,39 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             plan_per_month=plan_per_month,
             catalog_loaded=bool(ctx.prices.prices),
             charts=usage_charts(rows, days),
+        )
+
+    @app.get("/admin/response-times")
+    async def response_times(request: Request):
+        """The provider's own timings per model and upstream (app/latency.py)."""
+        session = require(request, "viewer")
+        window = request.query_params.get("window", "24h")
+        if window not in latency.WINDOWS:
+            window = "24h"
+        now = time.time()
+        rows = await asyncio.to_thread(store.response_rows, now - latency.WINDOWS[window])
+        starts, series = latency.trend(rows, window, now)
+        fmt = "%m-%d %H:%M" if window == "7d" else "%H:%M"
+        labels = [datetime.fromtimestamp(t, UTC).strftime(fmt) for t in starts]
+        chart = (
+            lines(
+                "Time to first token (median, UTC)",
+                labels,
+                [(name, f"l{i}", values) for i, (name, values) in enumerate(series, 1)],
+                unit="s",
+            )
+            if series
+            else None
+        )
+        return page(
+            request,
+            "response_times.html",
+            session,
+            window=window,
+            windows=list(latency.WINDOWS),
+            summaries=latency.summarize(rows),
+            chart=chart,
+            keeps_rows=(store.get_tunables().get("request_log_days", Settings.request_log_days) or 0) > 0,
         )
 
     @app.get("/admin/usage.csv")

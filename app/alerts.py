@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from . import latency
 from .store import Store, Webhook
 
 log = logging.getLogger("queuerouter")
@@ -138,6 +139,20 @@ SPECS: dict[str, RuleSpec] = {
             86_400,
             5_000_000,
             "tokens",
+        ),
+        RuleSpec(
+            "slow_first_token",
+            "Slow first token",
+            f"A model's slowest 5% of streamed requests waited longer than this for their first token (from "
+            f"when they went to the provider), once it has at least {latency.ALERT_MIN_REQUESTS} in the window. "
+            "Checked every 10 minutes, per model and upstream.",
+            "warning",
+            False,
+            3600,
+            60,
+            "seconds",
+            3600,
+            "over the last (s)",
         ),
     )
 }
@@ -387,7 +402,7 @@ class Alerts:
                     )
 
     async def check_slow(self, now: float | None = None) -> None:
-        """Key expiry and daily tokens (database reads; at most every 10 minutes)."""
+        """Key expiry, daily tokens and slow first tokens (database reads; at most every 10 minutes)."""
         now = now or time.time()
         if now - self._last_slow < SLOW_CHECK_S:
             return
@@ -411,3 +426,14 @@ class Alerts:
             used = sum((await asyncio.to_thread(self.store.tokens_on, day)).values())
             if used >= (rule.threshold or 0):
                 self.fire("daily_tokens", day, f"{used:,} tokens used today", f"Threshold: {rule.threshold:,.0f}.")
+        rule = self.rules["slow_first_token"]
+        if rule.enabled:
+            rows = await asyncio.to_thread(self.store.response_rows, now - (rule.window_s or 3600))
+            for s, worst in latency.slow_pairs(rows, rule.threshold or 0):
+                self.fire(
+                    "slow_first_token",
+                    f"{s.model}@{s.upstream}",
+                    f"{s.model} on {s.upstream} is slow to start: {worst:.0f}s to the first token",
+                    f"The slowest 5% of its {s.timed} streamed requests in the last {rule.window_s}s took {worst:.0f}s "
+                    f"or more (median {s.first_med / 1000:.1f}s). See Response times.",
+                )

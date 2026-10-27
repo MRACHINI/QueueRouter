@@ -438,6 +438,15 @@ MIGRATIONS: list[str] = [
         updated_at REAL NOT NULL
     );
     """,
+    # 34: the provider's own timings per request (Response times page; app/main.py RequestLog)
+    """
+    ALTER TABLE requests ADD COLUMN headers_ms INTEGER;
+    ALTER TABLE requests ADD COLUMN first_token_ms INTEGER;
+    ALTER TABLE requests ADD COLUMN answer_ms INTEGER;
+    ALTER TABLE requests ADD COLUMN tokens_per_s REAL;
+    ALTER TABLE requests ADD COLUMN stall_ms INTEGER;
+    ALTER TABLE requests ADD COLUMN backoff_ms INTEGER;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -486,6 +495,12 @@ REQUEST_COLUMNS = (
     "role",
     "parent",
     "timeline",
+    "headers_ms",
+    "first_token_ms",
+    "answer_ms",
+    "tokens_per_s",
+    "stall_ms",
+    "backoff_ms",
 )
 
 
@@ -1160,6 +1175,16 @@ class Store:
             params.append(f"%,{tag},%")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.query(f"SELECT * FROM requests {where} ORDER BY ts DESC LIMIT ?", (*params, limit))  # noqa: S608
+
+    def response_rows(self, since: float) -> list[sqlite3.Row]:
+        """Timings of the requests finished since ``since``, by the model actually served (app/latency.py).
+        Councils are left out: their members' and judge's calls are rows of their own."""
+        return self.query(
+            "SELECT ts, COALESCE(target_model, model) AS model, upstream, outcome, headers_ms, first_token_ms, "
+            "answer_ms, tokens_per_s, stall_ms, backoff_ms FROM requests "
+            "WHERE ts >= ? AND upstream IS NOT NULL AND council IS NULL",
+            (since,),
+        )
 
     def request_filter_values(self) -> dict[str, list[str]]:
         values = {

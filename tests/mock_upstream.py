@@ -3,6 +3,7 @@
 Request body extras (all optional) steer its behaviour:
   "mock_delay":   seconds between streamed chunks / before a non-stream reply (default 0.05)
   "mock_chunks":  number of content chunks to stream (default 5)
+  "mock_think":   stream this many reasoning_content chunks first (default 0)
   "mock_status":  force this HTTP status
   "mock_fail":    fail this many times per "mock_key" with 503 before succeeding
   state["daily_quota"]: answer every request with a daily-quota 429 (set on the mock's state)
@@ -246,9 +247,16 @@ def create_mock(limit: int = 2) -> FastAPI:
                 },
             }
 
+        thoughts = int(body.get("mock_think", 0))
+
         async def gen():
             finished = False
             try:
+                for i in range(thoughts):
+                    await asyncio.sleep(delay)
+                    delta = {"reasoning_content": f"r{i} "}
+                    thought = {"id": "x", "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}
+                    yield f"data: {json.dumps(thought)}\n\n"
                 for i in range(chunks):
                     await asyncio.sleep(delay)
                     chunk = {
@@ -269,7 +277,7 @@ def create_mock(limit: int = 2) -> FastAPI:
                     "choices": [],
                     "usage": {
                         "prompt_tokens": 10,
-                        "completion_tokens": chunks,
+                        "completion_tokens": chunks + thoughts,
                         "prompt_tokens_details": {"cached_tokens": body.get("mock_cached", 0)},
                     },
                 }

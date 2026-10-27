@@ -6,7 +6,7 @@
   <td data-label="Upstream">{{ r.upstream or "—" }}</td>
   <td data-label="Outcome">{{ r.outcome }} <span class="muted small">{{ r.status }}{% if r.retries %} · {{ r.retries }} retries{% endif %}</span>{% if r.error %}<div class="small muted wrap-any">{{ r.error }}</div>{% endif %}</td>
   <td data-label="Queue ms">{{ r.queue_ms if r.queue_ms is not none else "—" }}</td>
-  <td data-label="First byte ms">{{ r.ttft_ms if r.ttft_ms is not none else "—" }}</td>
+  <td data-label="First byte ms">{{ r.ttft_ms if r.ttft_ms is not none else "—" }}{% if r.first_token_ms is not none %}<div class="small muted" title="The provider's own times, from when the request was sent: its queue, first token, answer start, output speed">provider {{ r.headers_ms }} · token {{ r.first_token_ms }}{% if r.answer_ms is not none and r.answer_ms > r.first_token_ms %} · answer {{ r.answer_ms }}{% endif %}{% if r.tokens_per_s is not none %} · {{ "%.0f" | format(r.tokens_per_s) }} tok/s{% endif %}</div>{% endif %}{% if r.backoff_ms %}<div class="small muted" title="Waited before retrying">retry wait {{ r.backoff_ms }}</div>{% endif %}</td>
   <td data-label="Upstream ms">{{ r.upstream_ms if r.upstream_ms is not none else "—" }}</td>
   <td data-label="In tokens"{% if r.cached_tokens %} title="{{ "{:,}".format(r.cached_tokens) }} of them cached"{% endif %}>{{ "{:,}".format(r.prompt_tokens) if r.prompt_tokens is not none else "—" }}{% if r.cached_tokens %} <span class="muted small">({{ "{:,}".format(r.cached_tokens) }} cached)</span>{% endif %}</td>
   <td data-label="Out tokens">{{ "{:,}".format(r.completion_tokens) if r.completion_tokens is not none else "—" }}</td>

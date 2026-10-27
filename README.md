@@ -109,6 +109,9 @@ from a **web admin UI**.
   page refreshes itself as requests finish. Time to first byte is recorded per request.
 - **Charts**: live running/queued chart on the dashboard (last 30 minutes); tokens, requests and
   cost per day on the Usage page (server-rendered SVG, no scripts from elsewhere).
+- **Response times** per model and upstream: the provider's own timings for streamed requests (its queue,
+  first token, thinking time, output speed, longest pause, retry waits), median and worst 5% over the last
+  hour, day or week, with a trend chart; an optional alert when a model gets slow to start.
 - **Structured-output repair**: JSON-mode replies and tool-call arguments with common breakage
   (code fences, extra text, trailing commas, cut-off brackets) are fixed before they reach the app
   (`X-QueueRouter-Structured: repaired | invalid`).
