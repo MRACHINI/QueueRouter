@@ -11,6 +11,7 @@ provider block for it: every model and alias the client may use, with context/ou
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 from collections.abc import Iterable
 from pathlib import Path
@@ -101,14 +102,27 @@ PLUGIN_PATH = "/opencode/queuerouter.js"
 _PLUGIN_TEMPLATE = Path(__file__).with_name("opencode_plugin.js")
 
 
+PLUGIN_HEADER = "X-QueueRouter-Plugin"  # on /v1/opencode-config: the current plugin's fingerprint
+
+
 @functools.cache
 def _plugin_template() -> str:
     return _PLUGIN_TEMPLATE.read_text(encoding="utf-8")
 
 
+@functools.cache
+def plugin_fingerprint() -> str:
+    """Changes only when the plugin itself does: installed copies update themselves when it differs."""
+    return hashlib.sha256(_plugin_template().encode()).hexdigest()[:16]
+
+
 def plugin_source(base_url: str) -> str:
     """The opencode plugin (app/opencode_plugin.js) pointed at this QueueRouter."""
-    return _plugin_template().replace("__QUEUEROUTER_BASE__", json.dumps(base_url)[1:-1])
+    return (
+        _plugin_template()
+        .replace("__QUEUEROUTER_BASE__", json.dumps(base_url)[1:-1])
+        .replace("__QUEUEROUTER_PLUGIN__", plugin_fingerprint())
+    )
 
 
 def plugin_install_commands(base_url: str) -> dict[str, str]:

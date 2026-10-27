@@ -110,6 +110,28 @@ async def test_plugin_is_served_pointing_at_this_router(make_stack):
         assert "https://qr.example.com/opencode/queuerouter.js" in page
 
 
+async def test_plugin_fingerprint_for_self_update(make_stack):
+    stack = make_stack(bootstrap=OWNER)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        plugin = (await c.get("/opencode/queuerouter.js")).text
+        first = await c.get("/v1/opencode-config", headers=stack.headers)
+        fingerprint = first.headers["x-queuerouter-plugin"]
+        assert len(fingerprint) == 16 and f'const PLUGIN = "{fingerprint}";' in plugin
+        assert "__QUEUEROUTER" not in plugin  # every placeholder filled in
+        again = {**stack.headers, "If-None-Match": first.headers["etag"]}
+        unchanged = await c.get("/v1/opencode-config", headers=again)
+        assert unchanged.status_code == 304 and unchanged.headers["x-queuerouter-plugin"] == fingerprint
+
+        await login(c, stack.url)
+        page = (await c.get("/admin/settings")).text
+        assert 'name="opencode_plugin_updates"' in page
+        form = {"csrf": csrf_of(page)}  # every checkbox unticked, this one included
+        assert "m=saved" in (await c.post("/admin/settings", data=form)).headers["location"]
+        assert stack.app.state.store.get_tunables()["opencode_plugin_updates"] is False
+        off = await c.get("/v1/opencode-config", headers=stack.headers)
+        assert off.status_code == 200 and "x-queuerouter-plugin" not in off.headers  # plugins stay as they are
+
+
 async def test_config_etag_for_live_refresh(make_stack):
     stack = make_stack(bootstrap=OWNER)
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:

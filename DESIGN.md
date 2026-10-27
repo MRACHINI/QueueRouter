@@ -1275,6 +1275,15 @@ for any request, the time waited before retries. A Response times page (nav) sho
 and worst 5% over 1 h / 24 h / 7 d, and a chart of the busiest pairs' median first token. The Requests page shows them
 per row. Alert "Slow first token" (off by default): worst-5% first token over N s in the window, at least 5 requests.
 Not done: typical speeds from Artificial Analysis (needs its key; its field names unverified), Prometheus metrics.
+v0.41.0: the opencode plugin updates itself. /v1/opencode-config (200 and 304) carries X-QueueRouter-Plugin, the
+fingerprint of the plugin file QueueRouter serves (sha256 of app/opencode_plugin.js, 16 hex), which is also written
+into the served file (const PLUGIN). When the two differ the plugin downloads /opencode/queuerouter.js, checks it
+(that fingerprint, the same BASE, its default export, at most 1 MB), writes it beside itself and renames it over its
+own file (copy when Windows refuses the rename); opencode loads it at its next start, and the terminal UI shows a
+toast. A failed try waits an hour; copies in other project folders see the file already updated. Off for everyone:
+Settings → opencode (opencode_plugin_updates; no header is sent); on one machine: QUEUEROUTER_AUTO_UPDATE=0; never
+for a plugin loaded from node_modules or not from a file. Not done: signing the plugin in CI (a compromised server
+could hand out code; the README says so). Plugins from before 0.41 need one manual re-install.
 
 ### Later (agreed, not scheduled)
 

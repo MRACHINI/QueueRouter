@@ -12,12 +12,15 @@
 //   and sends title/summary requests at low priority.
 // QueueRouter itself groups a conversation's requests (subagents included) from the session
 // headers opencode sends, with or without this plugin.
+// It also updates itself when QueueRouter serves a newer plugin (QUEUEROUTER_AUTO_UPDATE=0 = off).
 
-import { readFileSync } from "node:fs";
+import { copyFileSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const BASE = "__QUEUEROUTER_BASE__"; // filled in by QueueRouter when it serves this file
+const PLUGIN = "__QUEUEROUTER_PLUGIN__"; // this file's fingerprint, also filled in by QueueRouter
 const PROVIDER = "queuerouter";
 const KEY_ENV = "QUEUEROUTER_KEY";
 const LOW_PRIORITY_AGENTS = new Set(["title", "summary"]);
@@ -48,12 +51,73 @@ async function fetchModels(previousTag) {
       headers: { Authorization: `Bearer ${key}`, ...(previousTag ? { "If-None-Match": previousTag } : {}) },
       signal: AbortSignal.timeout(10000),
     });
+    selfUpdate(res.headers.get("x-queuerouter-plugin")); // in the background
     if (res.status === 304) return { tag: previousTag };
     if (!res.ok) return null;
     const config = await res.json();
     return { tag: res.headers.get("etag"), provider: config.provider?.[PROVIDER], key };
   } catch {
     return null; // QueueRouter unreachable: keep what we have
+  }
+}
+
+// -- self-update ------------------------------------------------------------------------------
+// Every model list comes with the fingerprint of the plugin QueueRouter serves now. When it differs, the
+// plugin downloads that file, checks it and swaps it in for its own; opencode runs it from its next start.
+// QUEUEROUTER_AUTO_UPDATE=0 turns this off here; QueueRouter's own setting turns it off for everyone.
+const AUTO_UPDATE = !/^(0|false|no|off)$/i.test(process.env.QUEUEROUTER_AUTO_UPDATE ?? "");
+const MAX_PLUGIN_CHARS = 1024 * 1024;
+const UPDATE_RETRY_MS = 3600 * 1000;
+let installed = PLUGIN; // the fingerprint in the file now (this copy keeps running the one it loaded)
+let lastTry = { fingerprint: null, at: 0 };
+let announce = (message) => console.log(message); // the terminal UI shows a toast instead
+
+// This plugin's own file; none when it wasn't loaded from a file of its own (e.g. an npm package).
+function ownFile() {
+  try {
+    const file = import.meta.url.startsWith("file:") ? fileURLToPath(import.meta.url) : null;
+    return file && !/[\\/]node_modules[\\/]/.test(file) ? file : null;
+  } catch {
+    return null;
+  }
+}
+
+async function selfUpdate(latest) {
+  if (!AUTO_UPDATE || !latest || latest === installed || !/^[0-9a-f]{16,64}$/.test(latest)) return;
+  if (lastTry.fingerprint === latest && Date.now() - lastTry.at < UPDATE_RETRY_MS) return;
+  lastTry = { fingerprint: latest, at: Date.now() };
+  const file = ownFile();
+  if (!file) return;
+  const marker = `const PLUGIN = "${latest}";`;
+  try {
+    if (readFileSync(file, "utf8").includes(marker)) return void (installed = latest); // another copy did it
+  } catch {
+    return;
+  }
+  const temp = `${file}.${process.pid}.update`;
+  try {
+    const res = await fetch(`${BASE}/opencode/queuerouter.js`, { signal: AbortSignal.timeout(30000) });
+    const text = res.ok ? await res.text() : "";
+    const expected =
+      text.length <= MAX_PLUGIN_CHARS &&
+      text.includes(marker) &&
+      text.includes(`const BASE = ${JSON.stringify(BASE)};`) && // the same QueueRouter
+      /\nexport default \{ id: "queuerouter",/.test(text);
+    if (!expected) return; // not the plugin we asked for: keep this one
+    writeFileSync(temp, text);
+    try {
+      renameSync(temp, file); // in one step: never a half-written plugin
+    } catch {
+      copyFileSync(temp, file); // Windows may refuse to replace a file that is open
+    }
+    installed = latest;
+    announce("QueueRouter plugin updated: restart opencode to use it");
+  } catch {
+    // unreachable or not writable: the next try is an hour away
+  } finally {
+    try {
+      rmSync(temp, { force: true });
+    } catch {}
   }
 }
 
@@ -203,6 +267,12 @@ async function server({ client }) {
   let seen = null; // ETag of the model list this opencode instance loaded
   let reloadWanted = null; // the ETag of a newer list waiting to be loaded
   const busy = new Set(); // sessions working right now: never reload under them
+  announce = async (message) => {
+    try {
+      await client.app?.log?.({ body: { service: "queuerouter", level: "info", message } });
+      await client.tui?.showToast?.({ body: { message, variant: "info" } });
+    } catch {}
+  };
 
   async function checkModels() {
     const next = await fetchModels(seen);
