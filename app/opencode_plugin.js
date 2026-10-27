@@ -63,7 +63,8 @@ async function fetchModels(previousTag) {
 
 // -- self-update ------------------------------------------------------------------------------
 // Every model list comes with the fingerprint of the plugin QueueRouter serves now. When it differs, the
-// plugin downloads that file, checks it and swaps it in for its own; opencode runs it from its next start.
+// plugin downloads that file, checks it and swaps it in for its own; the desktop app reloads it, else opencode
+// runs it from its next start.
 // QUEUEROUTER_AUTO_UPDATE=0 turns this off here; QueueRouter's own setting turns it off for everyone.
 const AUTO_UPDATE = !/^(0|false|no|off)$/i.test(process.env.QUEUEROUTER_AUTO_UPDATE ?? "");
 const MAX_PLUGIN_CHARS = 1024 * 1024;
@@ -111,7 +112,7 @@ async function selfUpdate(latest) {
       copyFileSync(temp, file); // Windows may refuse to replace a file that is open
     }
     installed = latest;
-    announce("QueueRouter plugin updated: restart opencode to use it");
+    announce("QueueRouter plugin updated (opencode reloads it, or restart if it doesn't)");
   } catch {
     // unreachable or not writable: the next try is an hour away
   } finally {
