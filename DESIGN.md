@@ -1286,6 +1286,10 @@ for a plugin loaded from node_modules or not from a file. Not done: signing the 
 could hand out code; the README says so). Plugins from before 0.41 need one manual re-install.
 v0.41.1: the update message no longer insists on a restart: tested on Windows, the opencode desktop app reloads the
 plugin as soon as its file changes (the reloaded copy carries the served fingerprint, so it doesn't update again).
+v0.41.2: an upstream whose model list is unknown (a Claude account whose /models fails) no longer gets models other
+upstreams list: a council with "hf:..." members sent some of them there by load, and they came back 404. Such an
+upstream only gets models no list names. A 404 from an upstream fails over to the next candidate (not counted
+against its circuit breaker).
 
 ### Later (agreed, not scheduled)
 

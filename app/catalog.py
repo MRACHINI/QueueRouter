@@ -65,6 +65,11 @@ class Catalogs:
             return None
         return {m["id"] for m in entry.models if raw or self.offered(upstream_id, m["id"])}
 
+    def failed(self, upstream_id: int) -> bool:
+        """Its list couldn't be fetched (and none was ever): not merely not asked for yet."""
+        entry = self._entries.get(upstream_id)
+        return entry is not None and not entry.ok and bool(entry.error)
+
     def models(self, upstream_id: int, raw: bool = False) -> list[dict]:
         entry = self._entries.get(upstream_id)
         if not (entry and entry.ok):

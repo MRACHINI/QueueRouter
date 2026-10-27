@@ -7,6 +7,8 @@ Request body extras (all optional) steer its behaviour:
   "mock_status":  force this HTTP status
   "mock_fail":    fail this many times per "mock_key" with 503 before succeeding
   state["daily_quota"]: answer every request with a daily-quota 429 (set on the mock's state)
+  state["models_status"]: answer GET /v1/models with this status (no usable model list)
+  state["missing_models"]: answer requests for these models with a 404
 """
 
 from __future__ import annotations
@@ -43,6 +45,8 @@ def create_mock(limit: int = 2) -> FastAPI:
 
     @app.get("/v1/models")
     async def models():
+        if state.get("models_status"):  # a provider without a usable model list
+            return JSONResponse({"error": {"message": "no model list"}}, status_code=state["models_status"])
         extra = [{"id": m, "object": "model"} for m in state.get("extra_models", [])]  # no size reported
         extra += state.get("extra_model_entries", [])  # whole entries, e.g. {"id", "reasoning": true, "engine"}
         return {"object": "list", "data": [{"id": "mock-model", "object": "model", "max_model_len": 262144}, *extra]}
@@ -187,6 +191,8 @@ def create_mock(limit: int = 2) -> FastAPI:
         # Per-model behaviour (for fallback chains): fail, block by policy, or refuse in text.
         model = body.get("model")
         state.setdefault("models", []).append(model)
+        if model in state.get("missing_models", []):  # an Anthropic-style "no such model"
+            return JSONResponse({"error": {"type": "not_found_error", "message": f"model: {model}"}}, status_code=404)
         # Google-style 429s: a used-up daily quota, or a per-minute limit for the first N tries.
         if state.get("daily_quota") or (body.get("mock_429_models") or {}).get(model) == "daily":
             return JSONResponse(
