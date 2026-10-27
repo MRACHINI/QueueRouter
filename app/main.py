@@ -791,17 +791,20 @@ def create_app(
         """Usable upstreams for ``model``: those that list it, or all of them if none does
         (the upstream then decides; lists may be stale or incomplete), plus those whose list isn't fetched
         yet (just added). One whose list can't be fetched only gets models no list names: a Claude account
-        must not get "hf:..." models another upstream lists. ``only`` restricts the choice (an alias pinned
-        to some upstreams). A model hidden on an upstream (Upstreams page) isn't sent there, except with
-        ``raw``: an alias, summary model or council member names it."""
+        must not get "hf:..." models another upstream lists, nor ones hidden there. ``only`` restricts the
+        choice (an alias pinned to some upstreams). A model hidden on an upstream (Upstreams page) isn't
+        sent there, except with ``raw``: an alias, summary model or council member names it."""
         usable = [t for t in snapshot.upstreams.values() if t.usable and (not only or t.id in only)]
         if model:
             listing = [t for t in usable if (ids := catalogs.ids(t.id, raw)) is not None and model in ids]
             pending = [t for t in usable if catalogs.ids(t.id) is None and not catalogs.failed(t.id)]
             if listing:
                 usable = listing + pending
-            elif not raw:
-                usable = [t for t in usable if catalogs.offered(t.id, model)]
+            else:
+                if any(model in (catalogs.ids(t.id, raw=True) or ()) for t in usable):  # listed, but hidden
+                    usable = [t for t in usable if not catalogs.failed(t.id)]
+                if not raw:
+                    usable = [t for t in usable if catalogs.offered(t.id, model)]
         order = {uid: i for i, uid in enumerate(snapshot.upstreams)}
         return tuple(Candidate(t.id, t.pool.id, t.upstream.weight, order[t.id]) for t in usable)
 
@@ -823,14 +826,15 @@ def create_app(
             for c in candidates
         )
 
-    def unknown_model(name: str | None, alias=None) -> JSONResponse | None:
+    def unknown_model(name: str | None, alias=None, raw: bool = False) -> JSONResponse | None:
         """A 404 with suggestions when no upstream offers ``name`` (only when every upstream's model
-        list is known: a list we couldn't fetch proves nothing)."""
+        list is known: a list we couldn't fetch proves nothing). ``raw``: hidden models count (an alias
+        or QueueRouter's own request names it)."""
         only = alias.upstream_ids if alias else ()
         usable = [t for t in snapshot.upstreams.values() if t.usable and (not only or t.id in only)]
         if not name or not usable:
             return None
-        lists = [catalogs.ids(t.id, raw=alias is not None) for t in usable]
+        lists = [catalogs.ids(t.id, raw=raw or alias is not None) for t in usable]
         if any(ids is None for ids in lists) or any(name in ids for ids in lists):
             return None
         known = sorted({m for ids in lists for m in ids} | set(snapshot.aliases))
@@ -3298,7 +3302,7 @@ def create_app(
             return refusal
         no_fallbacks = not (alias and alias.fallbacks)  # with fallbacks, a missing target just moves on
         checked = cfg().unknown_model_check and no_fallbacks and not target_pin  # a pinned upstream decides
-        if checked and (missing := unknown_model(target_model, alias)) is not None:
+        if checked and (missing := unknown_model(target_model, alias, raw=internal)) is not None:
             return missing
         if allow_council and alias and alias.council != "off" and isinstance(payload, dict):
             lane = request_lane(request_headers, client)
@@ -3335,7 +3339,7 @@ def create_app(
         for i, named in enumerate(chain):
             step_model, pin = split_pin(named)  # "model@upstream": only that upstream
             only = pin or (alias.upstream_ids if alias and i == 0 else ())
-            step_candidates = candidates_for(step_model, only, raw=alias is not None or bool(pin))
+            step_candidates = candidates_for(step_model, only, raw=alias is not None or bool(pin) or internal)
             if not step_candidates:
                 continue
             if not isinstance(payload, dict):  # not JSON: forward as-is, no chain

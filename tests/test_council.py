@@ -336,3 +336,22 @@ async def test_progress_shown_as_reasoning(make_stack):
     assert "✓ mock-model answered" in joined and "✓ small-model answered" in joined
     assert "is choosing between 2 answers" in joined and "Judge chose answer 2: small-model" in joined
     assert text.index("Judge chose answer 2") < text.index("answer from small-model")  # progress, then the answer
+
+
+async def test_members_hidden_models_skip_an_upstream_without_a_list(make_stack, make_mock):
+    """A member's model hidden on the upstream that lists it (Upstreams page) still goes there, as for an alias;
+    never to an upstream whose model list can't be fetched (a Claude account answered such members 404)."""
+    from tests.test_upstream_models import choose
+    from tests.test_upstreams import add_listless_upstream
+
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack)  # members mock-model and small-model
+        await choose(c, stack.app.state.store.list_upstreams()[0].id, ["mock-model"])  # small-model hidden
+        claude = await add_listless_upstream(c, make_mock)
+        for _ in range(3):
+            r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+            assert r.status_code == 200 and r.headers["x-queuerouter-council"] == "pick 2/2: small-model", r.text
+        direct = {"model": "small-model", "messages": [{"role": "user", "content": "hi"}]}
+        assert (await c.post("/v1/chat/completions", headers=stack.headers, json=direct)).status_code == 503
+    assert stack.mock["models"].count("small-model") == 3 and "small-model" not in claude.get("models", [])

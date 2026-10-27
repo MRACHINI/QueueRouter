@@ -35,6 +35,18 @@ async def break_upstream(c, upstream_id):
     assert "m=saved" in r.headers["location"]
 
 
+async def add_listless_upstream(c, make_mock, name="claude"):
+    """An upstream whose model list can't be fetched (like a Claude account), once QueueRouter has tried."""
+    url, state = make_mock(limit=4)
+    state["models_status"] = 500
+    await add_upstream(c, name, url, max_concurrency=4)
+    for _ in range(100):  # its list is fetched in the background: wait until that has failed
+        if "HTTP 500: no model list" in (await c.get("/admin/upstreams")).text:
+            return state
+        await asyncio.sleep(0.05)
+    raise AssertionError("the model list didn't fail")
+
+
 async def test_load_balancing_across_pools(make_stack, make_mock):
     stack = make_stack(limit=1, bootstrap=OWNER)
     second_url, second = make_mock(limit=1)
@@ -149,18 +161,10 @@ async def test_upstream_without_model_list_gets_no_listed_model(make_stack, make
 
     stack = make_stack(limit=1, bootstrap=OWNER, models_cache_s=0)  # lists fetched again when asked
     stack.mock["extra_models"] = ["hf:listed"]
-    claude_url, claude = make_mock(limit=4)
-    claude["models_status"] = 500
-    claude["missing_models"] = ["hf:listed"]
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
-        await add_upstream(c, "claude", claude_url, max_concurrency=4)
-        for _ in range(100):  # its list is fetched in the background: wait until that has failed
-            if "HTTP 500: no model list" in (await c.get("/admin/upstreams")).text:
-                break
-            await asyncio.sleep(0.05)
-        else:
-            raise AssertionError("the model list didn't fail")
+        claude = await add_listless_upstream(c, make_mock)
+        claude["missing_models"] = ["hf:listed"]
         await add_alias(c, "member", "hf:listed")  # aliases and council members name models "raw"
         assert "hf:listed" in [m["id"] for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]]
         api = f"{stack.url}/v1/chat/completions"
