@@ -209,6 +209,13 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "SearXNG address",
         "Only for SearXNG, e.g. http://searxng:8080 (its JSON output must be enabled).",
     ),
+    "opencode_plugin_updates": (
+        "opencode",
+        "Update the plugin automatically",
+        "Installed QueueRouter plugins (0.41 and later) replace their file with this server's when it changes; "
+        "opencode uses the new one after a restart. Off: re-install by hand. A machine can opt out with "
+        "QUEUEROUTER_AUTO_UPDATE=0.",
+    ),
     "opencode_rank": (
         "opencode",
         "Order models by strength",

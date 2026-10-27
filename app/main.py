@@ -48,7 +48,16 @@ from .compaction import compact as compact_request
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
 from .limits import OVERFLOW_STATUS, ModelLimits, error_message, overflow_body, overflow_of
-from .opencode import DEFAULT_OUTPUT, PLUGIN_PATH, model_limits, plugin_source, provider_config, wellknown_manifest
+from .opencode import (
+    DEFAULT_OUTPUT,
+    PLUGIN_HEADER,
+    PLUGIN_PATH,
+    model_limits,
+    plugin_fingerprint,
+    plugin_source,
+    provider_config,
+    wellknown_manifest,
+)
 from .params import CHARS_PER_TOKEN, apply_rules, estimate_prompt_tokens, parse_rules, requested_output, too_long
 from .pricing import Price, PriceCatalog, resolve, token_cost
 from .quotas import MonthlyUsage, month_of, over_quota, quota_share, seconds_to_next_month
@@ -1708,9 +1717,12 @@ def create_app(
         body = json.dumps(provider_config(public_base(request), await opencode_models(client, plugin))).encode()
         # An ETag lets the opencode plugin check for new models and aliases cheaply (304 when unchanged).
         etag = '"' + hashlib.sha256(body).hexdigest()[:20] + '"'
+        headers = {"ETag": etag}
+        if cfg().opencode_plugin_updates:  # the plugin replaces itself when this differs from its own
+            headers[PLUGIN_HEADER] = plugin_fingerprint()
         if request.headers.get("if-none-match") == etag:
-            return Response(status_code=304, headers={"ETag": etag})
-        return Response(body, media_type="application/json", headers={"ETag": etag, "Cache-Control": "no-cache"})
+            return Response(status_code=304, headers=headers)
+        return Response(body, media_type="application/json", headers={**headers, "Cache-Control": "no-cache"})
 
     @app.get("/.well-known/opencode")
     async def wellknown_posix(request: Request):

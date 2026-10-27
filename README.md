@@ -272,6 +272,13 @@ mkdir -p ~/.config/opencode/plugin && curl -fsSL https://queuerouter.example.com
 $d="$HOME/.config/opencode/plugin"; New-Item -ItemType Directory -Force $d | Out-Null; Invoke-WebRequest https://queuerouter.example.com/opencode/queuerouter.js -OutFile "$d/queuerouter.js"
 ```
 
+From 0.41 the plugin **updates itself**: when QueueRouter serves a changed plugin, the installed file is replaced
+with it (checked, and swapped in one step) and opencode uses it from its next start (the terminal UI says so in a
+toast). Plugins installed before 0.41 need one last manual install. Turn it off for everyone with **Settings →
+opencode → Update the plugin automatically**, or on one machine with `QUEUEROUTER_AUTO_UPDATE=0`. This means your
+QueueRouter server hands out code that runs on every machine with the plugin, so keep the server as safe as the
+machines.
+
 **Config file** — for older opencode, or if you prefer files: download it from the admin
 (**Clients → opencode.json** on the client's row), or with curl as below; save it as
 `opencode.json` in your project or point `OPENCODE_CONFIG` at it, then
