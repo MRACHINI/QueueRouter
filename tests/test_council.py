@@ -355,3 +355,22 @@ async def test_members_hidden_models_skip_an_upstream_without_a_list(make_stack,
         direct = {"model": "small-model", "messages": [{"role": "user", "content": "hi"}]}
         assert (await c.post("/v1/chat/completions", headers=stack.headers, json=direct)).status_code == 503
     assert stack.mock["models"].count("small-model") == 3 and "small-model" not in claude.get("models", [])
+
+
+async def test_text_only_members_get_a_note_instead_of_images(make_stack):
+    """The app sends the council's conversation with an image: members (and judges) whose model list says they
+    read text only get a note in its place, rather than being refused ("does not support image inputs")."""
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["extra_model_entries"] = [
+        {"id": "vision-model", "input_modalities": ["text", "image"]},
+        {"id": "text-model", "input_modalities": ["text"]},
+    ]
+    stack.mock["text_only_models"] = ["text-model", "mock-model"]  # mock-model (the judge): its list doesn't say
+    picture = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+    asked = [ASK[0], {"role": "user", "content": [{"type": "text", "text": "plan the refactor"}, picture]}]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack, members="vision-model, text-model")
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": asked})
+        assert r.status_code == 200 and r.headers["x-queuerouter-council"] == "pick 2/2: text-model", r.text
+    assert stack.mock["saw_images"] == ["vision-model"]
+    assert stack.mock["models"].count("text-model") == 1  # answered the first time

@@ -1294,6 +1294,10 @@ v0.41.3: the real cause of that council case: QueueRouter's own requests (counci
 routed like a client's, so a member model hidden on Synthetic (Upstreams page) could only go to the upstream without
 a list. They now route like an alias (hidden models allowed, as documented), and a model listed but hidden somewhere
 never goes to an upstream whose list can't be fetched (a client asking for it gets 503, as with no upstream).
+v0.41.4: council members and judges (and summaries) whose model reads text only get the conversation with each image
+replaced by a note ("an image was attached here; this model can't see images") instead of being refused (Synthetic:
+"does not appear to support image inputs"). Whether a model reads images is judged as for opencode: its upstream's
+list, else the reference list, else text only.
 
 ### Later (agreed, not scheduled)
 

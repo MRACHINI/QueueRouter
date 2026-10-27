@@ -1718,6 +1718,25 @@ def create_app(
             return False
         return bool(reference.images(model))
 
+    def text_only_fit(payload: dict) -> dict:
+        """``payload`` with its images replaced by a note when its model doesn't read them (judged as for
+        opencode): council members and judges get the conversation the app sent for the alias."""
+        stripped = council_mod.without_images(payload)
+        model = payload.get("model")
+        if stripped is payload or not isinstance(model, str):  # no images
+            return payload
+        alias = snapshot.aliases.get(model)
+        name, pin = split_pin(alias.target_model if alias else model)
+        only = pin or (alias.upstream_ids if alias else ())
+        pairs = [
+            (t, e)
+            for t in snapshot.upstreams.values()
+            if t.usable and (not only or t.id in only)
+            for e in catalogs.models(t.id, raw=True)
+            if e["id"] == name
+        ]
+        return payload if reads_images(name or "", pairs) else stripped
+
     def price_json(price: Price) -> dict:
         """USD per million tokens, for the plugin (opencode works out the session cost from it)."""
         return {
@@ -1935,7 +1954,8 @@ def create_app(
         """A chat completion through the normal pipeline (queue, limits, Requests page) as ``client``;
         the answer's body, or None if it failed. ``origin``: the headers of the request it is made for,
         so it identifies as the same app (User-Agent, session ids; never credentials), on the Requests
-        page and at the provider; ``role`` and ``parent`` label it there."""
+        page and at the provider; ``role`` and ``parent`` label it there. Images become a note for a
+        model that reads text only."""
         scope = {
             "type": "http",
             "method": "POST",
@@ -1963,7 +1983,7 @@ def create_app(
                 Request(scope, _never_disconnects),
                 client,
                 "chat/completions",
-                json.dumps(payload).encode(),
+                json.dumps(text_only_fit(payload)).encode(),
                 headers,
                 "",
                 allow_defer=False,
@@ -2533,7 +2553,7 @@ def create_app(
                 request,
                 client,
                 path,
-                json.dumps(judged).encode(),
+                json.dumps(text_only_fit(judged)).encode(),
                 judge_headers,
                 query,
                 allow_defer=False,
