@@ -1309,6 +1309,9 @@ Admin pages use the whole window width (was capped at 1100 px; phones keep a 16 
 v0.43.0: with strength order on, opencode's model names carry the score after the number: `03 · 45.1 · model ·
 upstreams` (one decimal; `~45.1` when it's the base model's score, as for fine-tunes). Aliases without a score of
 their own stay `00 · …`; models without a score keep their plain name.
+v0.43.1: Settings → Circuit breaker threshold 0 means never take an upstream out of rotation (it meant "out on the
+first failure"); setting it while one is out brings it back at once. Its failures still show as the upstream's last
+error, and requests keep their retries.
 
 ### Later (agreed, not scheduled)
 

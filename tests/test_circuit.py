@@ -30,6 +30,23 @@ def test_opens_after_threshold_and_recovers_via_single_trial(monkeypatch):
     assert changes == ["open", "open", "closed"]
 
 
+def test_threshold_zero_never_takes_an_upstream_out(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    changes = []
+    c = Circuits(threshold=1, cooldown_s=60)
+    c.on_change = lambda uid, state, reason: changes.append(state)
+    c.failure(1, "HTTP 502")
+    assert c.state(1) == "open"
+    c.threshold = 0  # set to 0 in Settings while it's out: back at once
+    assert c.state(1) == "closed" and c.allows(1)
+    for _ in range(20):
+        c.failure(1, "HTTP 502")
+    assert c.state(1) == "closed" and c.allows(1) and c.describe(1)["last_error"] == "HTTP 502"
+    c.success(1)
+    assert changes == ["open", "closed"]  # the "recovered" notice still clears the alert
+
+
 def test_success_resets_count_and_abandon_frees_trial(monkeypatch):
     now = [0.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
