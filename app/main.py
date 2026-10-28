@@ -404,6 +404,8 @@ def create_app(
         """The keep-alive interval, never so small that waiting turns into a busy loop."""
         return max(0.1, cfg().keepalive_interval_s)
 
+    upstream_identity: dict[int, tuple[str, str]] = {}  # upstream id -> (base URL, key) its model list came from
+
     def apply_snapshot() -> None:
         s = snapshot.settings
         queue.set_scheduling(s.aging_s, s.session_window_s, s.session_aware, s.fair_share, s.lb_strategy)
@@ -416,7 +418,12 @@ def create_app(
         queue.set_pools(pools)
         circuits.threshold, circuits.cooldown_s = s.circuit_threshold, s.circuit_cooldown_s
         guard.limit, guard.block_s = s.auth_fail_limit, s.auth_block_s
-        catalogs.forget(set(snapshot.upstreams))
+        # an upstream whose address or key changed may be another provider or plan: its model list is fetched again
+        now_is = {t.id: (t.upstream.base_url, t.api_key) for t in snapshot.upstreams.values()}
+        moved = {i for i, was in upstream_identity.items() if i in now_is and now_is[i] != was}
+        upstream_identity.clear()
+        upstream_identity.update(now_is)
+        catalogs.forget(set(snapshot.upstreams) - moved)
         catalogs.filters = {
             t.id: rule for t in snapshot.upstreams.values() if (rule := parse_filter(t.upstream.model_filter))
         }
@@ -497,10 +504,13 @@ def create_app(
 
     async def refresh_quotas() -> None:
         """Re-read this month's usage (and prices); alert clients close to a monthly quota."""
-        price_overrides.clear()
-        price_overrides.update(await asyncio.to_thread(store.list_model_prices))
+        overrides = await asyncio.to_thread(store.list_model_prices)
+        price_overrides.clear()  # swapped at once: requests finishing meanwhile keep the manual prices
+        price_overrides.update(overrides)
         month = month_of(time.time())
         monthly.refresh(await asyncio.to_thread(store.usage_month, month))
+        for entry in pending_usage:  # finished but not written yet: not in those rows, so counted again here
+            monthly.observe(entry)
         for key in snapshot.clients.values():
             share = quota_share(key.policy, monthly.used(key.name))
             if share is not None:
@@ -645,24 +655,35 @@ def create_app(
                 continue
             last_health = time.monotonic()
             for target in list(snapshot.upstreams.values()):
-                if not target.usable:
+                if not target.usable or target.id in health_checks:
                     continue
                 state = circuits.state(target.id)
-                try:
-                    if state == "half-open" and circuits.allows(target.id):
-                        circuits.begin(target.id)
-                        if await refresh_catalog(target):
-                            circuits.success(target.id)
-                        else:
-                            circuits.failure(target.id, "health probe failed")
-                    elif state == "closed" and catalogs.stale(target.id, CATALOG_MAX_AGE_S):
-                        await refresh_catalog(target)
-                except Exception as exc:  # e.g. an unusable address: a failed probe, not a stopped loop
-                    if state == "half-open":
-                        circuits.failure(target.id, f"health probe failed: {type(exc).__name__}")
-                    log.error(
-                        json.dumps({"event": "health_probe_failed", "upstream": target.id, "error": repr(exc)[:200]})
-                    )
+                # an upstream whose model list was never fetched (a Claude account) would fail this probe every
+                # time and stay out: its trial is the next request instead
+                probing = state == "half-open" and circuits.allows(target.id) and not catalogs.failed(target.id)
+                if probing:
+                    circuits.begin(target.id)
+                elif not (state == "closed" and catalogs.stale(target.id, CATALOG_MAX_AGE_S)):
+                    continue
+                health_checks[target.id] = asyncio.ensure_future(health_check(target, probing))
+
+    health_checks: dict[int, asyncio.Future] = {}  # upstream id -> its probe or model-list refresh, while it runs
+
+    async def health_check(target: Target, probing: bool) -> None:
+        """A half-open upstream's probe, or a model-list refresh: beside the background loop, not in it (an
+        unreachable upstream can take its whole connect timeout, and the loop wakes the queue every second)."""
+        try:
+            ok = await refresh_catalog(target)
+            if probing and ok:
+                circuits.success(target.id)
+            elif probing:
+                circuits.failure(target.id, "health probe failed")
+        except Exception as exc:  # e.g. an unusable address: a failed probe, not a stopped loop
+            if probing:
+                circuits.failure(target.id, f"health probe failed: {type(exc).__name__}")
+            log.error(json.dumps({"event": "health_probe_failed", "upstream": target.id, "error": repr(exc)[:200]}))
+        finally:
+            health_checks.pop(target.id, None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -697,6 +718,8 @@ def create_app(
         yield
         task.cancel()
         idle_task.cancel()
+        for check in list(health_checks.values()):
+            check.cancel()
         await job_runner.stop()
         await flush_usage()
         if exporter.pending and cfg().otel_endpoint:
@@ -809,7 +832,11 @@ def create_app(
         usable = [t for t in snapshot.upstreams.values() if t.usable and (not only or t.id in only)]
         if model:
             listing = [t for t in usable if (ids := catalogs.ids(t.id, raw)) is not None and model in ids]
-            pending = [t for t in usable if catalogs.ids(t.id) is None and not catalogs.failed(t.id)]
+            pending = [  # its choice of models is known before its list is: a model hidden there stays hidden
+                t
+                for t in usable
+                if catalogs.ids(t.id) is None and not catalogs.failed(t.id) and (raw or catalogs.offered(t.id, model))
+            ]
             if listing:
                 usable = listing + pending
             else:
@@ -1358,9 +1385,15 @@ def create_app(
                     try:
                         outgoing = build_request(adm, target)
                         adm.rlog.sent_at = time.monotonic()
-                        response = await app.state.client.send(outgoing, stream=True)
+                        sending = app.state.client.send(outgoing, stream=True)
+                        if adm.deadline is not None:  # the key's total time limit holds before the first byte too
+                            sending = asyncio.wait_for(sending, max(0.0, adm.deadline - time.monotonic()))
+                        response = await sending
                         if adm.rlog.fields["stream"]:  # a non-streamed answer's headers come with all of it
                             adm.rlog.fields["headers_ms"] = round((time.monotonic() - adm.rlog.sent_at) * 1000)
+                    except TimeoutError:
+                        yield Failed(504, "request exceeded this key's total time limit", "request_timeout")
+                        return
                     except (
                         httpx.TransportError,  # any network failure (write errors too), not only the usual ones
                         httpx.InvalidURL,  # a base URL httpx can't use (e.g. "host:8080v1"): this upstream's fault
@@ -1505,7 +1538,11 @@ def create_app(
             return Got(Replay(response, content, complete=True), event.target), False
         upstream = event.target.upstream
         adm.rlog.fields["error"] = f"too long for {model} on {upstream.name}: {message}"[:500]
-        if limit and model and context_sizes.learned.get((upstream.id, model)) != limit:
+        # only a limit this request could have hit is learned: providers repeat parts of a request in their errors,
+        # so a short request "saying" a small limit mustn't shrink the model for every client
+        estimate = adm.rlog.fields.get("estimate")
+        plausible = isinstance(estimate, int | float) and limit and estimate * stats.ratio(model) >= limit / 2
+        if plausible and model and context_sizes.learned.get((upstream.id, model)) != limit:
             context_sizes.learned[(upstream.id, model)] = limit
             await asyncio.to_thread(store.learn_model_limit, upstream.id, model, limit, message)
             log.info(
@@ -2292,6 +2329,7 @@ def create_app(
 
             deadline = time.monotonic() + alias.orch_seconds
             rounds, tasks, web_used = 0, [0], [0]
+            told_to_finish = False  # a round ran past the rounds or time budget: its next answer is the last
             proposals: dict[str, dict] = {}  # P1, P2…: app tool calls members proposed
             final: list[bytes] = []  # set when it adopts proposals: the answer
 
@@ -2406,7 +2444,8 @@ def create_app(
                     rlog.fields["council"] = summary
                     progress("Orchestrator is answering.")
                     return body, None
-                if rounds > alias.orch_rounds:  # told to finish, still delegating: keep what it says
+                # told to finish (rounds or time used up), still delegating: keep what it says
+                if rounds > alias.orch_rounds or told_to_finish:
                     rlog.fields["council"] = f"{summary} (budget)"
                     progress("Budget used up: taking the orchestrator's answer as it is.")
                     return council_mod.without_calls(body, own_names), None
@@ -2414,6 +2453,7 @@ def create_app(
                     progress("Orchestrator", f": {note}")
                 rounds += 1
                 closed = rounds > alias.orch_rounds or time.monotonic() > deadline
+                told_to_finish = told_to_finish or closed
                 results = await asyncio.gather(*(run(call, closed) for call in mine))
                 if final:  # it adopted members' proposals: they are the answer
                     rlog.fields["council"] = (
@@ -3196,8 +3236,8 @@ def create_app(
         try:
             payload = json.loads(body)
             chat = anthropic_api.to_chat(payload)
-        except ValueError as exc:
-            message = str(exc) if isinstance(exc, anthropic_api.Unsupported) else "the body must be JSON"
+        except (ValueError, AttributeError, KeyError, TypeError) as exc:  # not JSON, or fields of the wrong kind
+            message = str(exc) if isinstance(exc, anthropic_api.Unsupported) else "the body isn't a valid request"
             return JSONResponse(anthropic_api.error(400, message), status_code=400)
         model = str(payload.get("model") or "")
         response = await serve(
@@ -3260,8 +3300,8 @@ def create_app(
                     )
                 history = found
             chat, turn = responses_api.to_chat(payload, history)
-        except ValueError as exc:
-            message = str(exc) if isinstance(exc, responses_api.Unsupported) else "the body must be JSON"
+        except (ValueError, AttributeError, KeyError, TypeError) as exc:  # not JSON, or fields of the wrong kind
+            message = str(exc) if isinstance(exc, responses_api.Unsupported) else "the body isn't a valid request"
             return error_response(message, 400, "invalid_request_error")
         model = str(payload.get("model") or "")
         response_id = responses_api.new_id("resp")
@@ -3343,8 +3383,8 @@ def create_app(
         request_headers = headers if headers is not None else dict(request.headers)
         try:
             payload = json.loads(body) if body else {}
-        except ValueError:
-            payload = {}
+        except ValueError:  # e.g. multipart (audio transcriptions): forwarded as it is, no rules written into it
+            payload = None
         model = payload.get("model") if isinstance(payload, dict) else None
         model = model if isinstance(model, str) else None
         alias = snapshot.aliases.get(model) if model else None
@@ -3725,7 +3765,7 @@ def create_app(
                             yield sse_error(message, status)
                             return
                         try:
-                            async for chunk in response.aiter_bytes():
+                            async for chunk in within(response.aiter_bytes(), adm.deadline):
                                 sniffer.feed(chunk, time.monotonic())
                                 if rlog.fields["ttft_ms"] is None:
                                     rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
@@ -3744,6 +3784,12 @@ def create_app(
                         except httpx.HTTPError as exc:
                             status = 502
                             yield MID_STREAM + sse_error(f"upstream stream interrupted: {type(exc).__name__}", 502)
+                            return
+                        except TimeoutError:  # the stream stalled past the key's total time limit
+                            outcome, status = "timeout", 504
+                            yield MID_STREAM + sse_error(
+                                "request exceeded this key's total time limit", 504, "request_timeout"
+                            )
                             return
                         if held_back is not None and (rest := held_back.flush()):
                             yield rest
@@ -3814,6 +3860,23 @@ def alias_entry(alias, target: dict | None) -> dict:
         entry["context_length"] = alias.virtual_context
     entry["queuerouter"] = {"type": "alias", "target": alias.target_model}
     return entry
+
+
+async def within(chunks: AsyncIterator[bytes], deadline: float | None) -> AsyncIterator[bytes]:
+    """``chunks`` until the monotonic ``deadline`` (None: no limit); TimeoutError once it passes, also while a
+    stalled provider sends nothing (checking only between chunks would wait for its read timeout)."""
+    iterator = chunks.__aiter__()
+    while True:
+        if deadline is None:
+            chunk = await anext(iterator, None)
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            chunk = await asyncio.wait_for(anext(iterator, None), remaining)
+        if chunk is None:
+            return
+        yield chunk
 
 
 def _granted_at(rlog: RequestLog) -> float | None:

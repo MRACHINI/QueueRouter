@@ -42,6 +42,19 @@ def test_overflow_parsing():
     assert re.search(r"reduce the length of the messages", error["message"], re.I)
 
 
+async def test_a_short_request_does_not_teach_a_small_limit(make_stack):
+    """An error that "says" a limit far above what the request could have hit (a provider repeating the request's
+    own text) is passed on, but not learned for every client."""
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["extra_models"] = ["small-model"]
+    stack.mock.update(context_limits={"small-model": (2000, "google")}, overflow_always=True)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await c.get("/v1/models", headers=stack.headers)
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=body("short"))
+        assert r.status_code == 400
+    assert await asyncio.to_thread(stack.app.state.store.list_model_limits) == []
+
+
 async def test_limit_learned_from_provider_error(make_stack):
     stack = make_stack(bootstrap=OWNER, models_cache_s=0)
     stack.mock["extra_models"] = ["small-model"]

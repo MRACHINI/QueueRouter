@@ -1361,6 +1361,21 @@ v0.45.0: queue fixes from the same review.
   second user message in a row (some chat templates refuse that); the pick judge no longer inherits the app's
   `response_format`, `stop`, `n` or `logprobs` (a JSON schema made it answer in JSON, and the wrong answer won).
 - Tracing: spans that couldn't be sent wait for the collector (up to the queue's limit) instead of being dropped.
+v0.46.0: more fixes from the same review.
+- Health probes and model-list refreshes run beside the background loop, not in it: an unreachable upstream (up
+  to its 15 s connect timeout) no longer holds up queue wake-ups, usage writes, jobs and alerts.
+- An upstream whose model list was never fetched (a Claude account) isn't probed when half-open (the probe asks
+  for that list, so it always failed and kept the upstream out): its next request is the trial.
+- Changing an upstream's address or key fetches its model list again (the old provider's list was used for up to an
+  hour); an upstream whose list isn't fetched yet still honours the models hidden there.
+- Monthly quotas: manual prices are swapped in at once (not cleared during the reload), and requests finished but
+  not written yet still count.
+- Anthropic / Responses endpoints answer 400 (not 500) to bodies with fields of the wrong kind; a body that isn't
+  JSON (multipart audio) is forwarded as it is, without the client's parameter rules written into it.
+- The orchestrator's time budget ends its loop like the rounds budget (it was only told to finish).
+- A key's total time limit holds for streams too: before the provider's first byte and while a stream stalls.
+- A context limit stated in a provider's error is learned only when the request could have reached it (half of
+  it at least): providers repeat parts of a request in errors, so a short one could shrink a model for everyone.
 
 ### Later (agreed, not scheduled)
 
