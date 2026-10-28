@@ -274,7 +274,8 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
     "circuit_threshold": (
         "Upstreams",
         "Circuit breaker threshold",
-        "Consecutive failures before an upstream is taken out of rotation.",
+        "Consecutive failures (5xx, connection errors) before an upstream is taken out of rotation. "
+        "0 = never: requests keep going to it (and retry).",
     ),
     "circuit_cooldown_s": ("Upstreams", "Circuit cooldown (s)", "Then one trial request decides if it's back."),
     "sticky_routing": (

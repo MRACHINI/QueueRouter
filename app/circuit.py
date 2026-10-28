@@ -5,6 +5,7 @@ open       after ``threshold`` consecutive failures (5xx, connection errors, tim
            traffic for ``cooldown_s``. 429 is "busy", not a failure.
 half-open  after the cooldown, exactly one trial request (or health probe) is let through:
            success closes the circuit, failure opens it again.
+``threshold`` 0: never taken out (an upstream already out is back at once).
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ class Circuits:
 
     def state(self, upstream_id: int) -> str:
         s = self._get(upstream_id)
-        if s.opened_at is None:
+        if s.opened_at is None or self.threshold <= 0:
             return "closed"
         if time.monotonic() - s.opened_at >= self.cooldown_s:
             return "half-open"
@@ -61,6 +62,8 @@ class Circuits:
     def failure(self, upstream_id: int, reason: str) -> None:
         s = self._get(upstream_id)
         s.last_error = reason
+        if self.threshold <= 0:  # never taken out
+            return
         if s.opened_at is not None:  # failed trial (or a straggler) -> open again
             s.opened_at, s.trial_in_flight = time.monotonic(), False
             self._notify(upstream_id, "open", reason)

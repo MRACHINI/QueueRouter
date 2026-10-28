@@ -304,7 +304,7 @@ class Settings:
     opencode_plugin_updates: bool = True  # installed opencode plugins replace themselves with the served one
     rank_index: str = "intelligence"  # intelligence | coding | agentic (Artificial Analysis)
     rank_key: str = ""  # Artificial Analysis API key (free tier)
-    circuit_threshold: int = 5  # consecutive failures before an upstream is taken out
+    circuit_threshold: int = 5  # consecutive failures before an upstream is taken out (0 = never)
     circuit_cooldown_s: float = 60  # then one trial request decides whether it's back
 
     @classmethod
