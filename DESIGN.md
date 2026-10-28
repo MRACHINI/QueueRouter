@@ -500,8 +500,9 @@ non-stream in flight → upstream call cancelled.
 ## 10. Usage and cost tracking
 
 - Tokens from `usage` in responses; for streams from the final chunk. The proxy sets
-  `stream_options.include_usage=true` if the client didn't (verify ArliAI support; if
-  unsupported, estimate with a tokenizer and mark the row `estimated`).
+  `stream_options.include_usage=true` on streamed chat/completions requests if the client didn't (since v0.44.0) and
+  leaves that usage-only chunk out of the client's stream; a client that set `include_usage` itself (true or false)
+  gets what it asked for.
 - Each request row stores tokens + optional cost from `model_prices`.
 - ArliAI is flat-rate, so cost is optional — useful for pay-per-token upstreams added later.
 - Nightly rollup into `usage_daily`; UI charts per client / model / upstream / day.
@@ -1312,6 +1313,32 @@ their own stay `00 · …`; models without a score keep their plain name.
 v0.43.1: Settings → Circuit breaker threshold 0 means never take an upstream out of rotation (it meant "out on the
 first failure"); setting it while one is out brings it back at once. Its failures still show as the upstream's last
 error, and requests keep their retries.
+v0.44.0: fixes from a third six-part code review.
+- Request log and usage: a value with a lone surrogate (JSON "\ud800", e.g. in `user`) made the whole write fail
+  and every row in it was lost (a client could stay out of its budgets that way): such strings are stored with "?".
+  Logged content: a reply streamed in an unexpected shape (content parts, tool arguments as an object) blocked every
+  later save for good and piled up in memory; now read as far as possible, else kept as it came.
+- Streams: QueueRouter asks for the usage chunk itself (see §10); without it most providers sent no token counts,
+  so token limits, budgets and the Usage page counted 0 for apps that didn't ask.
+- Councils: the combine judge is QueueRouter's own call like the members (a key allowed only the alias got 403
+  after all members had answered); members and the orchestrator only get the web tools the alias has on (with
+  search on and page reading off, a member could still have a page read); page reads end after 45 s and turn a bad
+  address or an odd charset into "couldn't read" instead of failing the council.
+- Retries: an upstream's own retry limit (the Upstreams field, now "Retries", was labelled "429 retries" but also
+  covers 5xx and connection errors) no longer stops failing over to another upstream; the client's / global budget
+  decides that.
+- "Allow without key" holds only while no client exists at all: disabling or expiring every client no longer opens
+  the API.
+- A client's own `model@upstream` no longer reaches a model hidden on that upstream (aliases and QueueRouter's own
+  calls still may).
+- A 2FA code typed in other digits (Arabic-Indic ١٢٣...) works instead of failing with a 500.
+- Rate-limit history is pruned for clients without limits too (it grew for good).
+- A base URL httpx can't use ("host:8080v1") is that upstream's error (failover, circuit) instead of a 500.
+- Batches: one whose files can't be written (results that can't be read, too big) is marked failed; it used to be
+  tried again on every tick, holding up every other job, and made QueueRouter fail to start.
+- opencode plugin: updates itself only over https (or from QueueRouter on the same machine), follows no
+  redirects for it, and skips a download bigger than a plugin can be; over plain http anyone on the network path
+  could have handed it other code to run.
 
 ### Later (agreed, not scheduled)
 

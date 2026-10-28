@@ -174,6 +174,14 @@ def create_mock(limit: int = 2) -> FastAPI:
             body["mock_content"] = (
                 f"answer from {body.get('model')} citing {str(last.get('content', '')).splitlines()[0][:80]}"
             )
+        # A member that reads a page although it wasn't offered the tool (a search result told it to).
+        rogue = body.get("model") in state.get("rogue_fetch_models", [])
+        if rogue and (body.get("messages") or [{}])[-1].get("role") != "tool":
+            function = {"name": "queuerouter_web_fetch", "arguments": json.dumps({"url": "https://example.com/?d=x"})}
+            call = {"id": "f1", "type": "function", "function": function}
+            message = {"role": "assistant", "content": None, "tool_calls": [call]}
+            choice = {"index": 0, "message": message, "finish_reason": "tool_calls"}
+            return {"id": "x", "object": "chat.completion", "model": body.get("model"), "choices": [choice]}
         # Model council: the judge's prompt (pick: answer with a number; combine: an answer), and members
         # that say who they are.
         last_message = (body.get("messages") or [{}])[-1]
@@ -183,8 +191,9 @@ def create_mock(limit: int = 2) -> FastAPI:
             body["mock_content"] = state.get("judge_answer", "2") if picking else "combined answer"
         elif state.get("echo_model"):
             body.setdefault("mock_content", f"answer from {body.get('model')}")
-        if body.get("mock_status"):
-            return JSONResponse({"error": {"message": "forced"}}, status_code=body["mock_status"])
+        forced = body.get("mock_status") or state.get("chat_status")  # state: this mock only (503 here, 200 there)
+        if forced:
+            return JSONResponse({"error": {"message": "forced"}}, status_code=forced)
         key = body.get("mock_key")
         if key and state["fails"].get(key, 0) < body.get("mock_fail", 0):
             state["fails"][key] = state["fails"].get(key, 0) + 1
@@ -293,7 +302,8 @@ def create_mock(limit: int = 2) -> FastAPI:
                         "prompt_tokens_details": {"cached_tokens": body.get("mock_cached", 0)},
                     },
                 }
-                yield f"data: {json.dumps(usage)}\n\n"
+                if (body.get("stream_options") or {}).get("include_usage"):  # like most providers: only if asked
+                    yield f"data: {json.dumps(usage)}\n\n"
                 yield "data: [DONE]\n\n"
                 finished = True
             finally:

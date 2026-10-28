@@ -53,6 +53,23 @@ def test_restart_requeues_running_jobs(tmp_path):
     store.close()
 
 
+def test_a_batch_that_cannot_be_finished_is_marked_failed(tmp_path):
+    """Its files can't be written (here: a result that can't be decrypted): failed, instead of being tried again
+    on every tick, which held up every other job and stopped QueueRouter from starting."""
+    from app.jobs import JobRunner
+
+    store = open_store(Bootstrap(data_dir=str(tmp_path)), None)
+    batch = {"id": "batch_x", "client": "c", "endpoint": "/v1/chat/completions", "input_file_id": "file_x"}
+    store.create_batch({**batch, "completion_window": "24h", "created": time.time(), "expires_at": None, "total": 1})
+    store.create_jobs([new_job("c", {"request": CHAT}) | {"id": "job_x", "batch_id": "batch_x", "custom_id": "r1"}])
+    store.finish_job("job_x", "succeeded", status_code=200)
+    with store.tx() as db:
+        db.execute("UPDATE jobs SET result = 'not-a-token' WHERE id = 'job_x'")
+    JobRunner(store, execute=None, http=lambda: None, usage_of=lambda body: ()).start()  # used to raise
+    assert store.get_batch("batch_x")["status"] == "failed"
+    store.close()
+
+
 async def test_jobs_api(make_stack):
     stack = make_stack()
     h = stack.headers

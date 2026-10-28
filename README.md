@@ -277,7 +277,8 @@ with it (checked, and swapped in one step). The desktop app reloads it by itself
 its next start (the terminal UI says so in a toast). Plugins installed before 0.41 need one last manual install. Turn it off for everyone with **Settings →
 opencode → Update the plugin automatically**, or on one machine with `QUEUEROUTER_AUTO_UPDATE=0`. This means your
 QueueRouter server hands out code that runs on every machine with the plugin, so keep the server as safe as the
-machines.
+machines. From 0.44 a plugin only updates itself over https (or from QueueRouter on the same machine): over plain
+http anyone on the network path could hand it other code. With an http address, re-install by hand.
 
 **Config file** — for older opencode, or if you prefer files: download it from the admin
 (**Clients → opencode.json** on the client's row), or with curl as below; save it as

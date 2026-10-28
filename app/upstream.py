@@ -182,6 +182,41 @@ class UsageSniffer:
         return fields
 
 
+class UsageChunkFilter:
+    """Passes an SSE stream on line by line, leaving out the usage-only chunk (``"choices": []`` with a
+    ``usage``) that QueueRouter asked for itself: an app that didn't ask may not expect a chunk without
+    choices. Everything else goes through unchanged; a partial line waits for its end."""
+
+    def __init__(self) -> None:
+        self._buffer = b""
+
+    def feed(self, chunk: bytes) -> bytes:
+        self._buffer += chunk
+        cut = self._buffer.rfind(b"\n") + 1
+        if not cut:
+            if len(self._buffer) > 1_000_000:  # never hold a runaway line: pass it on as it is
+                return self.flush()
+            return b""
+        ready, self._buffer = self._buffer[:cut], self._buffer[cut:]
+        if b'"usage"' not in ready:
+            return ready
+        return b"".join(line for line in ready.splitlines(keepends=True) if not _usage_only(line))
+
+    def flush(self) -> bytes:
+        rest, self._buffer = self._buffer, b""
+        return b"" if _usage_only(rest) else rest
+
+
+def _usage_only(line: bytes) -> bool:
+    if not line.startswith(b"data:") or b'"usage"' not in line:
+        return False
+    try:
+        data = json.loads(line[5:])
+    except ValueError:
+        return False
+    return isinstance(data, dict) and data.get("choices") == [] and bool(data.get("usage"))
+
+
 # Only these mean "waiting won't help". Google's per-minute 429s also say "quota exceeded" and
 # mention billing, so those words alone don't count.
 _HARD_QUOTA_HINTS = ("perday", "per_day", "per day", "limit: 0", "insufficient_quota")

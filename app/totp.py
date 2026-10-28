@@ -8,6 +8,7 @@ import hmac
 import secrets
 import struct
 import time
+import unicodedata
 from urllib.parse import quote, urlencode
 
 import segno
@@ -37,7 +38,8 @@ def code_at(secret: str, counter: int) -> str:
 def verify(secret: str, code: str, now: float | None = None, after: int = -1) -> int | None:
     """The time step ``code`` matches (only steps later than ``after``, so a code can't be
     replayed), or None."""
-    code = "".join(ch for ch in str(code) if ch.isdigit())
+    # any script's digits (١٢٣ from an Arabic keyboard) as 0-9: compare_digest takes ASCII only
+    code = "".join(str(unicodedata.decimal(ch)) for ch in str(code) if ch.isdecimal())
     if len(code) != DIGITS:
         return None
     current = int((now if now is not None else time.time()) // STEP_S)

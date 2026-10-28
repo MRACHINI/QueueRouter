@@ -194,6 +194,40 @@ async def test_404_fails_over_to_another_upstream(make_stack, make_mock):
     assert all(u["state"] == "closed" for u in stats["upstreams"])  # a 404 isn't a broken upstream
 
 
+async def test_an_upstreams_retry_limit_does_not_stop_failover(make_stack, make_mock):
+    """Retries 0 on an upstream means "don't ask it again", not "don't try another one" (a 503 used to reach the
+    app although another upstream had the model)."""
+    stack = make_stack(limit=1, bootstrap=OWNER, lb_strategy="ordered")
+    stack.mock["chat_status"] = 503
+    other_url, other = make_mock(limit=1)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await add_upstream(c, "other", other_url)
+        store = stack.app.state.store
+        first = next(u for u in store.list_upstreams() if u.name != "other")
+        store.update_upstream(first.id, "test", max_retries=0)
+        stack.app.state.reload()
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("f"))
+        assert r.status_code == 200, r.text
+    assert other["served"] == 1
+
+
+async def test_a_base_url_httpx_cant_use_is_the_upstreams_error(make_stack):
+    """A base URL like "http://host:8080v1" (a missing "/"): the request fails as an upstream error, not with a 500."""
+    stack = make_stack(bootstrap=OWNER, max_retries=0)
+    store = stack.app.state.store
+    upstream = store.list_upstreams()[0]
+    store.update_upstream(upstream.id, "test", base_url=upstream.base_url.replace("/v1", "v1"))
+    stack.app.state.reload()
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("u"))
+        assert r.status_code == 502 and "InvalidURL" in r.text, r.text
+        await login(c, stack.url)
+        csrf = csrf_of((await c.get("/admin/upstreams")).text)
+        r = await c.post(f"/admin/upstreams/{upstream.id}/test", data={"csrf": csrf})
+        assert r.status_code == 200 and "InvalidURL" in r.text
+
+
 async def test_upstream_test_button_and_pool_rules(make_stack):
     stack = make_stack(bootstrap=OWNER)
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:

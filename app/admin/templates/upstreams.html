@@ -84,7 +84,7 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
         <label class="inline-field">weight <input type="number" name="weight" min="1" max="100" value="{{ u.weight }}"></label>
         <label class="check"><input type="checkbox" name="enabled" {% if u.enabled %}checked{% endif %}> enabled</label>
         <label class="check"><input type="checkbox" name="paused" {% if u.paused %}checked{% endif %}> paused</label>
-        <label class="inline-field">429 retries <input type="number" name="max_retries" min="0" value="{{ u.max_retries if u.max_retries is not none else '' }}" placeholder="global"></label>
+        <label class="inline-field" title="Asking this upstream again after a 429, 5xx or connection error. Failing over to another upstream is not limited by it.">Retries <input type="number" name="max_retries" min="0" value="{{ u.max_retries if u.max_retries is not none else '' }}" placeholder="global"></label>
         <label class="inline-field">User-Agent <select name="ua_mode">
           <option value="keep" {% if u.ua_mode == "keep" %}selected{% endif %}>keep</option>
           <option value="remove" {% if u.ua_mode == "remove" %}selected{% endif %}>neutral</option>
@@ -151,7 +151,7 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
     <small class="muted">If the provider limits /v1/embeddings separately (ArliAI does), they get their own slots and never make chat wait</small></label>
   <label data-new-pool>Plan price ($ / month) <input type="number" step="any" name="monthly_price" min="0" placeholder="optional, for savings"></label>
   <label>Weight <input type="number" name="weight" min="1" max="100" value="1"></label>
-  <label>429 retries <input type="number" name="max_retries" min="0" placeholder="from preset / global">
+  <label title="Asking this upstream again after a 429, 5xx or connection error. Failing over to another upstream is not limited by it.">Retries <input type="number" name="max_retries" min="0" placeholder="from preset / global">
     <small class="muted">Rate-limit retries before giving up (a used-up daily quota never waits)</small></label>
   <label>Outgoing User-Agent
     <select name="ua_mode">

@@ -20,11 +20,15 @@ class RateLimiter:
         self._tokens: dict[str, deque[tuple[float, int]]] = {}
 
     def record_request(self, client: str, now: float | None = None) -> None:
-        self._requests.setdefault(client, deque()).append(now if now is not None else time.time())
+        now = now if now is not None else time.time()
+        self._requests.setdefault(client, deque()).append(now)
+        self._prune(client, now)  # here too: clients without limits are never asked how long to wait
 
     def record_tokens(self, client: str, tokens: int, now: float | None = None) -> None:
         if tokens > 0:
-            self._tokens.setdefault(client, deque()).append((now if now is not None else time.time(), tokens))
+            now = now if now is not None else time.time()
+            self._tokens.setdefault(client, deque()).append((now, tokens))
+            self._prune(client, now)
 
     def seed(self, client: str, requests: list[float], tokens: list[tuple[float, int]]) -> None:
         """Restore the last 24 h after a restart (from the usage log)."""

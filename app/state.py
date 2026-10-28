@@ -46,6 +46,7 @@ class Snapshot:
     mode: str = "running"
     maintenance_message: str = ""
     aliases: dict[str, Alias] = field(default_factory=dict)  # enabled aliases by name
+    any_clients: bool = False  # any client at all, disabled and expired ones too ("allow without key" is off then)
 
     @property
     def configured(self) -> bool:
@@ -60,15 +61,17 @@ def load_snapshot(store: Store) -> Snapshot:
         for u in store.list_upstreams()
         if u.pool_id in pools
     }
+    every_client = store.list_clients()
     clients = {
         c.key_hash: ClientKey(c.name, c.key_hash, c.priority, c.policy, c.expires_at)
-        for c in store.list_clients()
+        for c in every_client
         if c.enabled and not c.expired
     }
     mode = store.get_meta("mode") or "running"
     message = store.get_meta("maintenance_message") or ""
     aliases = {a.name: a for a in store.list_aliases() if a.enabled}
-    return Snapshot(settings, clients, pools, upstreams, mode if mode in MODES else "running", message, aliases)
+    mode = mode if mode in MODES else "running"
+    return Snapshot(settings, clients, pools, upstreams, mode, message, aliases, any_clients=bool(every_client))
 
 
 def open_store(bootstrap: Bootstrap, seed: Settings | None) -> Store:

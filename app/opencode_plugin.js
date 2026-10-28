@@ -67,6 +67,10 @@ async function fetchModels(previousTag) {
 // runs it from its next start.
 // QUEUEROUTER_AUTO_UPDATE=0 turns this off here; QueueRouter's own setting turns it off for everyone.
 const AUTO_UPDATE = !/^(0|false|no|off)$/i.test(process.env.QUEUEROUTER_AUTO_UPDATE ?? "");
+// Only over https, or from this computer: over plain http anyone on the way could hand over a "plugin" of
+// their own, and it would run with opencode's rights from then on.
+const UPDATE_SAFE =
+  /^https:\/\//i.test(BASE) || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(BASE);
 const MAX_PLUGIN_CHARS = 1024 * 1024;
 const UPDATE_RETRY_MS = 3600 * 1000;
 let installed = PLUGIN; // the fingerprint in the file now (this copy keeps running the one it loaded)
@@ -84,7 +88,7 @@ function ownFile() {
 }
 
 async function selfUpdate(latest) {
-  if (!AUTO_UPDATE || !latest || latest === installed || !/^[0-9a-f]{16,64}$/.test(latest)) return;
+  if (!AUTO_UPDATE || !UPDATE_SAFE || !latest || latest === installed || !/^[0-9a-f]{16,64}$/.test(latest)) return;
   if (lastTry.fingerprint === latest && Date.now() - lastTry.at < UPDATE_RETRY_MS) return;
   lastTry = { fingerprint: latest, at: Date.now() };
   const file = ownFile();
@@ -97,8 +101,10 @@ async function selfUpdate(latest) {
   }
   const temp = `${file}.${process.pid}.update`;
   try {
-    const res = await fetch(`${BASE}/opencode/queuerouter.js`, { signal: AbortSignal.timeout(30000) });
-    const text = res.ok ? await res.text() : "";
+    // no redirects: the plugin comes from this QueueRouter itself, and no bigger than a plugin can be
+    const res = await fetch(`${BASE}/opencode/queuerouter.js`, { signal: AbortSignal.timeout(30000), redirect: "error" });
+    const size = Number(res.headers.get("content-length") ?? 0);
+    const text = res.ok && size <= MAX_PLUGIN_CHARS * 4 ? await res.text() : "";
     const expected =
       text.length <= MAX_PLUGIN_CHARS &&
       text.includes(marker) &&

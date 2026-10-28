@@ -270,7 +270,7 @@ def batch_view(store: Store, row: sqlite3.Row) -> dict:
         "expires_at": int(row["expires_at"]) if row["expires_at"] else None,
         "finalizing_at": None,
         "completed_at": int(row["finished_at"]) if row["finished_at"] and row["status"] == "completed" else None,
-        "failed_at": None,
+        "failed_at": int(row["finished_at"]) if row["finished_at"] and row["status"] == "failed" else None,
         "expired_at": None,
         "cancelling_at": int(row["cancelled_at"]) if row["cancelled_at"] else None,
         "cancelled_at": int(row["finished_at"]) if row["finished_at"] and row["status"] == "cancelled" else None,
@@ -283,9 +283,21 @@ _BATCH_LOCK = threading.Lock()  # two jobs of a batch finishing at once must not
 
 
 def finish_batch_if_done(store: Store, batch_id: str) -> bool:
-    """Once every job of a batch is done, write the output / error files (OpenAI's format)."""
+    """Once every job of a batch is done, write the output / error files (OpenAI's format). A batch whose files
+    can't be written (results that can't be read, too big for one file) is marked failed: tried again on every
+    tick, it held up every other job and even QueueRouter's start. A busy database is only tried again later."""
     with _BATCH_LOCK:
-        return _finish_batch(store, batch_id)
+        try:
+            return _finish_batch(store, batch_id)
+        except sqlite3.OperationalError as exc:  # e.g. "database is locked": next time
+            log.warning(json.dumps({"event": "batch_finish_later", "batch": batch_id, "error": repr(exc)[:200]}))
+        except Exception as exc:
+            log.error(json.dumps({"event": "batch_finish_failed", "batch": batch_id, "error": repr(exc)[:200]}))
+            try:
+                store.update_batch(batch_id, status="failed", finished_at=time.time())
+            except sqlite3.Error:
+                pass
+        return False
 
 
 def _finish_batch(store: Store, batch_id: str) -> bool:
@@ -405,6 +417,7 @@ class JobRunner:
         for batch_id in await asyncio.to_thread(self.store.expire_jobs, now):
             await asyncio.to_thread(finish_batch_if_done, self.store, batch_id)
         if time.monotonic() - self._swept_at >= SWEEP_S:
+            self._swept_at = time.monotonic()  # first: a sweep that fails is not tried again on every tick
             pending = await asyncio.to_thread(self.store.pending_callbacks)
             for batch_id in await asyncio.to_thread(self.store.open_batch_ids):
                 await asyncio.to_thread(finish_batch_if_done, self.store, batch_id)
