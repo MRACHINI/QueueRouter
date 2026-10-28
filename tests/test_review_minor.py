@@ -52,6 +52,18 @@ def test_judge_prompt_joins_a_message_with_parts_and_drops_the_apps_format():
     assert combined["response_format"] == {"type": "json_schema"}  # the answer the app gets: its format
 
 
+async def test_adapters_answer_400_to_bodies_of_the_wrong_shape(make_stack):
+    stack = make_stack()
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        for body in ({"model": "mock-model", "input": "hi", "text": "x"}, {"model": "mock-model", "tools": ["x"]}):
+            r = await c.post("/v1/responses", headers=stack.headers, json=body)
+            assert r.status_code == 400, (body, r.text)
+        message = {"model": "mock-model", "max_tokens": 5, "messages": [{"role": "user", "content": "hi"}]}
+        for extra in ({"tools": ["x"]}, {"metadata": []}, {"system": 5}):
+            r = await c.post("/v1/messages", headers=stack.headers, json={**message, **extra})
+            assert r.status_code in (200, 400), (extra, r.text)  # never a 500
+
+
 def test_overloaded_and_cloudflare_statuses_are_failures():
     assert {529, 520, 524} <= FAILURE_STATUS and 429 not in FAILURE_STATUS
 

@@ -133,6 +133,13 @@ async def test_total_timeout(make_stack):
         ) as s:
             text = "".join([chunk async for chunk in s.aiter_text()])
         assert "request_timeout" in text
+        # a stream that stalls (one chunk after 3 s) ends at the limit, not when the provider sends again
+        started = asyncio.get_running_loop().time()
+        async with c.stream(
+            "POST", "/v1/chat/completions", headers=stack.headers, json=chat("stall", stream=True, mock_delay=3)
+        ) as s:
+            text = "".join([chunk async for chunk in s.aiter_text()])
+        assert "request_timeout" in text and asyncio.get_running_loop().time() - started < 2.5
 
 
 async def test_modes(make_stack):

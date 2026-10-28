@@ -110,7 +110,8 @@ def create_mock(limit: int = 2) -> FastAPI:
         # Context limits set by a test: state["context_limits"][model] = (tokens, style) rejects longer
         # prompts (about 4 characters per token) the way that provider words it.
         limit, style = (state.get("context_limits") or {}).get(body.get("model"), (None, None))
-        if limit and len(json.dumps(body.get("messages") or [])) / 4 > limit:
+        always = state.get("overflow_always")  # a provider repeating the request's own text in its error
+        if limit and (always or len(json.dumps(body.get("messages") or [])) / 4 > limit):
             state.setdefault("overflowed", []).append(body.get("model"))
             return _overflow(limit, style)
         # Summary requests (compaction): answer "summary <n>" and remember what was asked.
