@@ -20,6 +20,7 @@ import sqlite3
 import tempfile
 import time
 import zipfile
+import zlib
 from dataclasses import dataclass
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -178,6 +179,8 @@ def stage_restore(data_dir: str, upload_path: str, current: Fernet, env_key: boo
                 key_bytes = _unpack(upload_path, db_path)
             except zipfile.BadZipFile as exc:  # is_zipfile only looks at the end of the file
                 raise RestoreError("The zip is damaged.") from exc
+            except (RuntimeError, NotImplementedError, zlib.error, EOFError) as exc:  # encrypted, odd compression
+                raise RestoreError("The zip can't be read: is it password-protected or made by another tool?") from exc
         else:
             shutil.copyfile(upload_path, db_path)
         fernet = current
@@ -205,10 +208,16 @@ def apply_staged_restore(data_dir: str) -> bool:
     """On start, before the database is opened: swap in a staged restore (keeping the old copy)."""
     staged = os.path.join(data_dir, RESTORE_DIR)
     staged_db = os.path.join(staged, DB_NAME)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     if not os.path.isfile(staged_db):
+        # a start that stopped between the two steps: the database is in, its key not yet (without it the
+        # restored secrets couldn't be read)
+        if os.path.isfile(os.path.join(staged, KEY_NAME)):
+            _swap_in_key(data_dir, staged, backups_dir(data_dir), stamp)
+            shutil.rmtree(staged, ignore_errors=True)
+            return True
         return False
     folder = backups_dir(data_dir)
-    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     live = os.path.join(data_dir, DB_NAME)
     if os.path.exists(live):
         old = sqlite3.connect(live)  # folds in the WAL, so the saved copy is complete
@@ -222,17 +231,21 @@ def apply_staged_restore(data_dir: str) -> bool:
         if os.path.exists(live + suffix):
             os.remove(live + suffix)
     os.replace(staged_db, live)
-    staged_key = os.path.join(staged, KEY_NAME)
-    key_path = os.path.join(data_dir, KEY_NAME)
-    if os.path.isfile(staged_key):
-        if os.path.exists(key_path):
-            shutil.copyfile(key_path, os.path.join(folder, f"pre-restore-{stamp}.key"))
-            os.chmod(os.path.join(folder, f"pre-restore-{stamp}.key"), 0o600)
-        os.replace(staged_key, key_path)
-        os.chmod(key_path, 0o600)
+    if os.path.isfile(os.path.join(staged, KEY_NAME)):
+        _swap_in_key(data_dir, staged, folder, stamp)
     shutil.rmtree(staged, ignore_errors=True)
     log.warning(json.dumps({"event": "restored_backup", "previous": f"backups/pre-restore-{stamp}.db"}))
     return True
+
+
+def _swap_in_key(data_dir: str, staged: str, folder: str, stamp: str) -> None:
+    """The staged backup's encryption key in place of the current one (kept beside the pre-restore copy)."""
+    key_path = os.path.join(data_dir, KEY_NAME)
+    if os.path.exists(key_path):
+        shutil.copyfile(key_path, os.path.join(folder, f"pre-restore-{stamp}.key"))
+        os.chmod(os.path.join(folder, f"pre-restore-{stamp}.key"), 0o600)
+    os.replace(os.path.join(staged, KEY_NAME), key_path)
+    os.chmod(key_path, 0o600)
 
 
 def _unpack(upload_path: str, db_path: str) -> bytes | None:

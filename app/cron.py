@@ -41,7 +41,7 @@ def _field(text: str, name: str, low: int, high: int, names: dict[str, int]) -> 
         step = 1
         if "/" in part:
             part, step_text = part.split("/", 1)
-            if not step_text.isdigit() or int(step_text) < 1:
+            if not step_text.isdecimal() or int(step_text) < 1:
                 raise CronError(f"bad step in {name}: {text!r}")
             step = int(step_text)
         if part == "*":
@@ -61,7 +61,7 @@ def _field(text: str, name: str, low: int, high: int, names: dict[str, int]) -> 
 def _value(text: str, name: str, names: dict[str, int]) -> int:
     if text in names:
         return names[text]
-    if not text.isdigit():
+    if not text.isdecimal():
         raise CronError(f"bad {name}: {text!r}")
     return int(text)
 

@@ -396,18 +396,29 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         if session is None:
             raise NeedLogin()
         if not session.user.can(role):
-            raise PermissionError(role)
+            raise NotAllowed(role)
         return session
 
     async def require_post(request: Request, role: str) -> tuple[AdminSession, dict]:
         session = require(request, role)
         form = dict(await request.form())
         if not csrf_ok(session, form.get("csrf")):
-            raise PermissionError("csrf")
+            raise NotAllowed("csrf")
         return session, form
 
-    @app.exception_handler(PermissionError)
-    async def forbidden(request: Request, exc: PermissionError):
+    @app.exception_handler(OverflowError)
+    async def out_of_range(request: Request, exc: OverflowError):
+        """A number too big to store (a 400-digit limit, the day after 31 Dec 9999): the form's mistake, not a 500."""
+        if not request.url.path.startswith("/admin"):
+            message = {"error": {"message": "a number is out of range", "type": "invalid_request_error"}}
+            return JSONResponse(message, status_code=400)
+        reason = "A number or date in the form is out of range; nothing was saved."
+        response = page(request, "error.html", sessions.current(request), title="Not saved", reason=reason)
+        response.status_code = 400
+        return response
+
+    @app.exception_handler(NotAllowed)
+    async def forbidden(request: Request, exc: NotAllowed):
         session = sessions.current(request)
         reason = (
             "Your session's form token is invalid; reload the page."
@@ -895,7 +906,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         """A client's key, for the Show button (audited); 404 when only its hash is kept."""
         session = require(request, "admin")
         if not csrf_ok(session, request.headers.get("x-csrf-token")):
-            raise PermissionError("csrf")
+            raise NotAllowed("csrf")
         key = store.client_key(client_id, session.user.username)
         if key is None:
             return JSONResponse({"error": "only this key's hash is kept: issue a new key to see it"}, status_code=404)
@@ -989,7 +1000,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def request_content(request_id: str, request: Request):
         session = require(request, "admin")
         if not session.user.can_view_content:
-            raise PermissionError("content")
+            raise NotAllowed("content")
         content = await asyncio.to_thread(store.get_content, request_id)
         if content is None:
             return back("/admin/requests", error="content_missing")
@@ -1182,8 +1193,16 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             if preset.key_required and not api_key:
                 raise ValueError("api_key")
             weight = int_field(form, "weight", 1, 100, 1)
+            # everything checked before a new pool is made: a mistake mustn't leave one behind (whose name then
+            # makes the corrected form fail with "taken")
+            params = _rules_text(form) or preset.params
+            retries = _opt(form, "max_retries", int, 0)
+            ua = _ua_fields(form)
+            if name in {u.name for u in store.list_upstreams()}:
+                raise sqlite3.IntegrityError("name")
             pool_choice = str(form.get("pool", "new"))
-            if pool_choice == "new":
+            new_pool = pool_choice == "new"
+            if new_pool:
                 fields = pool_fields(form)
                 if preset.key != "arliai" and not str(form.get("max_concurrency", "")).strip():
                     fields["max_concurrency"] = preset.max_concurrency
@@ -1192,20 +1211,23 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 pool_id = int(pool_choice)
                 if pool_id not in {p.id for p in store.list_pools()}:
                     raise ValueError("pool")
-            params = _rules_text(form) or preset.params
-            retries = _opt(form, "max_retries", int, 0)
-            upstream_id = store.create_upstream(
-                name,
-                base_url,
-                api_key,
-                pool_id,
-                session.user.username,
-                preset=preset.key,
-                weight=weight,
-                params=params,
-                max_retries=retries if retries is not None else preset.max_retries,
-                **_ua_fields(form),
-            )
+            try:
+                upstream_id = store.create_upstream(
+                    name,
+                    base_url,
+                    api_key,
+                    pool_id,
+                    session.user.username,
+                    preset=preset.key,
+                    weight=weight,
+                    params=params,
+                    max_retries=retries if retries is not None else preset.max_retries,
+                    **ua,
+                )
+            except Exception:
+                if new_pool:
+                    store.delete_pool(pool_id, session.user.username)
+                raise
         except RulesError:
             return back("/admin/upstreams", error="rules_invalid")
         except ValueError:
@@ -1629,7 +1651,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             id=existing.id if existing else None,
             name=existing.name if existing else str(form.get("name", "")).strip(),
             target_model=str(form.get("target_model", "")).strip(),
-            upstream_ids=tuple(int(v) for k, v in form.items() if k.startswith("upstream_") and str(v).isdigit()),
+            upstream_ids=tuple(int(v) for k, v in form.items() if k.startswith("upstream_") and str(v).isdecimal()),
             notes=str(form.get("notes", "")),
             params=str(form.get("params", "")),
             fallbacks=items("fallbacks"),
@@ -1753,7 +1775,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         """JSON in (fetch from the page, CSRF token in a header), OpenAI response / SSE out."""
         session = require(request, "operator")
         if not csrf_ok(session, request.headers.get("x-csrf-token")):
-            raise PermissionError("csrf")
+            raise NotAllowed("csrf")
         try:
             data = json.loads(await request.body())
             client_name = str(data.pop("client"))
@@ -1932,7 +1954,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         session = require(request, "owner")
         async with request.form(max_files=1, max_part_size=MAX_UPLOAD_BYTES) as form:
             if not csrf_ok(session, str(form.get("csrf", ""))):
-                raise PermissionError("csrf")
+                raise NotAllowed("csrf")
             upload = form.get("file")
             if upload is None or isinstance(upload, str) or not upload.filename:
                 return backup_page(request, session, error="Choose a backup file (.zip or .db) to restore.")
@@ -2094,6 +2116,11 @@ def _clamp_int(raw: str | None, default: int, low: int, high: int) -> int:
 
 class RulesError(ValueError):
     pass
+
+
+class NotAllowed(Exception):
+    """A missing role (or a bad form token, "csrf"). Not the built-in PermissionError: that is also what a file
+    that can't be written raises, which then showed as "needs the '[Errno 13] ...' role" (on /v1 routes too)."""
 
 
 def _rules_text(form: dict) -> str:

@@ -2913,7 +2913,7 @@ def create_app(
             q.get("status"),
             q.get("tag"),
             q.get("batch_id"),
-            min(1000, max(1, int(q.get("limit", "100")) if q.get("limit", "100").isdigit() else 100)),
+            min(1000, max(1, int(q.get("limit", "100")) if q.get("limit", "100").isdecimal() else 100)),
         )
         return {"object": "list", "data": [jobs_mod.job_view(store, r, with_result=False) for r in rows]}
 
@@ -3093,6 +3093,7 @@ def create_app(
             )
         except jobs_mod.JobError as exc:
             return job_error(exc)
+        await asyncio.to_thread(store.create_jobs, batch_jobs)  # first: a batch is never seen without its jobs
         await asyncio.to_thread(
             store.create_batch,
             {
@@ -3107,7 +3108,6 @@ def create_app(
                 "metadata": body.get("metadata"),
             },
         )
-        await asyncio.to_thread(store.create_jobs, batch_jobs)
         return jobs_mod.batch_view(store, await asyncio.to_thread(store.get_batch, batch_id))
 
     @app.get("/v1/batches")
@@ -3119,7 +3119,7 @@ def create_app(
         rows = await asyncio.to_thread(
             store.list_batches,
             client.name,
-            min(100, int(limit) if limit.isdigit() else 20),
+            min(100, int(limit) if limit.isdecimal() else 20),
             request.query_params.get("after"),
         )
         data = [jobs_mod.batch_view(store, r) for r in rows]
@@ -3128,7 +3128,7 @@ def create_app(
             "data": data,
             "first_id": data[0]["id"] if data else None,
             "last_id": data[-1]["id"] if data else None,
-            "has_more": len(data) == int(limit if limit.isdigit() else 20),
+            "has_more": len(data) == int(limit if limit.isdecimal() else 20),
         }
 
     @app.get("/v1/batches/{batch_id}")
@@ -3193,7 +3193,7 @@ def create_app(
         """The request body, or a 413 when it's larger than allowed (also without Content-Length)."""
         max_body = int(cfg().max_body_mb * 1024 * 1024)
         declared = request.headers.get("content-length")
-        if declared and declared.isdigit() and int(declared) > max_body:
+        if declared and declared.isdecimal() and int(declared) > max_body:
             return error_response(f"request body exceeds {cfg().max_body_mb} MB", 413, "request_too_large")
         chunks, size = [], 0
         async for chunk in request.stream():
@@ -3542,7 +3542,7 @@ def create_app(
             policy = client.policy
             max_tokens = policy.run_max_tokens
             header_budget = request_headers.get("x-queuerouter-run-budget-tokens", "")
-            if header_budget.isdigit():  # a client may lower its own budget, never raise it
+            if header_budget.isdecimal():  # a client may lower its own budget, never raise it
                 max_tokens = min(int(header_budget), max_tokens) if max_tokens else int(header_budget)
             if reason := runs.over_budget(run, max_tokens, policy.run_max_requests, policy.run_max_minutes):
                 log.warning(json.dumps({"event": "run_budget_exceeded", "client": client.name, "reason": reason}))

@@ -305,8 +305,8 @@ def _finish_batch(store: Store, batch_id: str) -> bool:
     if batch is None or batch["status"] not in ("in_progress", "cancelling"):
         return False
     counts = store.job_counts(batch_id)
-    if any(status not in JOB_DONE for status in counts):
-        return False
+    if any(status not in JOB_DONE for status in counts) or sum(counts.values()) < batch["total"]:
+        return False  # not all done, or not all of its jobs written yet
     outputs, errors = [], []
     for row in reversed(store.list_jobs(batch_id=batch_id, limit=MAX_BATCH_LINES)):
         line_id = f"batch_req_{row['id'][4:]}"
@@ -425,7 +425,7 @@ class JobRunner:
         free = max_in_flight - len(self.running)
         if free <= 0:
             return
-        for row in await asyncio.to_thread(self.store.due_jobs, now, free * 4):
+        for row in await asyncio.to_thread(self.store.due_jobs, now, free * 4, live_waiting == 0):
             if free <= 0:
                 break
             if row["idle_only"] and live_waiting > 0:

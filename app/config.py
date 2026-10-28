@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import os
 from dataclasses import asdict, dataclass, field, fields
 from typing import NamedTuple
@@ -135,12 +136,21 @@ def _env(env: dict[str, str], name: str) -> str | None:
 
 def _int(env: dict[str, str], name: str, default: int) -> int:
     value = _env(env, name)
-    return default if value is None else int(value)
+    return default if value is None else _checked(name, int(value))
 
 
 def _float(env: dict[str, str], name: str, default: float) -> float:
     value = _env(env, name)
-    return default if value is None else float(value)
+    return default if value is None else _checked(name, float(value))
+
+
+def _checked(name: str, value: float) -> float:
+    """What the Settings page accepts: a finite number, not negative (MAX_RETRIES may be -1: keep retrying; at
+    least one slot). The environment is read once and stored, so "nan" (no body size limit) would stay for good."""
+    minimum = {"MAX_RETRIES": -1, "MAX_CONCURRENCY": 1}.get(name, 0)
+    if not math.isfinite(value) or value < minimum:
+        raise ValueError(f"{name}={value} is not allowed: a number, {minimum} or more")
+    return value
 
 
 def _bool(env: dict[str, str], name: str, default: bool) -> bool:

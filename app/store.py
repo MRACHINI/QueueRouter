@@ -1692,11 +1692,13 @@ class Store:
         params.append(limit)
         return self.query(sql, tuple(params))
 
-    def due_jobs(self, now: float, limit: int) -> list[sqlite3.Row]:
+    def due_jobs(self, now: float, limit: int, idle_too: bool = True) -> list[sqlite3.Row]:
+        """``idle_too`` False: leave out "spare capacity only" jobs (live requests are waiting), so they can't fill
+        the ``limit`` ahead of jobs that may run now."""
         return self.query(
-            "SELECT * FROM jobs WHERE status = 'queued' AND (run_at IS NULL OR run_at <= ?) "
+            "SELECT * FROM jobs WHERE status = 'queued' AND (run_at IS NULL OR run_at <= ?) AND (? OR idle_only = 0) "
             "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created LIMIT ?",
-            (now, limit),
+            (now, int(idle_too), limit),
         )
 
     def claim_job(self, job_id: str) -> bool:
@@ -1739,11 +1741,14 @@ class Store:
         return cur.rowcount
 
     def retry_job(self, job_id: str) -> bool:
+        """Run it again from scratch: its attempts start over (else a 429 wouldn't be retried), and a deadline
+        already past is lifted (else it would expire again before it could start)."""
         with self.tx() as db:
             cur = db.execute(
                 "UPDATE jobs SET status = 'queued', finished = NULL, started = NULL, error = NULL, result = NULL, "
-                "status_code = NULL WHERE id = ? AND status IN ('failed', 'expired', 'cancelled')",
-                (job_id,),
+                "status_code = NULL, attempts = 0, deadline = CASE WHEN deadline <= ? THEN NULL ELSE deadline END "
+                "WHERE id = ? AND status IN ('failed', 'expired', 'cancelled')",
+                (time.time(), job_id),
             )
         return cur.rowcount == 1
 
