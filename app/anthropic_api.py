@@ -296,7 +296,7 @@ async def stream(body: AsyncIterator[bytes], model: str) -> AsyncIterator[bytes]
             if "error" in data:
                 err = data["error"] if isinstance(data["error"], dict) else {"message": str(data["error"])}
                 code = err.get("code")
-                status = code if isinstance(code, int) else int(code) if str(code).isdigit() else 500
+                status = code if isinstance(code, int) else int(code) if str(code).isdecimal() else 500
                 yield encode("error", error(status, err.get("message", "upstream error")))
                 return
             if not started:

@@ -1376,6 +1376,22 @@ v0.46.0: more fixes from the same review.
 - A key's total time limit holds for streams too: before the provider's first byte and while a stream stalls.
 - A context limit stated in a provider's error is learned only when the request could have reached it (half of
   it at least): providers repeat parts of a request in errors, so a short one could shrink a model for everyone.
+v0.47.0: the last fixes from the same review (admin, jobs, restore, configuration).
+- Admin forms: a number or date out of range (a 400-digit limit, an expiry of 31 Dec 9999) shows "not saved"
+  instead of a 500; digit checks before int() take only decimal digits ("²" passed and then crashed).
+- A missing role or form token is its own error: a file that can't be written (a read-only /data) no longer shows
+  as "needs the '[Errno 13] ...' role", nor as an HTML page on /v1 routes.
+- "Add upstream" checks everything before making a new pool: a mistake no longer leaves a pool whose name then
+  made the corrected form fail with "taken".
+- Restore: a password-protected or oddly compressed zip says so instead of failing with a 500; a start that
+  stopped between swapping in the database and its key finishes the key on the next start (the restored secrets
+  couldn't be read).
+- Jobs: Retry starts a job over (attempts reset, a deadline already past lifted: it expired again at once);
+  "spare capacity only" jobs can't fill the batch of jobs looked at ahead of ones that may run now; a batch's jobs
+  are written before the batch, and it's only finished once all of them exist (a sweep in between completed it
+  empty).
+- Settings from the environment are checked like the Settings page: "nan", negative values or 0 slots stop the
+  first start with a clear message instead of being stored for good.
 
 ### Later (agreed, not scheduled)
 
