@@ -184,8 +184,13 @@ class Exporter:
                 self.failures = 0
             except httpx.HTTPError as exc:
                 self.failures += 1
+                room = MAX_PENDING - len(self.pending)  # back in front, to send when it's back; past the limit
+                kept = batch[len(batch) - room :] if room < len(batch) else batch  # the oldest are dropped
+                self.pending.extendleft(reversed(kept))
                 if self.failures in (1, 10) or self.failures % 100 == 0:  # don't flood the log
                     log.warning(
-                        json.dumps({"event": "otel_export_failed", "error": str(exc)[:200], "dropped": len(batch)})
+                        json.dumps(
+                            {"event": "otel_export_failed", "error": str(exc)[:200], "dropped": len(batch) - len(kept)}
+                        )
                     )
                 return

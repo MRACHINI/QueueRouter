@@ -185,9 +185,12 @@ def create_mock(limit: int = 2) -> FastAPI:
         # Model council: the judge's prompt (pick: answer with a number; combine: an answer), and members
         # that say who they are.
         last_message = (body.get("messages") or [{}])[-1]
-        if "[QueueRouter council]" in str(last_message.get("content", "")):  # added to the last user message
-            state.setdefault("judge_inputs", []).append(last_message["content"])
-            picking = "number of the best" in last_message["content"]
+        content = last_message.get("content", "")
+        if isinstance(content, list):  # a message with parts (attachments): the judge's prompt is a text part
+            content = "\n".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+        if "[QueueRouter council]" in content:  # added to the last user message
+            state.setdefault("judge_inputs", []).append(content)
+            picking = "number of the best" in content
             body["mock_content"] = state.get("judge_answer", "2") if picking else "combined answer"
         elif state.get("echo_model"):
             body.setdefault("mock_content", f"answer from {body.get('model')}")

@@ -47,6 +47,30 @@ def _parse(block: str) -> list[tuple[str, object]]:
     return out
 
 
+def tool_call_delta(call: dict, ids: dict[str, int]) -> tuple[int, dict, str]:
+    """(index, function, arguments text) of a streamed tool call piece. A provider that leaves the index out
+    starts each call with its id (``ids`` remembers them for the stream); arguments sent as an object are
+    turned into the JSON text the formats expect."""
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    if isinstance(call.get("index"), int):
+        index = call["index"]
+    elif call.get("id"):
+        index = ids.setdefault(str(call["id"]), len(ids))
+    else:
+        index = max(ids.values(), default=0)
+    arguments = function.get("arguments")
+    if arguments is not None and not isinstance(arguments, str):
+        arguments = json.dumps(arguments, ensure_ascii=False)
+    return index, function, arguments or ""
+
+
+def arguments_text(arguments: object) -> str:
+    """A whole (non-streamed) tool call's arguments as JSON text, whichever way the provider sent them."""
+    if isinstance(arguments, str):
+        return arguments or "{}"
+    return json.dumps(arguments, ensure_ascii=False) if arguments is not None else "{}"
+
+
 def encode(event: str | None, data: dict) -> bytes:
     head = f"event: {event}\n" if event else ""
     return f"{head}data: {json.dumps(data, ensure_ascii=False)}\n\n".encode()

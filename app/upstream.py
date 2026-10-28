@@ -12,7 +12,9 @@ from collections.abc import Mapping
 import httpx
 
 BUSY_STATUS = 429  # upstream full: keep the slot, back off, retry the same upstream
-FAILURE_STATUS = {500, 502, 503, 504}  # upstream broken: counts toward its circuit breaker
+# upstream broken: retried / failed over, and counts toward its circuit breaker. 520-524: Cloudflare in front of a
+# provider that didn't answer; 529: Anthropic "overloaded"
+FAILURE_STATUS = {500, 502, 503, 504, 520, 521, 522, 523, 524, 529}
 RETRYABLE_ERRORS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,

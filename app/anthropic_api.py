@@ -13,7 +13,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 
-from .sse import encode, events
+from .sse import encode, events, tool_call_delta
 
 STOP_REASONS = {
     "stop": "end_turn",
@@ -255,6 +255,7 @@ async def stream(body: AsyncIterator[bytes], model: str) -> AsyncIterator[bytes]
     block_index = -1
     open_block: str | None = None  # "text" or "tool:<openai index>"
     tool_blocks: dict[int, int] = {}  # openai tool index -> our block index
+    call_ids: dict[str, int] = {}  # for providers that leave the index out
     finish = None
     usage: dict = {}
 
@@ -328,8 +329,7 @@ async def stream(body: AsyncIterator[bytes], model: str) -> AsyncIterator[bytes]
                         },
                     )
                 for call in delta.get("tool_calls") or []:
-                    index = call.get("index", 0)
-                    function = call.get("function") or {}
+                    index, function, arguments = tool_call_delta(call, call_ids)
                     if index not in tool_blocks:
                         yield close()
                         block_index += 1
@@ -348,13 +348,13 @@ async def stream(body: AsyncIterator[bytes], model: str) -> AsyncIterator[bytes]
                                 },
                             },
                         )
-                    if function.get("arguments"):
+                    if arguments:
                         yield encode(
                             "content_block_delta",
                             {
                                 "type": "content_block_delta",
                                 "index": tool_blocks[index],
-                                "delta": {"type": "input_json_delta", "partial_json": function["arguments"]},
+                                "delta": {"type": "input_json_delta", "partial_json": arguments},
                             },
                         )
                 if choice.get("finish_reason"):

@@ -231,6 +231,9 @@ class Admission:
     run: Run | None = None  # agent run this request belongs to (budgets, loop detection)
     log_request: bytes | None = None  # set when the client has content logging on
     strip_usage: bool = False  # QueueRouter asked for the usage chunk, the app didn't: not passed on
+    # [first enqueued at, its seq, seconds waited in the queue so far]: shared by the fallback steps (replace()
+    # copies the list's reference), so a step queues where the request first did and its waits add up
+    place: list = dataclasses.field(default_factory=list)
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
@@ -366,7 +369,8 @@ def create_app(
         policy = policy_of(ticket.client)
         if policy.max_active is not None and queue.client_active(ticket.client) >= policy.max_active:
             return False
-        if limiter.wait_s(ticket.client, policy) > 0:  # on_limit=delay: wait in the queue
+        # on_limit=delay: wait in the queue (a retry or failover of a request already counted doesn't wait again)
+        if not ticket.requeued and limiter.wait_s(ticket.client, policy) > 0:
             alerts.client_limited(ticket.client, rejected=False)
             return False
         return True
@@ -374,8 +378,9 @@ def create_app(
     affinity: dict[str, tuple[int, float]] = {}  # session -> (upstream id, last used, monotonic)
 
     def on_grant(ticket) -> None:
-        circuits.begin(ticket.target.upstream_id)
-        limiter.record_request(ticket.client)
+        ticket.trial = circuits.begin(ticket.target.upstream_id)
+        if not ticket.requeued:  # a retry or failover is the same request: counted once for rate limits
+            limiter.record_request(ticket.client)
         if ticket.session is not None:
             affinity[ticket.session] = (ticket.target.upstream_id, time.monotonic())
             if len(affinity) > 20_000:  # bound memory: drop the stalest half
@@ -1273,7 +1278,9 @@ def create_app(
         ``Got`` / ``Failed`` (or ``None`` on a queue timeout). The granted slot is held until the
         consumer closes this generator, i.e. after the response has been fully forwarded."""
         ticket = None
-        first_enqueued = first_seq = None
+        if not adm.place:
+            adm.place.extend([None, None, 0.0])
+        place = adm.place  # where the request first queued, and how long it has waited in the queue in all
         excluded: set[int] = set()
         retries = 0
         verdict = False
@@ -1303,14 +1310,15 @@ def create_app(
                     adm.lane,
                     adm.session,
                     pool,
-                    first_enqueued,
-                    first_seq,
+                    place[0],
+                    place[1],
                     preferred=preferred if preferred not in excluded else None,
                     prefer_wait_s=cfg().affinity_wait_s,
                 )
+                queued_at = time.monotonic()
                 verdict = False
-                if first_enqueued is None:
-                    first_enqueued, first_seq = ticket.enqueued_at, ticket.seq
+                if place[0] is None:
+                    place[0], place[1] = ticket.enqueued_at, ticket.seq
                     if not ticket.granted:
                         yield Queued(queue.position(ticket))
                 keepalive = keepalive_s()
@@ -1320,7 +1328,8 @@ def create_app(
                         yield Failed(503, message, "maintenance")
                         return
                     max_wait = adm.policy.queue_timeout_s or cfg().max_queue_wait_s
-                    if (max_wait and ticket.wait_s >= max_wait) or adm.expired():
+                    waited = place[2] + time.monotonic() - queued_at  # in the queue only, not at upstreams
+                    if (max_wait and waited >= max_wait) or adm.expired():
                         yield None
                         return
                     # every upstream it could use was disabled or removed meanwhile: it would wait forever
@@ -1329,9 +1338,10 @@ def create_app(
                     ):
                         yield Failed(503, "no enabled upstream can serve this request now", "not_configured")
                         return
-                    yield Waiting(queue.position(ticket), ticket.wait_s)
+                    yield Waiting(queue.position(ticket), waited)
                 await queue.apply_spacing(ticket)
-                adm.rlog.fields["queue_ms"] = round((time.monotonic() - first_enqueued) * 1000)
+                place[2] += time.monotonic() - queued_at
+                adm.rlog.fields["queue_ms"] = round(place[2] * 1000)
 
                 target = snapshot.upstreams.get(ticket.target.upstream_id)
                 if target is None:  # removed by an admin while we waited
@@ -1379,7 +1389,8 @@ def create_app(
                                 if others:
                                     excluded.add(target.id)
                                     queue.cancel(ticket)
-                                    circuits.abandon(target.id)  # a half-open trial must not stay reserved
+                                    if ticket.trial:  # a half-open trial must not stay reserved
+                                        circuits.abandon(target.id)
                                     ticket = None
                                     yield Backoff(0, retries, f"quota used up on {target.upstream.name}, failing over")
                                     break
@@ -1459,12 +1470,17 @@ def create_app(
                         yield Backoff(0, retries, f"{reason} on {target.upstream.name}, failing over")
                         break
                     delay = retry_delay(retries - 1, headers, cfg().retry_base_delay_s, cfg().retry_max_delay_s)
+                    # the slot is free while we wait (others on this pool go meanwhile); then we queue again in
+                    # our place, and an upstream taken out of rotation meanwhile isn't asked again until it's back
+                    queue.cancel(ticket)
+                    ticket = None
                     yield Backoff(delay, retries, reason)
+                    break
         finally:
             adm.rlog.fields["retries"] = retries
             if ticket is not None:
-                if ticket.target is not None and not verdict:
-                    circuits.abandon(ticket.target.upstream_id)
+                if ticket.target is not None and not verdict and ticket.trial:
+                    circuits.abandon(ticket.target.upstream_id)  # only the half-open trial this request was
                 queue.cancel(ticket)
 
     def note_error(rlog: RequestLog, status: int, content: bytes, target: Target) -> None:
