@@ -42,6 +42,10 @@ def test_names_match_their_base_model():
     assert scores.score("Kimi K3.1 Pro", "agentic") is None  # that index isn't there
     order = ranking.numbered([("a", 10), ("b", 30), ("c", 30)], ["team"], ["z", "y"])
     assert order == [("team", "00"), ("b", "01"), ("c", "02"), ("a", "03"), ("y", ""), ("z", "")]
+    assert ranking.label("03", 45.1, False, "m · up") == "03 · 45.1 · m · up"
+    assert ranking.label("04", 56, True, "GLM-4.6-Derestricted-v5") == "04 · ~56.0 · GLM-4.6-Derestricted-v5"
+    assert ranking.label("00", None, False, "team → m") == "00 · team → m"
+    assert ranking.label("", None, False, "z") == "z"
 
 
 async def test_index_is_read_page_by_page(tmp_path):
@@ -82,8 +86,8 @@ async def test_opencode_list_is_numbered_by_strength(make_stack):
         models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
         assert list(models) == ["smart", "mock-model", "small-model", "other-model"]
         assert models["smart"]["name"].startswith("00 · smart")
-        assert models["mock-model"]["name"].startswith("01 · mock-model")
-        assert models["small-model"]["name"].startswith("02 · small-model")
+        assert models["mock-model"]["name"].startswith("01 · 70.0 · mock-model")
+        assert models["small-model"]["name"].startswith("02 · 50.0 · small-model")
         assert not models["other-model"]["name"][0].isdigit()
         page = (await c.get("/admin/models")).text
         assert "Strength order in opencode" in page and "Artificial Analysis" in page and "Thinking levels" in page

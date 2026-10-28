@@ -1702,9 +1702,12 @@ def create_app(
         if not cfg().opencode_rank:
             return result
         # opencode's desktop app sorts by name, so the order travels in the names; its terminal keeps this order
-        order, _ = strength_order(list(result), await asyncio.to_thread(store.list_model_scores))
+        order, why = strength_order(list(result), await asyncio.to_thread(store.list_model_scores))
         return {
-            name: {**result[name], "name": f"{prefix} · {result[name]['name']}" if prefix else result[name]["name"]}
+            name: {
+                **result[name],
+                "name": ranking.label(prefix, why[name]["score"], why[name]["inherited"], result[name]["name"]),
+            }
             for name, prefix in order
         }
 

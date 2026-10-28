@@ -100,7 +100,8 @@ or correct a wrong value (applies on every upstream; a plan's context cap still 
 <h2 id="ranking">Strength order in opencode</h2>
 <p class="muted small">With <a href="/admin/settings">Settings → opencode → Order models by strength</a> on, the
 opencode model list is numbered: aliases first (<span class="mono">00</span>), then the strongest models
-(<span class="mono">01</span>, <span class="mono">02</span>…), then models without a score. A model's score is yours
+with their score (<span class="mono">01 · 58.3 · …</span>, <span class="mono">02 · 52.0 · …</span>; a
+<span class="mono">~</span> before it: the base model's), then models without a score. A model's score is yours
 when you set one here (same scale as the index; it can also move an alias into the list), else the
 {{ ranking.index }} index{% if not ranking.enabled %} · <strong>ordering is off</strong>{% endif %}. Variants such as
 fine-tunes get their base model's score (marked "from …").</p>
