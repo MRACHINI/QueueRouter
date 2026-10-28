@@ -1306,6 +1306,9 @@ budgets follow within a minute). Keys are kept encrypted too (clients.key_secret
 upstream keys): Show on the Clients page fetches one (POST /admin/clients/{id}/key, CSRF header, no-store; audited as
 client.show_key). Keys made before 0.42 only have their hash: New key makes them showable.
 Admin pages use the whole window width (was capped at 1100 px; phones keep a 16 px margin).
+v0.43.0: with strength order on, opencode's model names carry the score after the number: `03 · 45.1 · model ·
+upstreams` (one decimal; `~45.1` when it's the base model's score, as for fine-tunes). Aliases without a score of
+their own stay `00 · …`; models without a score keep their plain name.
 
 ### Later (agreed, not scheduled)
 

@@ -310,7 +310,8 @@ upstreams serve a model. Councils and summaries make calls opencode can't see; t
 ### Models in strength order
 
 Turn on **Settings → opencode → Order models by strength** and the opencode model list is numbered: your aliases
-first (`00 · smart`), then the strongest models (`01 · …`, `02 · …`), then models without a score. Scores come from
+first (`00 · smart`), then the strongest models with their score (`01 · 58.3 · …`, `02 · 52.0 · …`; `~` marks a
+score taken from the base model), then models without a score. Scores come from
 the [Artificial Analysis](https://artificialanalysis.ai/) index (intelligence, coding or agentic): as published in
 OpenRouter's public model list with no setup, or the full index with a free API key in Settings (read once a day), or
 from your own score per model on the **Models** page, which wins. Fine-tunes
