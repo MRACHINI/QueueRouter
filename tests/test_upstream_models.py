@@ -50,6 +50,9 @@ async def test_hidden_models_leave_every_list(make_stack):
         assert "other-model" not in config["provider"]["queuerouter"]["models"]
         chat = {"model": "other-model", "messages": [{"role": "user", "content": "hi"}]}
         assert (await c.post("/v1/chat/completions", headers=stack.headers, json=chat)).status_code == 404
+        pinned = {**chat, "model": "other-model@upstream"}  # naming the upstream doesn't get round it
+        assert (await c.post("/v1/chat/completions", headers=stack.headers, json=pinned)).status_code in (404, 503)
+        assert "other-model" not in (stack.mock.get("models") or [])
         assert "2 of 3 models offered" in (await c.get("/admin/upstreams")).text
 
         await add_alias(c, "o", "other-model")  # an alias may still use it

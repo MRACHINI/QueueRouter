@@ -252,6 +252,21 @@ async def test_usage_and_stats(make_stack):
     assert s["max_concurrency"] == 2
 
 
+async def test_streams_count_tokens_the_app_did_not_ask_for(make_stack):
+    """QueueRouter asks for the usage chunk itself (token limits and the Usage page need it) and leaves it out
+    of the stream of an app that didn't ask for it; an app that asked gets it."""
+    stack = make_stack()
+    async with httpx.AsyncClient(timeout=30) as c:
+        _, text = await read_stream(c, stack.url, stack.headers, chat(stream=True, mock_chunks=4))
+        assert json.loads(stack.mock["last_body"])["stream_options"] == {"include_usage": True}
+        assert '"usage"' not in text and "t3" in text and "[DONE]" in text
+        asked = chat(stream=True, mock_chunks=2, stream_options={"include_usage": True})
+        _, text = await read_stream(c, stack.url, stack.headers, asked)
+        assert '"usage"' in text
+        s = await stats(c, stack)
+    assert s["tokens"] == {"prompt": 20, "completion": 6}
+
+
 async def test_tool_call_payload_passes_through_untouched(make_stack):
     """Whatever the client sends (tools, response_format, ...) reaches the upstream unchanged."""
     stack = make_stack()

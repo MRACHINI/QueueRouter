@@ -178,6 +178,7 @@ FETCH_TOOL = {
 }
 FETCH_MAX_BYTES = 2 * 1024 * 1024
 FETCH_MAX_CHARS = 20_000
+FETCH_TOTAL_S = 45  # a whole page read, redirects included
 _TEXT_TYPES = (
     "text/",
     "application/json",
@@ -251,7 +252,18 @@ async def public_host(host: str) -> str | None:
 
 async def fetch(client: httpx.AsyncClient, url: str) -> tuple[str, str]:
     """(final address, readable text) of a page; SearchError on refusal or failure. Redirects are followed
-    here, so every hop's address is checked too."""
+    here, so every hop's address is checked too. At most FETCH_TOTAL_S in all (a page sending a byte now
+    and then would otherwise hold the council up for good)."""
+    try:
+        async with asyncio.timeout(FETCH_TOTAL_S):
+            return await _fetch(client, url)
+    except TimeoutError:
+        raise SearchError(f"the page took longer than {FETCH_TOTAL_S}s") from None
+    except (ValueError, LookupError) as exc:  # a bad address ("x..com", port 99999) or a charset like base64
+        raise SearchError(f"can't read that address ({type(exc).__name__})") from None
+
+
+async def _fetch(client: httpx.AsyncClient, url: str) -> tuple[str, str]:
     url = str(url or "").strip()
     if _URL_SECRET.search(url):
         raise SearchError("refused: the address looks like it contains a secret")

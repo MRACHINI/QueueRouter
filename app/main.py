@@ -70,6 +70,7 @@ from .store import DataDirError
 from .upstream import (
     BUSY_STATUS,
     FAILURE_STATUS,
+    UsageChunkFilter,
     UsageSniffer,
     client_identity,
     describe_429,
@@ -229,6 +230,7 @@ class Admission:
     triggers: frozenset[str] = frozenset()
     run: Run | None = None  # agent run this request belongs to (budgets, loop detection)
     log_request: bytes | None = None  # set when the client has content logging on
+    strip_usage: bool = False  # QueueRouter asked for the usage chunk, the app didn't: not passed on
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
@@ -526,11 +528,16 @@ def create_app(
         if pending_content:
             limit = cfg().content_log_max_kb * 1024
             contents = []
-            for rid, ts, client, req, resp in pending_content:
+            taken = pending_content[:]
+            pending_content.clear()  # first: one entry that can't be read must not block the rest for good
+            for rid, ts, client, req, resp in taken:
+                try:
+                    reply = content_log.readable_reply(resp)
+                except Exception:  # an answer in a shape we don't know: kept as it came
+                    reply = resp.decode("utf-8", "replace")
                 request_text, cut_req = content_log.clip(req.decode("utf-8", "replace"), limit)
-                reply_text, cut_resp = content_log.clip(content_log.readable_reply(resp), limit)
+                reply_text, cut_resp = content_log.clip(reply, limit)
                 contents.append((rid, ts, client, request_text, reply_text, cut_req or cut_resp))
-            pending_content.clear()
             try:
                 await asyncio.to_thread(store.save_contents, contents)
             except Exception as exc:
@@ -719,7 +726,7 @@ def create_app(
         if remaining := guard.is_blocked(ip):
             retry_after = {"Retry-After": str(int(remaining) + 1)}
             return None, error_response("too many failed authentication attempts", 429, "auth_blocked", **retry_after)
-        client = find_client(presented_key(request), snapshot.clients, cfg().allow_no_auth)
+        client = find_client(presented_key(request), snapshot.clients, cfg().allow_no_auth, snapshot.any_clients)
         if client is None:
             guard.fail(ip)
             return None, error_response("invalid or missing API key", 401, "invalid_api_key")
@@ -965,7 +972,7 @@ def create_app(
         """Admin 'Test' button: can we list models with this URL and key?"""
         try:
             models = await fetch_models(app.state.client, base_url, api_key)
-        except (httpx.HTTPError, ValueError) as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             return False, f"{type(exc).__name__}: {exc}"[:300]
         sample = ", ".join(m["id"] for m in models[:5])
         return True, f"OK — {len(models)} models" + (f" (e.g. {sample})" if sample else "")
@@ -1345,8 +1352,9 @@ def create_app(
                         if adm.rlog.fields["stream"]:  # a non-streamed answer's headers come with all of it
                             adm.rlog.fields["headers_ms"] = round((time.monotonic() - adm.rlog.sent_at) * 1000)
                     except (
-                        httpx.TransportError
-                    ) as exc:  # any network failure (write errors too), not only the usual ones
+                        httpx.TransportError,  # any network failure (write errors too), not only the usual ones
+                        httpx.InvalidURL,  # a base URL httpx can't use (e.g. "host:8080v1"): this upstream's fault
+                    ) as exc:
                         reason = type(exc).__name__
                         adm.rlog.fields["error"] = f"{reason} talking to {target.upstream.name}"[:500]
                     else:
@@ -1420,12 +1428,22 @@ def create_app(
                             content = await response.aread()
                         except httpx.HTTPError:
                             content = b""
+                        finally:
+                            await response.aclose()  # all of it is read (or the read was stopped): Replay has it
                         note_error(adm.rlog, status, content, target)
                         response = Replay(response, content, complete=True)
 
                     circuits.failure(target.id, reason)
                     verdict = True
-                    if not can_retry(adm, retries, target):
+                    others = [
+                        c
+                        for c in adm.candidates
+                        if c.upstream_id != target.id and c.upstream_id not in excluded and available(c.upstream_id)
+                    ]
+                    # Failing over is the client's (or the global) retry budget's to allow; this upstream's own
+                    # retry limit is about asking it again.
+                    failover = bool(others) and can_retry(adm, retries)
+                    if not failover and not can_retry(adm, retries, target):
                         if response is not None:
                             yield Got(response, target)  # pass the upstream's error through
                         else:
@@ -1434,12 +1452,7 @@ def create_app(
                     if response is not None:
                         await response.aclose()
                     retries += 1
-                    others = [
-                        c
-                        for c in adm.candidates
-                        if c.upstream_id != target.id and c.upstream_id not in excluded and available(c.upstream_id)
-                    ]
-                    if others:  # fail over, keeping our place in the queue
+                    if failover:  # keeping our place in the queue
                         excluded.add(target.id)
                         queue.cancel(ticket)
                         ticket = None
@@ -2344,7 +2357,7 @@ def create_app(
                 elif name == tools_mod.CALC_NAME:
                     text = tools_mod.calculate(websearch.call_argument(call, "expression"))
                     progress("Calculated", f": {text}")
-                elif name in (websearch.TOOL_NAME, websearch.FETCH_NAME):
+                elif (name == websearch.TOOL_NAME and searching) or (name == websearch.FETCH_NAME and fetching):
                     if web_used[0] >= alias.council_search_max * max(1, len(roster)):
                         text = "No web searches or page reads left in this step's budget."
                     else:
@@ -2401,7 +2414,8 @@ def create_app(
             searching = alias.council_search and s.search_provider not in ("", "off")
 
             fetching = alias.council_fetch
-            own_web = {websearch.TOOL_NAME, websearch.FETCH_NAME}
+            # only the tools this alias has on: a call to the other one is the app's (or nobody's) to answer
+            own_web = {*([websearch.TOOL_NAME] if searching else []), *([websearch.FETCH_NAME] if fetching else [])}
 
             async def web_tool(call: dict, who: str) -> str:
                 """Run a web_search / web_fetch call for ``who``; the text for the model (results or why not)."""
@@ -2561,6 +2575,7 @@ def create_app(
                 query,
                 allow_defer=False,
                 allow_council=False,
+                internal=True,  # QueueRouter's own call, like the members: the key's model list allowed the alias
             )
             rlog.fields["council"] = f"combine {len(answered)}: {judge}"
             return None, response
@@ -3351,7 +3366,13 @@ def create_app(
         chain = [target_model, *(alias.fallbacks if alias else ())]
         triggers = frozenset(alias.fallback_on) if alias and alias.fallbacks else frozenset()
         param_changes = []
+        strip_usage = False  # usage asked for here, not by the app: its chunk is left out of the app's stream
         if isinstance(payload, dict):
+            options = payload.get("stream_options")
+            wants = isinstance(options, dict) and "include_usage" in options
+            if payload.get("stream") is True and path in ("chat/completions", "completions") and not wants:
+                payload["stream_options"] = {**(options if isinstance(options, dict) else {}), "include_usage": True}
+                strip_usage = True  # without it most providers send no token counts for a stream
             alias_rules = rules_of(alias.params if alias else "")
             client_rules = rules_of(client.policy.params)
             if alias_rules or client_rules:
@@ -3362,7 +3383,8 @@ def create_app(
         for i, named in enumerate(chain):
             step_model, pin = split_pin(named)  # "model@upstream": only that upstream
             only = pin or (alias.upstream_ids if alias and i == 0 else ())
-            step_candidates = candidates_for(step_model, only, raw=alias is not None or bool(pin) or internal)
+            # models hidden on an upstream: for aliases and QueueRouter's own calls, not a client's own model@upstream
+            step_candidates = candidates_for(step_model, only, raw=alias is not None or internal)
             if not step_candidates:
                 continue
             if not isinstance(payload, dict):  # not JSON: forward as-is, no chain
@@ -3432,7 +3454,7 @@ def create_app(
                 if "context" in triggers:
                     continue  # try a model with a bigger context
                 break
-            unchanged = i == 0 and not alias and not param_changes and not pin
+            unchanged = i == 0 and not alias and not param_changes and not pin and not strip_usage
             unchanged = unchanged and compaction is None
             step_body = body if unchanged else json.dumps(step_payload).encode()
             estimate = estimate_prompt_tokens(step_payload)
@@ -3534,6 +3556,7 @@ def create_app(
             triggers,
             run,
             log_request=body if keep_content else None,
+            strip_usage=strip_usage,
         )
         if rlog.fields["stream"]:
             return StreamingResponse(
@@ -3641,6 +3664,7 @@ def create_app(
         outcome, status = "error", 200
         response = None
         sniffer = UsageSniffer()
+        held_back = UsageChunkFilter() if adm.strip_usage else None
         captured = bytearray() if adm.log_request is not None else None
         try:
             async with contextlib.aclosing(chained(adm)) as events:
@@ -3691,7 +3715,10 @@ def create_app(
                                     rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
                                 if captured is not None and len(captured) < CONTENT_CAPTURE_MAX:
                                     captured += chunk
-                                yield chunk
+                                if held_back is not None:
+                                    chunk = held_back.feed(chunk)
+                                if chunk:
+                                    yield chunk
                                 if adm.expired():
                                     outcome, status = "timeout", 504
                                     yield MID_STREAM + sse_error(
@@ -3702,6 +3729,8 @@ def create_app(
                             status = 502
                             yield MID_STREAM + sse_error(f"upstream stream interrupted: {type(exc).__name__}", 502)
                             return
+                        if held_back is not None and (rest := held_back.flush()):
+                            yield rest
                         outcome = "done"
                         return
         except (asyncio.CancelledError, GeneratorExit):

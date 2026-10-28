@@ -73,13 +73,17 @@ def presented_key(request: Request) -> str | None:
 ANONYMOUS = ClientKey("anonymous", "", "normal")
 
 
-def find_client(key: str | None, clients: dict[str, ClientKey], allow_no_auth: bool) -> ClientKey | None:
+def find_client(
+    key: str | None, clients: dict[str, ClientKey], allow_no_auth: bool, any_clients: bool | None = None
+) -> ClientKey | None:
     """The client owning ``key``; ANONYMOUS when auth is disabled; None if not authorised.
 
-    Keys are looked up by SHA-256 hash, so the stored value never equals the secret and the
-    lookup time doesn't depend on how much of a guessed key is correct.
+    "Allow without key" holds only while no client exists at all (``any_clients``: disabled and expired
+    ones count, so switching every client off doesn't open the door). Keys are looked up by SHA-256 hash,
+    so the stored value never equals the secret and the lookup time doesn't depend on how much of a guessed
+    key is correct.
     """
-    if allow_no_auth and not clients:
+    if allow_no_auth and not clients and not any_clients:
         return ANONYMOUS
     if not key:
         return None

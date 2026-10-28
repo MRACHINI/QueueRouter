@@ -96,7 +96,7 @@ class Catalogs:
         try:
             entry.models = await fetch_models(client, base_url, api_key)
             entry.ok, entry.error = True, ""
-        except (httpx.HTTPError, ValueError) as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             entry.error = f"{type(exc).__name__}: {exc}"[:200]  # keep the last good list, if any
             return False
         return True

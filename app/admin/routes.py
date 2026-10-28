@@ -214,7 +214,8 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Update the plugin automatically",
         "Installed QueueRouter plugins (0.41 and later) replace their file with this server's when it changes; "
         "the desktop app reloads it (else opencode uses it after a restart). Off: re-install by hand. A machine "
-        "can opt out with QUEUEROUTER_AUTO_UPDATE=0.",
+        "can opt out with QUEUEROUTER_AUTO_UPDATE=0. Only over https (or on the same machine): plugins that "
+        "reach QueueRouter over plain http don't update themselves (0.44 and later).",
     ),
     "opencode_rank": (
         "opencode",

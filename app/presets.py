@@ -24,7 +24,7 @@ class Preset:
     plans: tuple[Plan, ...] = field(default_factory=tuple)
     note: str = ""
     params: str = ""  # parameter rules for requests to this provider (e.g. fields it rejects)
-    max_retries: int | None = None  # 429 retries before giving up (None = the global budget)
+    max_retries: int | None = None  # retries on this upstream (429 / 5xx / errors); None = the global budget
 
 
 # ArliAI plans from arliai.com/pricing (October 2026). Embedding requests have their own parallel limit

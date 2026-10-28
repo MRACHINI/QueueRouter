@@ -292,6 +292,41 @@ async def test_members_search_the_web(make_stack):
     assert any(row["role"] == "council member 1/2 · after search" for row in rows)
 
 
+async def test_members_use_only_the_web_tools_the_alias_has_on(make_stack, monkeypatch):
+    """Search on, page reading off: a member that calls web_fetch anyway gets nothing read for it."""
+    from app import websearch
+
+    read = []
+
+    async def fake_fetch(client, url):
+        read.append(url)
+        return url, "page"
+
+    monkeypatch.setattr(websearch, "fetch", fake_fetch)
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["rogue_fetch_models"] = ["small-model"]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await search_setup(c, stack, "mock-model, small-model")
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.status_code == 200, r.text
+    assert read == []
+
+
+async def test_combine_judge_is_queuerouters_own_call(make_stack):
+    """A key allowed only the council alias gets the combined answer: the judge is QueueRouter's own call, like
+    the members (it used to be refused as a model the key may not use, after all the members had answered)."""
+    from tests.test_policies import set_policy
+
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await setup(c, stack, mode="combine", judge="small-model")
+        await set_policy(c, stack, allowed_models="team")
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json={"model": "team", "messages": ASK})
+        assert r.status_code == 200, r.text
+        assert r.json()["choices"][0]["message"]["content"] == "combined answer"
+        assert stack.mock["models"][-1] == "small-model"
+
+
 async def test_search_limit_and_failures(make_stack):
     stack = make_stack(bootstrap=OWNER, models_cache_s=0)
     stack.mock.update(searching_models=["mock-model"], always_search=True, search_status=403)

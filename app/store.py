@@ -508,6 +508,16 @@ REQUEST_COLUMNS = (
 )
 
 
+def storable(value: object) -> object:
+    """``value``, with any lone surrogate in a string (JSON allows "\\ud800") replaced: SQLite takes UTF-8 only."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return value.encode("utf-8", "replace").decode("utf-8")
+    return value
+
+
 _UPSERT = "INSERT INTO {table} (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
 
 
@@ -542,7 +552,7 @@ class Upstream:
     enabled: bool
     paused: bool
     params: str = ""  # parameter rules applied to every request sent here (app/params.py)
-    max_retries: int | None = None  # 429 retries on this upstream (None = the client's / global budget)
+    max_retries: int | None = None  # retries here after 429 / 5xx / errors (None = the client's / global budget)
     ua_mode: str = "keep"  # outgoing User-Agent default for requests here: keep | remove | template
     ua_template: str = ""
     model_filter: str = ""  # which models it offers (see Catalogs.filters); "" = all
@@ -753,7 +763,7 @@ class Store:
             return self._db.execute(sql, params).fetchall()
 
     def encrypt(self, value: str) -> str:
-        return self.fernet.encrypt(value.encode()).decode()
+        return self.fernet.encrypt(value.encode("utf-8", "replace")).decode()  # a lone surrogate becomes "?"
 
     def decrypt(self, token: str) -> str:
         try:
@@ -1159,6 +1169,7 @@ class Store:
         if not rows:
             return
         placeholders = ", ".join("?" for _ in REQUEST_COLUMNS)
+        rows = [{k: storable(v) for k, v in row.items()} for row in rows]  # one odd string mustn't lose them all
         with self.tx() as db:
             for row in rows:
                 if keep_rows:
@@ -1915,7 +1926,10 @@ class Store:
             db.executemany(
                 "INSERT OR REPLACE INTO request_content (id, ts, client, request, response, truncated) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                [(i, ts, c, self.encrypt(req), self.encrypt(resp), int(cut)) for i, ts, c, req, resp, cut in rows],
+                [
+                    (i, ts, storable(c), self.encrypt(req), self.encrypt(resp), int(cut))
+                    for i, ts, c, req, resp, cut in rows
+                ],
             )
 
     def get_content(self, request_id: str) -> dict | None:
