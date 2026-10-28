@@ -1339,6 +1339,28 @@ v0.44.0: fixes from a third six-part code review.
 - opencode plugin: updates itself only over https (or from QueueRouter on the same machine), follows no
   redirects for it, and skips a download bigger than a plugin can be; over plain http anyone on the network path
   could have handed it other code to run.
+v0.45.0: queue fixes from the same review.
+- A retry on the same upstream (5xx, connection error) frees its slot while it waits and then queues again in its
+  first place: other requests on that pool go meanwhile, and an upstream taken out of rotation meanwhile isn't
+  asked again until it's back (it used to hold the slot through every backoff and kept failing the circuit).
+- A fallback step keeps the request's place in the queue (it joined the back of its lane), and its queue wait is
+  added up: the queue timeout and "Queue ms" count time in the queue only, not time spent at a failed upstream
+  (that used to make a failed-over request time out "waiting in queue").
+- A retry or failover counts once for a client's requests-per-minute/day and doesn't wait for its own rate limit
+  again.
+- Circuit breakers: only the request that is the half-open trial can give the trial back (another one ending
+  without an answer let a second trial in).
+- Aging goes past the top lane: a request that keeps waiting goes before fresh top-lane ones, whatever their
+  sessions (an agent's steps could keep it waiting until its queue timeout).
+- 529 (Anthropic "overloaded") and 520–524 (Cloudflare in front of a provider) count as upstream failures:
+  retried, failed over and counted by the circuit breaker (they went straight to the app as answers).
+- Anthropic and Responses adapters: streamed tool calls without an `index` (a new call starts with its id) and
+  arguments sent as an object are translated (parallel calls were merged, object arguments broke the stream);
+  images in a Responses tool output become a note (megabytes of base64 went to the model as text).
+- Council judge: a last user message with parts (attachments) gets the judge's prompt as one more text part, not a
+  second user message in a row (some chat templates refuse that); the pick judge no longer inherits the app's
+  `response_format`, `stop`, `n` or `logprobs` (a JSON schema made it answer in JSON, and the wrong answer won).
+- Tracing: spans that couldn't be sent wait for the collector (up to the queue's limit) instead of being dropped.
 
 ### Later (agreed, not scheduled)
 

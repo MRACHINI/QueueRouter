@@ -61,6 +61,8 @@ class Ticket:
     target: Candidate | None = None
     preferred: int | None = None  # sticky upstream for this session
     prefer_until: float = 0.0  # wait for the preferred upstream until then (monotonic)
+    requeued: bool = False  # back in the queue in its first place (a retry or failover of the same request)
+    trial: bool = False  # granted as a circuit breaker's half-open trial (set by the grant callback)
 
     @property
     def granted(self) -> bool:
@@ -235,7 +237,9 @@ class SlotQueue:
 
     def _rank(self, client: str, lane: int, session: str | None, waited: float, seq: int, now: float) -> tuple:
         bump = int(waited // self.aging_s) if self.aging_s > 0 else 0
-        effective_lane = max(0, lane - bump)
+        # below 0 too: past the top lane, a request that keeps waiting goes before fresh ones there, whatever
+        # their sessions (clamped at 0, an active session's steps could keep it waiting for good)
+        effective_lane = lane - bump
         new_session = 0 if self._session_active(session, now) else 1
         last_grant = self._client_last_grant.get(client, 0.0) if self.fair_share else 0.0
         return (effective_lane, new_session, last_grant, seq)
@@ -271,6 +275,7 @@ class SlotQueue:
             ticket.enqueued_at = enqueued_at
         if seq is not None:
             ticket.seq = seq
+            ticket.requeued = True
         if preferred is not None and any(c.upstream_id == preferred for c in candidates):
             ticket.preferred = preferred
             ticket.prefer_until = time.monotonic() + prefer_wait_s

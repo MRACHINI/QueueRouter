@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 
-from .sse import encode, events
+from .sse import arguments_text, encode, events, tool_call_delta
 
 STORE_DAYS = 7
 
@@ -84,9 +84,12 @@ def input_messages(value) -> list[dict]:
                 messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
         elif kind == "function_call_output":
             output = item.get("output")
-            if not isinstance(output, str):
-                output = _parts(output) if isinstance(output, list) else json.dumps(output)
-                output = output if isinstance(output, str) else json.dumps(output)
+            if isinstance(output, list):  # parts: a tool message carries text, so an image becomes a note
+                parts = _parts(output)
+                parts = [{"type": "text", "text": parts}] if isinstance(parts, str) else parts
+                output = "\n".join(p["text"] if p["type"] == "text" else "[An image was returned here.]" for p in parts)
+            elif not isinstance(output, str):
+                output = json.dumps(output)
             messages.append({"role": "tool", "tool_call_id": item.get("call_id", ""), "content": output})
         elif kind == "reasoning":
             continue
@@ -247,7 +250,7 @@ def from_chat(body: dict, payload: dict, response_id: str, model: str) -> dict:
                 new_id("fc"),
                 call.get("id") or new_id("call"),
                 function.get("name", ""),
-                function.get("arguments") or "{}",
+                arguments_text(function.get("arguments")),
             )
         )
     status = "incomplete" if choice.get("finish_reason") == "length" else "completed"
@@ -273,6 +276,7 @@ async def stream(
     text_item: dict | None = None
     text = ""
     calls: dict[int, dict] = {}  # openai tool index -> item (arguments accumulated)
+    call_ids: dict[str, int] = {}  # for providers that leave the index out
     finish = None
     usage = None
     started = False
@@ -349,8 +353,7 @@ async def stream(
                         },
                     )
                 for call in delta.get("tool_calls") or []:
-                    index = call.get("index", 0)
-                    function = call.get("function") or {}
+                    index, function, arguments = tool_call_delta(call, call_ids)
                     if index not in calls:
                         for chunk in text_done():
                             yield chunk
@@ -360,12 +363,12 @@ async def stream(
                         calls[index] = item
                         output.append(item)
                         yield event("response.output_item.added", {"output_index": len(output) - 1, "item": item})
-                    if function.get("arguments"):
+                    if arguments:
                         item = calls[index]
-                        item["arguments"] += function["arguments"]
+                        item["arguments"] += arguments
                         yield event(
                             "response.function_call_arguments.delta",
-                            {"item_id": item["id"], "output_index": output.index(item), "delta": function["arguments"]},
+                            {"item_id": item["id"], "output_index": output.index(item), "delta": arguments},
                         )
                 if choice.get("finish_reason"):
                     finish = choice["finish_reason"]

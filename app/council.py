@@ -181,9 +181,11 @@ def judge_payload(
     ask = f"{prompt}\n\n{listing}"
     messages = list(payload["messages"])
     last = messages[-1] if messages else None
+    # added to the user's message, not as a second one in a row: some chat templates refuse that
     if isinstance(last, dict) and last.get("role") == "user" and isinstance(last.get("content"), str):
-        # added to the user's message, not as a second one in a row: some chat templates refuse that
         messages[-1] = {**last, "content": f"{last['content']}\n\n{ask}"}
+    elif isinstance(last, dict) and last.get("role") == "user" and isinstance(last.get("content"), list):
+        messages[-1] = {**last, "content": [*last["content"], {"type": "text", "text": ask}]}  # text, attachments
     else:
         messages.append({"role": "user", "content": ask})
     judged = {**payload, "model": model, "messages": messages}
@@ -191,8 +193,10 @@ def judge_payload(
         # room for thinking models to reason first (their reasoning counts as output); the verdict is read
         # from the final answer
         judged.update(stream=False, max_tokens=PICK_TOKENS, temperature=0)
-        judged.pop("max_completion_tokens", None)
-        judged.pop("stream_options", None)
+        # its answer is a number: not the app's format (a JSON schema), stop words or several choices
+        for name in ("max_completion_tokens", "stream_options", "response_format", "stop", "n", "logprobs"):
+            judged.pop(name, None)
+        judged.pop("top_logprobs", None)
         if judged.get("tools"):
             judged["tool_choice"] = "none"  # it answers with a number, not a tool call
     return judged

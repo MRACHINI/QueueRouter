@@ -47,10 +47,14 @@ class Circuits:
             return True
         return current == "half-open" and not self._get(upstream_id).trial_in_flight
 
-    def begin(self, upstream_id: int) -> None:
-        """A request was dispatched; in half-open state it becomes the single trial."""
-        if self.state(upstream_id) == "half-open":
-            self._get(upstream_id).trial_in_flight = True
+    def begin(self, upstream_id: int) -> bool:
+        """A request was dispatched; in half-open state it becomes the single trial (returns True then: only
+        that request may ``abandon`` it)."""
+        s = self._get(upstream_id)
+        if self.state(upstream_id) == "half-open" and not s.trial_in_flight:
+            s.trial_in_flight = True
+            return True
+        return False
 
     def success(self, upstream_id: int) -> None:
         s = self._get(upstream_id)
