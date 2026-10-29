@@ -36,8 +36,10 @@ apply immediately.</p>
     </td>
     <td data-label="Key">
       <code id="key-{{ c.id }}" class="wrap-any">{{ c.key_prefix }}…</code>
-      {% if c.key_kept %}
+      {% if c.key_kept and user.can_view_content %}
       <button type="button" class="secondary" data-show-key="/admin/clients/{{ c.id }}/key" data-target="#key-{{ c.id }}" data-csrf="{{ csrf }}">Show</button>
+      {% elif c.key_kept %}
+      <div class="small muted" title="A client's key also reads its job results and files">Showing keys needs <em>can read logged content</em> (Users page).</div>
       {% else %}
       <div class="small muted">Made before 0.42: only its hash is kept. <em>New key</em> makes it showable.</div>
       {% endif %}

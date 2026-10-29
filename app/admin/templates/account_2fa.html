@@ -15,7 +15,9 @@
     <form method="post" action="/admin/account/2fa/enable" class="card stack">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>Code <input name="code" required autocomplete="one-time-code" inputmode="numeric" maxlength="8" autofocus></label>
+      <label>Current password <input name="current" type="password" required autocomplete="current-password"></label>
       <button type="submit">Turn on</button>
+      <span class="small muted">Your other sessions (other browsers, other devices) are signed out.</span>
     </form>
   </li>
 </ol>

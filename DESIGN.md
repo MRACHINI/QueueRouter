@@ -1392,6 +1392,16 @@ v0.47.0: the last fixes from the same review (admin, jobs, restore, configuratio
   empty).
 - Settings from the environment are checked like the Settings page: "nan", negative values or 0 slots stop the
   first start with a clear message instead of being stored for good.
+v0.48.0: admin accounts.
+- Wrong passwords block that name from that address only (and the address itself after 5 tries of any name): from
+  anywhere, anyone who could reach the login page could keep an admin locked out. The 2FA step still blocks the
+  name from every address (only someone with the password gets there, and codes tried from many addresses mustn't
+  add up).
+- Show key needs "can read logged content" (Users page), like logged content itself: a client's key also reads
+  its job results and batch files through /v1.
+- Turning 2FA on asks for the current password too (a stolen session alone could tie the account to another
+  phone), and turning it on or off or making new recovery codes signs out the account's other sessions; this
+  browser gets a new one.
 
 ### Later (agreed, not scheduled)
 

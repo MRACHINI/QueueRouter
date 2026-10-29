@@ -201,7 +201,8 @@ owner account. Then:
 
 1. **Upstreams** → add ArliAI (pick your plan) with your API key.
 2. **Clients** → create a client per app (e.g. `opencode`, priority `high`); copy its key (shown
-   with a ready-made opencode config; **Show** on the Clients page displays it again later).
+   with a ready-made opencode config; **Show** on the Clients page displays it again later, for admins with
+   *can read logged content* on the Users page, since a key also reads that client's job results).
 3. Optionally **Models** → add aliases.
 
 No Traefik? Use [docker-compose.caddy.yml](docker-compose.caddy.yml) (Caddy gets certificates
