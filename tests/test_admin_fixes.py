@@ -4,6 +4,7 @@ a restore interrupted between database and key finishes on the next start, retri
 "spare capacity" jobs can't crowd out the others, and settings from the environment are checked."""
 
 import io
+import ipaddress
 import os
 import time
 import zipfile
@@ -39,6 +40,41 @@ async def test_out_of_range_values_and_a_failed_add_upstream(make_stack):
         assert len(store.list_pools()) == pools  # no pool left behind
         r = await c.post("/admin/upstreams", data={**form, "api_key": "k", "pool": "new", "max_concurrency": "1"})
         assert "m=created" in r.headers["location"], r.headers["location"]
+
+
+async def test_wrong_passwords_lock_a_name_out_from_that_address_only(make_stack):
+    """Someone else's wrong passwords for "owner" block that name from their address, not the owner's sign-in."""
+    proxied = {**OWNER, "trusted_proxies": (ipaddress.ip_network("127.0.0.1/32"),)}
+    stack = make_stack(bootstrap=proxied)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        attacker = {"X-Forwarded-For": "203.0.113.9"}
+        for _ in range(6):
+            r = await c.post("/admin/login", data={"username": "owner", "password": "guess"}, headers=attacker)
+        assert "Too many attempts" in r.text
+        owner = {"X-Forwarded-For": "198.51.100.7"}
+        data = {"username": "owner", "password": OWNER["admin_password"], "next": "/admin"}
+        r = await c.post("/admin/login", data=data, headers=owner)
+        assert r.status_code == 303, r.text
+
+
+async def test_showing_a_key_needs_the_content_permission(make_stack):
+    """A client's key reads its job results and files: Show is for admins who may read logged content."""
+    stack = make_stack(bootstrap=OWNER)
+    store = stack.app.state.store
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        owner = store.get_admin(username="owner")
+        csrf = csrf_of((await c.get("/admin/clients")).text)
+        await c.post("/admin/clients", data={"csrf": csrf, "name": "kept", "priority": "normal"})
+        kept = next(x for x in store.list_clients() if x.name == "kept")
+        store.update_admin(owner.id, "test", can_view_content=False)
+        page = (await c.get("/admin/clients")).text
+        assert "data-show-key" not in page and "Showing keys needs" in page
+        r = await c.post(f"/admin/clients/{kept.id}/key", headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 403
+        store.update_admin(owner.id, "test", can_view_content=True)
+        r = await c.post(f"/admin/clients/{kept.id}/key", headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 200 and r.json()["key"]
 
 
 def _encrypted_zip() -> bytes:

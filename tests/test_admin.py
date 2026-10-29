@@ -230,6 +230,7 @@ async def test_rename_show_key_and_timed_logging(admin_stack):
     body = {"model": "mock-model", "messages": [{"role": "user", "content": "hi"}]}
     async with httpx.AsyncClient(base_url=admin_stack.url) as c:
         await login(c, admin_stack.url)
+        store.update_admin(store.get_admin(username="owner").id, "t", can_view_content=True)  # Show needs it
         csrf = csrf_of((await c.get("/admin/clients")).text)
         created = await c.post("/admin/clients", data={"csrf": csrf, "name": "bilal", "priority": "normal"})
         key = key_of(created.text)

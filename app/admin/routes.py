@@ -423,7 +423,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         reason = (
             "Your session's form token is invalid; reload the page."
             if str(exc) == "csrf"
-            else (f"This page needs the '{exc}' role.")
+            else "This needs the 'can read logged content' permission (Users page)."
+            if str(exc) == "content"
+            else f"This page needs the '{exc}' role."
         )
         response = page(request, "error.html", session, title="Not allowed", reason=reason)
         response.status_code = 403
@@ -475,13 +477,15 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         username = str(form.get("username", "")).strip()[:MAX_USERNAME]  # bounded: it is kept for the lockout and audit
         nxt = _safe_next(str(form.get("next", "")))
         ip = client_ip(request, bootstrap.trusted_proxies)
-        if login_guard.is_blocked(ip) or login_guard.is_blocked(f"user:{username}"):
+        # wrong passwords block that name from that address only: from anywhere, anyone who can reach this page
+        # could keep an admin locked out (the address's own limit still counts every name tried from it)
+        if login_guard.is_blocked(ip) or login_guard.is_blocked(f"user:{username}@{ip}"):
             return page(request, "login.html", None, error="Too many attempts. Try again later.", next=nxt)
         user = store.get_admin(username=username)
         hashed = store.password_hash(user.id) if user else None
         if not verify_password(hashed, str(form.get("password", ""))) or not user.enabled:
             login_guard.fail(ip)
-            login_guard.fail(f"user:{username}")
+            login_guard.fail(f"user:{username}@{ip}")
             store.audit(username or "?", "login.failed", ip)
             return page(request, "login.html", None, error="Wrong username or password.", next=nxt)
         if user.has_2fa:  # password was right; now the code from the authenticator app
@@ -522,6 +526,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             return page(request, "login.html", None, error="The sign-in expired; please start again.", next="/admin")
         user_id, _, nxt = entry
         user = store.get_admin(user_id=user_id)
+        # here the name stays blocked from every address: only someone with the password gets this far, and
+        # codes tried from many addresses must not add up
         if (
             user is None
             or not user.enabled
@@ -750,6 +756,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         if secret is None or expires < time.time():
             pending_setup.pop(session.token_hash, None)
             return account_page(request, session, error="The setup expired; please start again.")
+        # the password too: a stolen session alone mustn't tie the account to someone else's phone
+        if not verify_password(store.password_hash(session.user.id), str(form.get("current", ""))):
+            return account_2fa_setup_page(request, session, secret, "Current password is wrong.")
         counter = totp.verify(secret, str(form.get("code", "")))
         if counter is None:
             return account_2fa_setup_page(request, session, secret, "That code didn't match. Check the phone's clock.")
@@ -757,7 +766,19 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         codes = totp.new_recovery_codes()
         store.set_totp(session.user.id, secret, [totp.hash_recovery(c) for c in codes], session.user.username)
         store.totp_used(session.user.id, counter)
-        return page(request, "account_recovery.html", session, codes=codes)
+        return only_this_session(request, session, "account_recovery.html", codes=codes)
+
+    def only_this_session(request: Request, session: AdminSession, template: str, **context) -> Response:
+        """After a change to how this account signs in: every other session of it ends (one taken from another
+        browser mustn't outlive it); this browser gets a new one, and ``template`` is shown with it."""
+        store.delete_sessions(session.user.id)
+        token, csrf = sessions.start(request, store.get_admin(user_id=session.user.id))
+        if template.startswith("/"):  # a page to go back to
+            response = back(template, context.get("message"))
+        else:
+            response = page(request, template, dataclasses.replace(session, csrf=csrf), **context)
+        sessions.set_cookie(response, request, token)
+        return response
 
     @app.post("/admin/account/2fa/recovery")
     async def account_2fa_recovery(request: Request):
@@ -769,7 +790,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             return account_page(request, session, error="Current password is wrong.")
         codes = totp.new_recovery_codes()
         store.set_totp(session.user.id, secret, [totp.hash_recovery(c) for c in codes], session.user.username)
-        return page(request, "account_recovery.html", session, codes=codes)
+        return only_this_session(request, session, "account_recovery.html", codes=codes)
 
     @app.post("/admin/account/2fa/disable")
     async def account_2fa_disable(request: Request):
@@ -777,7 +798,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         if not verify_password(store.password_hash(session.user.id), str(form.get("current", ""))):
             return account_page(request, session, error="Current password is wrong.")
         store.set_totp(session.user.id, None, [], session.user.username)
-        return back("/admin/account", "2fa_off")
+        return only_this_session(request, session, "/admin/account", message="2fa_off")
 
     @app.post("/admin/users/{user_id}/reset-2fa")
     async def users_reset_2fa(user_id: int, request: Request):
@@ -907,6 +928,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         session = require(request, "admin")
         if not csrf_ok(session, request.headers.get("x-csrf-token")):
             raise NotAllowed("csrf")
+        if not session.user.can_view_content:  # the key reads that client's job results and files through /v1
+            return JSONResponse({"error": "showing keys needs 'can read logged content' (Users page)"}, status_code=403)
         key = store.client_key(client_id, session.user.username)
         if key is None:
             return JSONResponse({"error": "only this key's hash is kept: issue a new key to see it"}, status_code=404)
