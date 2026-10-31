@@ -9,7 +9,7 @@
     {% for key, label in (("client", "clients"), ("outcome", "outcomes"), ("model", "models"), ("upstream", "upstreams"), ("tag", "tags")) %}
     <select name="{{ key }}" aria-label="{{ key }}">
       <option value="">all {{ label }}</option>
-      {% if filters[key] %}<option value="{{ filters[key] }}" selected>{{ filters[key] }}</option>{% endif %}
+      {% if filters[key] %}<option value="{{ filters[key] }}" selected>{{ filters[key] | model_label if key == "model" else filters[key] }}</option>{% endif %}
     </select>
     {% endfor %}
     <noscript><button type="submit" class="secondary">Filter</button></noscript>
@@ -24,15 +24,15 @@ details. <code>length</code> under Finish means the reply was cut off by the tok
 <div class="table-wrap requests-wrap">
 <table class="cards dense requests-table">
   <colgroup>
-    <col class="c-time"><col class="c-client"><col><col class="c-upstream"><col class="c-outcome">
+    <col class="c-time"><col class="c-client"><col><col class="c-outcome">
     <col class="c-ms"><col class="c-first"><col class="c-ms"><col class="c-in"><col class="c-cached"><col class="c-out">
     <col class="c-total"><col class="c-finish">
   </colgroup>
-  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Upstream</th><th>Outcome</th><th class="num" title="Queue ms">Queue</th><th class="num" title="First byte ms">First byte</th><th class="num" title="Upstream ms: from being sent to the last byte">Took</th><th class="num" title="Tokens that weren't cached">In</th><th class="num">Cached</th><th class="num">Out</th><th class="num">Total</th><th>Finish</th></tr></thead>
-  <tbody><tr class="section"><td colspan="13">Now <span class="badge" id="now-count">0</span> <span class="muted">queued and running</span></td></tr></tbody>
+  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Outcome</th><th class="num" title="Queue ms">Queue</th><th class="num" title="First byte ms">First byte</th><th class="num" title="Upstream ms: from being sent to the last byte">Took</th><th class="num" title="Tokens that weren't cached">In</th><th class="num">Cached</th><th class="num">Out</th><th class="num">Total</th><th>Finish</th></tr></thead>
+  <tbody><tr class="section"><td colspan="12">Now <span class="badge" id="now-count">0</span> <span class="muted">queued and running</span></td></tr></tbody>
   <tbody id="now-requests"></tbody>
-  <tbody><tr class="section"><td colspan="13">Finished</td></tr></tbody>
-  <tbody id="finished-requests"><tr class="placeholder"><td colspan="13" class="muted">Loading…</td></tr></tbody>
+  <tbody><tr class="section"><td colspan="12">Finished</td></tr></tbody>
+  <tbody id="finished-requests"><tr class="placeholder"><td colspan="12" class="muted">Loading…</td></tr></tbody>
 </table>
 </div>
 <p class="small muted" id="requests-more"></p>

@@ -312,8 +312,7 @@ table.dense tr.total td { font-weight: 600; border-top: 1px solid var(--border);
 .requests-table td { overflow: hidden; text-overflow: ellipsis; }
 .requests-table col.c-time { width: 12ch; }
 .requests-table col.c-client { width: 11ch; }
-.requests-table col.c-upstream { width: 11ch; }
-.requests-table col.c-outcome { width: 12ch; }
+.requests-table col.c-outcome { width: 24ch; }
 .requests-table col.c-ms { width: 8ch; }
 .requests-table col.c-first { width: 9ch; }
 .requests-table col.c-in { width: 20ch; }

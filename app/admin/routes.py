@@ -41,6 +41,7 @@ from ..council import MIN_MEMBERS as COUNCIL_MIN
 from ..council import MODES as COUNCIL_MODES
 from ..council import WHEN as COUNCIL_WHEN
 from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
+from ..names import EVERY, ModelNames
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
 from ..presets import ARLIAI_PLANS, PRESETS, plan_for
@@ -87,10 +88,14 @@ PRICING_DAYS = 30  # the price table lists models used this recently (plus offer
 LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes / send anyway
 REQUEST_LIST_COLUMNS = (
     "id, ts, client, priority, model, target_model, upstream, status, outcome, retries, queue_ms, ttft_ms, "
-    "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, finish_reason, compaction, council, role, parent"
+    "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, finish_reason, stopped, compaction, council, role, "
+    "parent"
 )
 REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "id",
+    "model",
+    "target_model",
+    "upstream",
     "priority",
     "stream",
     "user_agent",
@@ -353,6 +358,9 @@ class AdminContext:
     refresh_scores: Callable[[], Awaitable[bool]]
     ranking_table: Callable[[], dict]
     thinking_table: Callable[[], dict]
+    name_table: Callable[[], list[dict]]
+    names: Callable[[], ModelNames]
+    model_label: Callable[..., str]
 
 
 class NeedLogin(Exception):
@@ -364,6 +372,11 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     sessions = Sessions(store, bootstrap)
     templates = Jinja2Templates(directory=os.path.join(HERE, "templates"))
     templates.env.filters["expiry_date"] = _expiry_date
+    templates.env.filters["model_label"] = ctx.model_label
+    templates.env.filters["model_name"] = lambda model, upstream=None: ctx.names().name(model, upstream)
+    templates.env.filters["request_label"] = lambda r: ctx.names().of_request(
+        r["model"], r["target_model"], r["upstream"]
+    )
     login_guard = AuthGuard(limit_per_minute=5, block_s=300)
     pending_2fa: dict[str, tuple[int, float, str]] = {}  # ticket -> (user id, expires, next)
     pending_setup: dict[str, tuple[str, float]] = {}  # session -> (new TOTP secret, expires)
@@ -1401,7 +1414,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         def load() -> dict:
             rows = store.list_requests(limit + 1, after, before, REQUEST_LIST_COLUMNS, **filters)
             calls = store.calls_of([r for r in rows[:limit] if r["council"]])
-            costed = request_costs(rows[:limit], calls, store.list_model_prices(), ctx.prices)
+            costed = request_costs(rows[:limit], calls, store.list_model_prices(), ctx.prices, ctx.names())
             return {"rows": costed, "more": len(rows) > limit}
 
         return JSONResponse(await asyncio.to_thread(load))
@@ -1414,7 +1427,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         if filter_choices["at"] is None or now - filter_choices["at"] > FILTER_CHOICES_S:
             values = await asyncio.to_thread(store.request_filter_values)
             filter_choices.update(at=now, values=values)
-        return JSONResponse(filter_choices["values"])
+        labels = {value: ctx.model_label(value) for value in filter_choices["values"]["model"]}
+        return JSONResponse({**filter_choices["values"], "labels": labels})
 
     @app.get("/admin/api/requests/{request_id}")
     async def api_request(request_id: str, request: Request):
@@ -1442,9 +1456,10 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             overrides = store.list_model_prices()
             plan_per_month = sum(p.monthly_price or 0 for p in store.list_pools())
             shown = [r for r in stored if r["day"] >= day_range(days)[0]]
-            rows, totals, _ = summarize_usage(shown, overrides, ctx.prices, by_model, plan_per_month, days)
+            names = ctx.names()
+            rows, totals, _ = summarize_usage(shown, overrides, ctx.prices, by_model, plan_per_month, days, names)
             models, model_total = model_costs(
-                [r for r in stored if r["day"] >= day_range(model_days)[0]], overrides, ctx.prices
+                [r for r in stored if r["day"] >= day_range(model_days)[0]], overrides, ctx.prices, names
             )
             return {
                 "days": days,
@@ -1482,7 +1497,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             window = "24h"
         now = time.time()
         rows = await asyncio.to_thread(store.response_rows, now - latency.WINDOWS[window])
-        starts, series = latency.trend(rows, window, now)
+        starts, series = latency.trend(rows, window, now, ctx.names())
         fmt = "%m-%d %H:%M" if window == "7d" else "%H:%M"
         labels = [datetime.fromtimestamp(t, UTC).strftime(fmt) for t in starts]
         chart = (
@@ -1523,6 +1538,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "completion_tokens",
             "cached_tokens",
             "cost_usd",
+            *(["upstream", "label"] if by_model else []),
         ]
         writer.writerow(columns)
         for r in summary["rows"]:
@@ -1542,18 +1558,29 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         upstream_names = {u.id: u.name for u in store.list_upstreams()}
         models = ctx.models_by_upstream()
         overrides = store.list_model_prices()
-        offered = {m for ids in models.values() for m in ids} | {a.target_model for a in store.list_aliases()}
-        recent = set(store.used_models(days=PRICING_DAYS))  # older names only matter for old usage
-        priced_models = sorted(offered | recent | set(overrides))
-        pricing = [
-            {
-                "model": m,
-                "price": resolve(m, overrides, ctx.prices),
-                "override": overrides.get(m),
-                "offered": m in offered,
-            }
-            for m in priced_models
-        ]
+        names = ctx.names()
+        offered = {(upstream, m) for upstream, ids in models.items() for m in ids}
+        for alias in store.list_aliases():
+            bare, pinned = names.unpin(alias.target_model)
+            if pinned or not any(m == bare for _, m in offered):
+                offered.add((pinned, bare))
+        recent = store.used_models(days=PRICING_DAYS)  # older names only matter for old usage
+        pairs = offered | {(None if upstream == "-" else upstream, m) for upstream, m in recent}
+        pairs |= {(names.upstreams.get(upstream_id), m) for upstream_id, m in overrides}
+        pricing = sorted(
+            (
+                {
+                    "model": m,
+                    "upstream_id": names.id_of(upstream),
+                    "label": names.label(m, upstream),
+                    "price": resolve(m, overrides, ctx.prices, names.id_of(upstream), names.name(m, upstream)),
+                    "override": overrides.get((names.id_of(upstream), m)),
+                    "offered": (upstream, m) in offered,
+                }
+                for upstream, m in pairs
+            ),
+            key=lambda row: row["label"].lower(),
+        )
         return page(
             request,
             "models.html",
@@ -1572,12 +1599,35 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             catalog_size=len(ctx.prices.prices),
             catalog_age_h=round((time.time() - ctx.prices.fetched_at) / 3600, 1) if ctx.prices.fetched_at else None,
             contexts=ctx.context_table(),
+            model_names=ctx.name_table(),
             ranking=ctx.ranking_table(),
             thinking=ctx.thinking_table(),
             efforts=THINKING_EFFORTS,
             rank_indexes=RANK_INDEXES,
             credit=(CREDIT, CREDIT_URL),
         )
+
+    def chosen_upstream(form: dict) -> int:
+        """The upstream a Models page row belongs to; EVERY for a setting for all of them."""
+        upstream_id = int(form.get("upstream_id") or EVERY)
+        if upstream_id != EVERY and upstream_id not in ctx.names().upstreams:
+            raise ValueError("upstream")
+        return upstream_id
+
+    @app.post("/admin/model-names")
+    async def model_names_update(request: Request):
+        session, form = await require_post(request, "admin")
+        model = str(form.get("model", "")).strip()
+        name = " ".join(str(form.get("name", "")).split())
+        try:
+            upstream_id = chosen_upstream(form)
+            if not model or len(model) > 200 or len(name) > 120 or upstream_id == EVERY:
+                raise ValueError("model")
+            store.set_model_name(upstream_id, model, session.user.username, name or None)
+        except ValueError:
+            return back("/admin/models#names", error="invalid")
+        ctx.reload()
+        return back("/admin/models#names", "saved")
 
     @app.post("/admin/model-limits")
     async def model_limits_update(request: Request):
@@ -1590,7 +1640,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             output = _opt(form, "output", int, 1)
             if context and output and output > context:
                 raise ValueError("output")
-            store.set_model_limit(model, session.user.username, context, output)
+            store.set_model_limit(model, session.user.username, context, output, chosen_upstream(form))
         except ValueError:
             return back("/admin/models#contexts", error="invalid")
         ctx.reload()
@@ -1618,7 +1668,10 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             score = _opt(form, "score", float, 0)  # blank: the index decides again
             if score is not None and score > 1000:
                 raise ValueError("score")
-            store.set_model_score(model, session.user.username, score)
+            upstream_id = chosen_upstream(form)
+            store.set_model_score(model, session.user.username, score, upstream_id)
+            if score is None:  # one set for every provider, from before scores were per provider, goes too
+                store.set_model_score(model, session.user.username, None)
         except ValueError:
             return back("/admin/models#ranking", error="invalid")
         return back("/admin/models#ranking", "saved")
@@ -1630,8 +1683,16 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         levels = " ".join(str(form.get("levels", "")).lower().replace(",", " ").split())
         if not model or len(model) > 200 or any(e not in (*THINKING_EFFORTS, "-") for e in levels.split()):
             return back("/admin/models#thinking", error="invalid")
+        try:
+            upstream_id = chosen_upstream(form)
+        except ValueError:
+            return back("/admin/models#thinking", error="invalid")
         # blank: detection decides again; "-": no level selector for this model
-        store.set_model_thinking(model, session.user.username, ",".join(levels.split()) if levels else None)
+        store.set_model_thinking(
+            model, session.user.username, ",".join(levels.split()) if levels else None, upstream_id
+        )
+        if not levels:  # ones set for every provider, from before levels were per provider, go too
+            store.set_model_thinking(model, session.user.username, None)
         return back("/admin/models#thinking", "saved")
 
     @app.post("/admin/model-scores/refresh")
@@ -1658,6 +1719,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 _opt(form, "input", float, 0),
                 _opt(form, "output", float, 0),
                 _opt(form, "cached_input", float, 0),
+                chosen_upstream(form),
             )
         except ValueError:
             return back("/admin/models#pricing", error="invalid")
@@ -1853,10 +1915,12 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     @app.get("/admin/playground")
     async def playground_page(request: Request):
         session = require(request, "operator")
-        model_ids = sorted({m for ids in ctx.models_by_upstream().values() for m in ids})
+        names = ctx.names()
+        offered = [(f"{m}@{u}", names.label(m, u)) for u, ids in ctx.models_by_upstream().items() for m in ids]
         aliases = [a.name for a in store.list_aliases() if a.enabled]
         clients = [c for c in store.list_clients() if c.enabled and not c.expired]
-        return page(request, "playground.html", session, models=model_ids, aliases=aliases, clients=clients)
+        offered.sort(key=lambda m: m[1].lower())
+        return page(request, "playground.html", session, models=offered, aliases=aliases, clients=clients)
 
     @app.post("/admin/playground/send")
     async def playground_send(request: Request):

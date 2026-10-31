@@ -43,6 +43,7 @@ _DROP_REQUEST_HEADERS = {
     "cookie",
     "accept-encoding",
     "forwarded",
+    "via",  # the proxies it came through, not the app
     "x-forwarded-for",
     "x-forwarded-host",
     "x-forwarded-proto",
@@ -300,6 +301,7 @@ _NOT_IDENTITY = {
     "transfer-encoding",
     "upgrade",
     "forwarded",
+    "via",
     "x-forwarded-for",
     "x-forwarded-host",
     "x-forwarded-proto",

@@ -113,6 +113,10 @@ from a **web admin UI**.
 - **Costs**: at official prices, split into normal input, cached input and output, for each request (Requests
   page), per client and day, and per model over 1 day, 1 week or 30 days (Usage page). A council's cost adds up
   its members and judge. Click a row on the Requests page for its identifiers, User-Agents and timings.
+- **Every model shown with its provider**: `Synthetic|GLM-4.7` everywhere, and one entry per provider in opencode.
+  Each provider's model has its own price, score, context size and thinking levels. Give it an optional custom name
+  and it shows everywhere, in opencode too, and its automatic score and price are found by that name; the real ID
+  is still what's sent to the provider. See [Model names](#model-names).
 - **Charts**: live running/queued chart on the dashboard (last 30 minutes); tokens, requests and
   cost per day on the Usage page (server-rendered SVG, no scripts from elsewhere).
 - **Response times** per model and upstream: the provider's own timings for streamed requests (its queue,
@@ -375,15 +379,31 @@ QueueRouter gives it that price: yours (**Models → Reference prices**), else n
 price (e.g. ArliAI), the upstream's own price (OpenRouter), or the models.dev match, the highest when several
 upstreams serve a model. Councils and summaries make calls opencode can't see; the **Usage** page counts everything.
 
+### Model names
+
+**Models → Model names** gives a model on a provider your own name, for example `DeepSeek V4 Flash` for
+`hf:deepseek-ai/DeepSeek-V4.1-Flash-1017`. It then shows as `Synthetic|DeepSeek V4 Flash` on every page and in
+opencode, past requests included, and the model's automatic score, price and thinking levels are looked up by it.
+Several models can share a name: each still has its own row, and its own price and score if you set them.
+
+Names are for people. The real ID is what's stored and sent to the provider, so aliases, a client's allowed models
+and saved model choices keep working, and it's one click away on the Requests page. Apps can't ask for a model by
+its custom name, because several can share one: they send the real ID, or an alias.
+
+Each opencode entry is one provider: `GLM-4.7@Synthetic` is only sent to Synthetic, so if it's down, that request
+fails. For automatic switching, make an alias with fallbacks. `GLM-4.7` without a provider still works for apps
+that send it, on any provider that offers it. Choose your model again in opencode once after updating to 0.51.
+
 ### Models in strength order
 
 Turn on **Settings → opencode → Order models by strength** and the opencode model list is numbered: your aliases
-first (`00 · smart`), then the strongest models with their score (`01 · 58.3 · …`, `02 · 52.0 · …`; `~` marks a
+first (`00|smart`), then the strongest models with their score (`01|58.3|…`, `02|52.0|…`; `~` marks a
 score taken from the base model), then models without a score. Scores come from
 the [Artificial Analysis](https://artificialanalysis.ai/) index (intelligence, coding or agentic): as published in
 OpenRouter's public model list with no setup, or the full index with a free API key in Settings (read once a day), or
-from your own score per model on the **Models** page, which wins. Fine-tunes
-and renamed variants get their base model's score: `GLM-4.6-Derestricted-v5` ranks as GLM-4.6.
+from your own score per provider's model on the **Models** page, which wins. The index is searched by the model's
+custom name when it has one. Fine-tunes and renamed variants get their base model's score:
+`GLM-4.6-Derestricted-v5` ranks as GLM-4.6.
 
 ## Environment variables (bootstrap only)
 

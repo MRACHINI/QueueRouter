@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import httpx
 
 from . import latency
+from .names import ModelNames
 from .store import Store, Webhook
 
 log = logging.getLogger("queuerouter")
@@ -236,9 +237,12 @@ def webhook_request(hook: Webhook, note: Note) -> tuple[bytes, dict[str, str]]:
 
 
 class Alerts:
-    def __init__(self, store: Store, http: Callable[[], httpx.AsyncClient]) -> None:
+    def __init__(
+        self, store: Store, http: Callable[[], httpx.AsyncClient], names: Callable[[], ModelNames] = ModelNames
+    ) -> None:
         self.store = store
         self._http = http
+        self._names = names
         self.rules = load_rules(store)
         self._last: dict[str, float] = {}  # "kind:subject" -> last fired (cooldowns)
         self._since: dict[str, float] = {}  # sustained conditions: when they started
@@ -433,7 +437,7 @@ class Alerts:
                 self.fire(
                     "slow_first_token",
                     f"{s.model}@{s.upstream}",
-                    f"{s.model} on {s.upstream} is slow to start: {worst:.0f}s to the first token",
+                    f"{self._names().label(s.model, s.upstream)} is slow to start: {worst:.0f}s to the first token",
                     f"The slowest 5% of its {s.timed} streamed requests in the last {rule.window_s}s took {worst:.0f}s "
                     f"or more (median {s.first_med / 1000:.1f}s). See Response times.",
                 )

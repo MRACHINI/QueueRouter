@@ -7,8 +7,8 @@ organisation prefixes, fine-tune tags ("Derestricted", "Abliterated"...), precis
 trailing versions and dates are dropped, then the longest index name the model's name starts with is used.
 That way ``GLM-4.6-Derestricted-v5`` gets GLM-4.6's score (shown as inherited), while GLM-4.6V doesn't.
 
-opencode's desktop app sorts a provider's models by name, so the order is carried in the names: ``01 · 58.3 · …``,
-``02 · 52.0 · …`` (the number, then the score); aliases (the entries picked on purpose) come first as ``00 · …``;
+opencode's desktop app sorts a provider's models by name, so the order is carried in the names: ``01|58.3|…``,
+``02|52.0|…`` (the number, then the score); aliases (the entries picked on purpose) come first as ``00|…``;
 models without a score last.
 """
 
@@ -23,6 +23,8 @@ import time
 from collections.abc import Iterable
 
 import httpx
+
+from .names import SEPARATOR
 
 log = logging.getLogger("queuerouter")
 
@@ -203,10 +205,10 @@ def numbered(ranked: list[tuple[str, float]], aliases: list[str], unranked: list
 
 
 def label(prefix: str, score: float | None, inherited: bool, name: str) -> str:
-    """The name opencode shows: ``03 · 45.1 · model · upstreams`` (``~45.1`` when it's the base model's score),
-    ``00 · alias → model`` for an alias without a score of its own; a model without a score keeps its name."""
+    """The name opencode shows: ``03|45.1|Provider|model`` (``~45.1`` when it's the base model's score),
+    ``00|alias → Provider|model`` for an alias without a score of its own; a model without a score keeps its name."""
     if not prefix:
         return name
     if score is None:
-        return f"{prefix} · {name}"
-    return f"{prefix} · {'~' if inherited else ''}{score:.1f} · {name}"
+        return f"{prefix}{SEPARATOR}{name}"
+    return f"{prefix}{SEPARATOR}{'~' if inherited else ''}{score:.1f}{SEPARATOR}{name}"

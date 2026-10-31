@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import httpx
 
 from . import __version__
+from .names import EVERY, ModelNames
 
 log = logging.getLogger("queuerouter")
 
@@ -195,16 +196,43 @@ class PriceCatalog:
         return refs
 
 
-def resolve(model: str, overrides: dict, catalog: PriceCatalog) -> Price | None:
-    """The price to use for ``model``: manual price > manual reference > automatic match."""
-    row = overrides.get(model)
-    if row is not None:
+def resolve(
+    model: str, overrides: dict, catalog: PriceCatalog, upstream_id: int = EVERY, name: str | None = None
+) -> Price | None:
+    """The price to use for ``model`` on that upstream: manual price > manual reference > automatic match, by its
+    custom ``name`` if it has one. ``overrides``: {(upstream id, model): row}; yours for this provider wins over
+    yours for every provider."""
+    for key in ((upstream_id, model), (EVERY, model)):
+        row = overrides.get(key)
+        if row is None:
+            continue
         if row["input"] is not None and row["output"] is not None:
             cached = row["cached_input"] if row["cached_input"] is not None else row["input"]
             return Price(row["input"], row["output"], cached, source="manual")
         if row["reference"]:
             return catalog.lookup(row["reference"])
-    return catalog.match(model)
+    return catalog.match(name or model)
+
+
+class _PriceBook:
+    """Prices of (model, upstream) pairs, each worked out once."""
+
+    def __init__(self, overrides: dict, catalog: PriceCatalog, names: ModelNames) -> None:
+        self.overrides, self.catalog, self.names = overrides, catalog, names
+        self.prices: dict[tuple[str, str | None], Price | None] = {}
+
+    def of(self, model: str, upstream: str | None) -> Price | None:
+        key = (model, upstream)
+        if key not in self.prices:
+            upstream_id, name = self.names.id_of(upstream), self.names.name(model, upstream)
+            self.prices[key] = resolve(model, self.overrides, self.catalog, upstream_id, name)
+        return self.prices[key]
+
+    def costs(self, row) -> tuple[float, float, float] | None:
+        """What a usage or request row cost: the model that answered, on the upstream that served it."""
+        target = row["target_model"] if "target_model" in row.keys() else None
+        price = self.of(self.names.unpin(target or row["model"])[0], row["upstream"])
+        return token_costs(price, row["prompt_tokens"], row["completion_tokens"], row["cached_tokens"])
 
 
 def token_costs(price: Price | None, prompt: int, completion: int, cached: int) -> tuple[float, float, float] | None:
@@ -256,48 +284,63 @@ def _add_usage(out: dict, row, costs: tuple[float, float, float] | None) -> None
         out["cost"] += sum(costs)
 
 
-def summarize_usage(rows, overrides: dict, catalog: PriceCatalog, by_model: bool, plan_per_month: float, days: int):
-    """Usage rows (per day/client/model) -> display rows with costs, plus totals.
+def summarize_usage(
+    rows,
+    overrides: dict,
+    catalog: PriceCatalog,
+    by_model: bool,
+    plan_per_month: float,
+    days: int,
+    names: ModelNames | None = None,
+):
+    """Usage rows (per day/client/model/upstream) -> display rows with costs, plus totals.
 
     Cost is only "known" for rows whose model has a price; ``unpriced_tokens`` says how many
     tokens are missing from the total, so it's never silently low.
     """
-    prices: dict[str, Price | None] = {}
+    names = names or ModelNames()
+    book = _PriceBook(overrides, catalog, names)
     grouped: dict[tuple, dict] = {}
     totals = _empty_usage()
     for row in rows:
-        model = row["model"]
-        if model not in prices:
-            prices[model] = resolve(model, overrides, catalog)
-        costs = token_costs(prices[model], row["prompt_tokens"], row["completion_tokens"], row["cached_tokens"])
-        key = (row["day"], row["client"], model) if by_model else (row["day"], row["client"])
-        fresh = {"day": row["day"], "client": row["client"], "model": model if by_model else None}
+        model, upstream = row["model"], row["upstream"]
+        costs = book.costs(row)
+        key = (row["day"], row["client"], upstream, model) if by_model else (row["day"], row["client"])
+        fresh = {
+            "day": row["day"],
+            "client": row["client"],
+            "model": model if by_model else None,
+            "upstream": upstream if by_model else None,
+            "label": names.label(model, upstream) if by_model else None,
+        }
         _add_usage(grouped.setdefault(key, {**fresh, **_empty_usage()}), row, costs)
         _add_usage(totals, row, costs)
     totals["plan_cost"] = plan_per_month * days / PRICE_PER_MONTH_DAYS
     totals["savings"] = totals["cost"] - totals["plan_cost"]
-    return list(grouped.values()), totals, prices
+    return list(grouped.values()), totals, book.prices
 
 
-def model_costs(rows, overrides: dict, catalog: PriceCatalog) -> tuple[list[dict], dict]:
-    """Usage rows -> one row per model, dearest first, plus their total."""
-    prices: dict[str, Price | None] = {}
-    grouped: dict[str, dict] = {}
+def model_costs(rows, overrides: dict, catalog: PriceCatalog, names: ModelNames | None = None):
+    """Usage rows -> one row per model on a provider, dearest first, plus their total."""
+    names = names or ModelNames()
+    book = _PriceBook(overrides, catalog, names)
+    grouped: dict[tuple[str, str], dict] = {}
     total = _empty_usage()
     for row in rows:
-        model = row["model"]
-        if model not in prices:
-            prices[model] = resolve(model, overrides, catalog)
-        costs = token_costs(prices[model], row["prompt_tokens"], row["completion_tokens"], row["cached_tokens"])
-        _add_usage(grouped.setdefault(model, {"model": model, **_empty_usage()}), row, costs)
+        model, upstream = row["model"], row["upstream"]
+        costs = book.costs(row)
+        fresh = {"model": model, "upstream": upstream, "label": names.label(model, upstream)}
+        _add_usage(grouped.setdefault((upstream, model), {**fresh, **_empty_usage()}), row, costs)
         _add_usage(total, row, costs)
-    return sorted(grouped.values(), key=lambda r: (-r["cost"], -r["prompt_tokens"], r["model"])), total
+    return sorted(grouped.values(), key=lambda r: (-r["cost"], -r["prompt_tokens"], r["label"])), total
 
 
-def request_costs(rows, calls, overrides: dict, catalog: PriceCatalog) -> list[dict]:
-    """Request rows -> dicts with their tokens split and what each part cost, at today's prices. A council has no
-    model of its own to price: it adds up ``calls``, the rows of its members' and judge's calls (their ``parent``)."""
-    prices: dict[str, Price | None] = {}
+def request_costs(rows, calls, overrides: dict, catalog: PriceCatalog, names: ModelNames | None = None) -> list[dict]:
+    """Request rows -> dicts with their label, their tokens split and what each part cost, at today's prices. A council
+    has no model of its own to price: it adds up ``calls``, the rows of its members' and judge's calls (their
+    ``parent``)."""
+    names = names or ModelNames()
+    book = _PriceBook(overrides, catalog, names)
     by_parent: dict[str, list] = {}
     for call in calls:
         by_parent.setdefault(call["parent"], []).append(call)
@@ -306,15 +349,12 @@ def request_costs(rows, calls, overrides: dict, catalog: PriceCatalog) -> list[d
         made = by_parent.get(row["id"], []) if row["council"] else []
         used = _empty_usage()
         for part in made or [row]:
-            model = part["target_model"] or part["model"]
-            if model not in prices:
-                prices[model] = resolve(model, overrides, catalog)
-            costs = token_costs(prices[model], part["prompt_tokens"], part["completion_tokens"], part["cached_tokens"])
-            _add_usage(used, {**dict(part), "requests": 0, "errors": 0}, costs)
+            _add_usage(used, {**dict(part), "requests": 0, "errors": 0}, book.costs(part))
         tokens = used["prompt_tokens"] or used["completion_tokens"]
         out.append(
             {
                 **dict(row),
+                "label": names.of_request(row["model"], row["target_model"], row["upstream"]),
                 "calls": len(made),
                 "tokens_in": used["input_tokens"] if tokens else None,
                 "tokens_cached": used["cached_tokens"] if tokens else None,

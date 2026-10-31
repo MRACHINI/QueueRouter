@@ -11,8 +11,8 @@ apply, and requests go through the same queue as real traffic (tagged <code>play
       <select id="pg-client">{% for c in clients %}<option value="{{ c.name }}">{{ c.name }} ({{ c.priority }})</option>{% endfor %}</select>
     </label>
     <label>Model or alias
-      <input id="pg-model" list="pg-models" value="{{ (aliases[0] if aliases else (models[0] if models else '')) }}" required>
-      <datalist id="pg-models">{% for a in aliases %}<option value="{{ a }}">alias</option>{% endfor %}{% for m in models %}<option value="{{ m }}">{% endfor %}</datalist>
+      <input id="pg-model" list="pg-models" value="{{ (aliases[0] if aliases else (models[0][0] if models else '')) }}" required>
+      <datalist id="pg-models">{% for a in aliases %}<option value="{{ a }}">alias</option>{% endfor %}{% for m, label in models %}<option value="{{ m }}">{{ label }}</option>{% endfor %}</datalist>
     </label>
     <label>Max tokens <input id="pg-max" type="number" min="1" value="512"></label>
     <label class="check"><input id="pg-stream" type="checkbox" checked> <span>Stream</span></label>

@@ -9,6 +9,8 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from .names import ModelNames
+
 WINDOWS = {"1h": 3_600, "24h": 86_400, "7d": 7 * 86_400}
 BUCKETS = {"1h": 300, "24h": 3_600, "7d": 6 * 3_600}  # one chart point per this many seconds
 TREND_LINES = 5  # the busiest model/upstream pairs get a line on the chart
@@ -91,8 +93,11 @@ def bucket_starts(window: str, now: float | None = None) -> list[float]:
     return [last - step * i for i in range(WINDOWS[window] // step - 1, -1, -1)]
 
 
-def trend(rows: Iterable[Mapping], window: str, now: float | None = None) -> tuple[list[float], list[tuple[str, list]]]:
-    """(bucket starts, [(model @ upstream, median first-token seconds per bucket or None)]) for the busiest pairs."""
+def trend(
+    rows: Iterable[Mapping], window: str, now: float | None = None, names: ModelNames | None = None
+) -> tuple[list[float], list[tuple[str, list]]]:
+    """(bucket starts, [(Provider|model, median first-token seconds per bucket or None)]) for the busiest pairs."""
+    names = names or ModelNames()
     starts = bucket_starts(window, now)
     step = BUCKETS[window]
     per_pair: dict[str, list[list[float]]] = {}
@@ -103,7 +108,7 @@ def trend(rows: Iterable[Mapping], window: str, now: float | None = None) -> tup
         i = int((row["ts"] - starts[0]) // step)
         if not 0 <= i < len(starts):
             continue
-        name = f"{row['model']} @ {row['upstream']}"
+        name = names.label(row["model"], row["upstream"])
         per_pair.setdefault(name, [[] for _ in starts])[i].append(row["first_token_ms"] / 1000)
         counts[name] = counts.get(name, 0) + 1
     busiest = sorted(counts, key=lambda n: (-counts[n], n))[:TREND_LINES]

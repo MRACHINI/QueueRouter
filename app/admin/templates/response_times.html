@@ -25,7 +25,7 @@ timings.</p>
 <div class="table-wrap">
 <table class="cards">
   <thead><tr>
-    <th>Model</th><th>Upstream</th><th>Requests</th>
+    <th>Model</th><th>Requests</th>
     <th title="Sent → the provider's response starts: time in its own queue">Provider queue</th>
     <th title="Sent → first generated token, thinking included: grows with the prompt">First token</th>
     <th title="Slowest 5% of first tokens">First token, worst 5%</th>
@@ -38,8 +38,7 @@ timings.</p>
   <tbody>
   {% for s in summaries %}
   <tr>
-    <td data-label="Model" class="wrap-any">{{ s.model }}</td>
-    <td data-label="Upstream">{{ s.upstream }}</td>
+    <td data-label="Model" class="wrap-any">{{ s.model | model_label(s.upstream) }}</td>
     <td data-label="Requests">{{ "{:,}".format(s.requests) }}{% if s.timed != s.requests %} <span class="muted small" title="streamed and timed">({{ "{:,}".format(s.timed) }} timed)</span>{% endif %}</td>
     <td data-label="Provider queue">{{ secs(s.headers_med) }}</td>
     <td data-label="First token">{{ secs(s.first_med) }}</td>
@@ -51,7 +50,7 @@ timings.</p>
     <td data-label="Retries">{% if s.retried %}{{ s.retried }} <span class="muted small">· {{ "%.0f" | format(s.backoff_s) }} s waited</span>{% else %}—{% endif %}</td>
   </tr>
   {% else %}
-  <tr><td colspan="11" class="muted">No requests in the last {{ window }}.</td></tr>
+  <tr><td colspan="10" class="muted">No requests in the last {{ window }}.</td></tr>
   {% endfor %}
   </tbody>
 </table>

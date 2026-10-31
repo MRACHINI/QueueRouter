@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from cryptography.fernet import Fernet, InvalidToken
 
 from .config import PRIORITIES, SECRET_TUNABLES, TUNABLES, ClientPolicy, Settings, parse_access_keys
+from .names import EVERY
 
 log = logging.getLogger("queuerouter")
 
@@ -451,6 +452,54 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE clients ADD COLUMN key_secret TEXT;
     """,
+    # 36: a model on a provider is one entry: its custom name, and prices, scores and thinking levels per upstream
+    # (upstream_id 0: every provider, as they were set before); how far a cancelled request had got
+    """
+    CREATE TABLE model_names (
+        upstream_id INTEGER NOT NULL,
+        model TEXT NOT NULL,
+        name TEXT NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (upstream_id, model)
+    );
+    CREATE TABLE model_prices_new (
+        upstream_id INTEGER NOT NULL DEFAULT 0,
+        model TEXT NOT NULL,
+        reference TEXT,
+        input REAL,
+        output REAL,
+        cached_input REAL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (upstream_id, model)
+    );
+    INSERT INTO model_prices_new (upstream_id, model, reference, input, output, cached_input, updated_at)
+        SELECT 0, model, reference, input, output, cached_input, updated_at FROM model_prices;
+    DROP TABLE model_prices;
+    ALTER TABLE model_prices_new RENAME TO model_prices;
+    CREATE TABLE model_scores_new (
+        upstream_id INTEGER NOT NULL DEFAULT 0,
+        model TEXT NOT NULL,
+        score REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (upstream_id, model)
+    );
+    INSERT INTO model_scores_new (upstream_id, model, score, updated_at)
+        SELECT 0, model, score, updated_at FROM model_scores;
+    DROP TABLE model_scores;
+    ALTER TABLE model_scores_new RENAME TO model_scores;
+    CREATE TABLE model_thinking_new (
+        upstream_id INTEGER NOT NULL DEFAULT 0,
+        model TEXT NOT NULL,
+        levels TEXT NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (upstream_id, model)
+    );
+    INSERT INTO model_thinking_new (upstream_id, model, levels, updated_at)
+        SELECT 0, model, levels, updated_at FROM model_thinking;
+    DROP TABLE model_thinking;
+    ALTER TABLE model_thinking_new RENAME TO model_thinking;
+    ALTER TABLE requests ADD COLUMN stopped TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -487,6 +536,7 @@ REQUEST_COLUMNS = (
     "prompt_tokens",
     "completion_tokens",
     "cached_tokens",
+    "stopped",
     "tags",
     "finish_reason",
     "ip",
@@ -1063,7 +1113,8 @@ class Store:
     def delete_upstream(self, upstream_id: int, actor: str) -> None:
         with self.tx() as db:
             db.execute("DELETE FROM upstreams WHERE id = ?", (upstream_id,))
-            db.execute("DELETE FROM model_limits WHERE upstream_id = ? AND source = 'learned'", (upstream_id,))
+            for table in ("model_limits", "model_names", "model_prices", "model_scores", "model_thinking"):
+                db.execute(f"DELETE FROM {table} WHERE upstream_id = ?", (upstream_id,))  # noqa: S608
         self.audit(actor, "upstream.delete", str(upstream_id))
 
     def delete_pool(self, pool_id: int, actor: str) -> None:
@@ -1259,7 +1310,8 @@ class Store:
         marks = ",".join("?" for _ in parents)
         times = [r["ts"] for r in parents]
         return self.read(
-            "SELECT parent, model, target_model, prompt_tokens, completion_tokens, cached_tokens FROM requests "
+            "SELECT parent, model, target_model, upstream, prompt_tokens, completion_tokens, cached_tokens "
+            "FROM requests "
             f"WHERE ts BETWEEN ? AND ? AND parent IN ({marks})",  # noqa: S608
             (min(times) - CALLS_WITHIN_S, max(times) + CALLS_WITHIN_S, *(r["id"] for r in parents)),
         )
@@ -1291,52 +1343,58 @@ class Store:
         return values
 
     def usage_month(self, month: str) -> list[sqlite3.Row]:
-        """This month's usage per client and model (``month`` = YYYY-MM)."""
+        """This month's usage per client, model and upstream (``month`` = YYYY-MM)."""
         return self.query(
-            "SELECT client, model, SUM(requests) AS requests, SUM(prompt_tokens) AS prompt_tokens, "
+            "SELECT client, model, upstream, SUM(requests) AS requests, SUM(prompt_tokens) AS prompt_tokens, "
             "SUM(completion_tokens) AS completion_tokens, SUM(cached_tokens) AS cached_tokens "
-            "FROM usage_daily WHERE day >= ? AND day < ? GROUP BY client, model",
+            "FROM usage_daily WHERE day >= ? AND day < ? GROUP BY client, model, upstream",
             (f"{month}-01", f"{month}-32"),
         )
 
     def usage(self, days: int = 30) -> list[sqlite3.Row]:
-        """Usage per day, client and model over the last ``days`` days, today included (cost is computed per
-        model, then grouped)."""
+        """Usage per day, client, model and upstream over the last ``days`` days, today included (cost is
+        computed per model and upstream, then grouped)."""
         since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - (days - 1) * 86_400))
         return self.read(
-            "SELECT day, client, model, SUM(requests) AS requests, SUM(errors) AS errors, "
+            "SELECT day, client, model, upstream, SUM(requests) AS requests, SUM(errors) AS errors, "
             "SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, "
             "SUM(cached_tokens) AS cached_tokens FROM usage_daily WHERE day >= ? "
-            "GROUP BY day, client, model ORDER BY day DESC, client, model",
+            "GROUP BY day, client, model, upstream ORDER BY day DESC, client, model, upstream",
             (since,),
         )
 
-    def used_models(self, days: int | None = None) -> list[str]:
-        """Model names in the usage history (only the last ``days`` days when given)."""
+    def used_models(self, days: int | None = None) -> list[tuple[str, str]]:
+        """(upstream, model) pairs in the usage history (only the last ``days`` days when given)."""
         since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86_400)) if days else ""
         rows = self.query(
-            "SELECT DISTINCT model FROM usage_daily WHERE model != '-' AND day >= ? ORDER BY model", (since,)
+            "SELECT DISTINCT upstream, model FROM usage_daily WHERE model != '-' AND day >= ? ORDER BY model, upstream",
+            (since,),
         )
-        return [r[0] for r in rows]
+        return [(r[0], r[1]) for r in rows]
 
     # -- model prices (manual overrides) ----------------------------------------------------
 
     def list_model_limits(self) -> list[dict]:
         return [dict(r) for r in self.query("SELECT * FROM model_limits ORDER BY model, upstream_id")]
 
-    def set_model_limit(self, model: str, actor: str, context: int | None, output: int | None) -> None:
-        """Manual context / output size for ``model`` on every upstream; both None removes it."""
+    def set_model_limit(
+        self, model: str, actor: str, context: int | None, output: int | None, upstream_id: int = EVERY
+    ) -> None:
+        """Manual context / output size for ``model`` on that upstream (or every one); both None removes it."""
         with self.tx() as db:
             if context is None and output is None:
-                db.execute("DELETE FROM model_limits WHERE model = ? AND source = 'manual'", (model,))
+                db.execute(
+                    "DELETE FROM model_limits WHERE upstream_id = ? AND model = ? AND source = 'manual'",
+                    (upstream_id, model),
+                )
             else:
                 db.execute(
                     "INSERT INTO model_limits (upstream_id, model, source, context, output, updated_at) "
-                    "VALUES (0, ?, 'manual', ?, ?, ?) ON CONFLICT(upstream_id, model, source) DO UPDATE SET "
+                    "VALUES (?, ?, 'manual', ?, ?, ?) ON CONFLICT(upstream_id, model, source) DO UPDATE SET "
                     "context = excluded.context, output = excluded.output, updated_at = excluded.updated_at",
-                    (model, context, output, time.time()),
+                    (upstream_id, model, context, output, time.time()),
                 )
-        self.audit(actor, "model_limit.update", model, {"context": context, "output": output})
+        self.audit(actor, "model_limit.update", model, {"context": context, "output": output, "upstream": upstream_id})
 
     def learn_model_limit(self, upstream_id: int, model: str, context: int, note: str) -> None:
         """A context size read from the provider's own overflow error."""
@@ -1356,40 +1414,61 @@ class Store:
             )
         self.audit(actor, "model_limit.forget", model, {"upstream_id": upstream_id})
 
-    def list_model_thinking(self) -> dict[str, str]:
-        return {r["model"]: r["levels"] for r in self.query("SELECT model, levels FROM model_thinking")}
+    def list_model_names(self) -> dict[tuple[int, str], str]:
+        return {(r["upstream_id"], r["model"]): r["name"] for r in self.query("SELECT * FROM model_names")}
 
-    def set_model_thinking(self, model: str, actor: str, levels: str | None) -> None:
+    def set_model_name(self, upstream_id: int, model: str, actor: str, name: str | None) -> None:
+        """A model's custom name on an upstream (None removes it: its ID shows again)."""
+        with self.tx() as db:
+            if name is None:
+                db.execute("DELETE FROM model_names WHERE upstream_id = ? AND model = ?", (upstream_id, model))
+            else:
+                db.execute(
+                    "INSERT INTO model_names (upstream_id, model, name, updated_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(upstream_id, model) DO UPDATE SET name = excluded.name, "
+                    "updated_at = excluded.updated_at",
+                    (upstream_id, model, name, time.time()),
+                )
+        self.audit(actor, "model.name", model, {"upstream": upstream_id, "name": name})
+
+    def list_model_thinking(self) -> dict[tuple[int, str], str]:
+        rows = self.query("SELECT upstream_id, model, levels FROM model_thinking")
+        return {(r["upstream_id"], r["model"]): r["levels"] for r in rows}
+
+    def set_model_thinking(self, model: str, actor: str, levels: str | None, upstream_id: int = EVERY) -> None:
         """The administrator's thinking levels for a model (None removes them: detection decides again)."""
         with self.tx() as db:
             if levels is None:
-                db.execute("DELETE FROM model_thinking WHERE model = ?", (model,))
+                db.execute("DELETE FROM model_thinking WHERE upstream_id = ? AND model = ?", (upstream_id, model))
             else:
                 db.execute(
-                    "INSERT INTO model_thinking (model, levels, updated_at) VALUES (?, ?, ?) "
-                    "ON CONFLICT(model) DO UPDATE SET levels = excluded.levels, updated_at = excluded.updated_at",
-                    (model, levels, time.time()),
+                    "INSERT INTO model_thinking (upstream_id, model, levels, updated_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(upstream_id, model) DO UPDATE SET levels = excluded.levels, "
+                    "updated_at = excluded.updated_at",
+                    (upstream_id, model, levels, time.time()),
                 )
-        self.audit(actor, "model.thinking", model, {"levels": levels})
+        self.audit(actor, "model.thinking", model, {"levels": levels, "upstream": upstream_id})
 
-    def list_model_scores(self) -> dict[str, float]:
-        return {r["model"]: r["score"] for r in self.query("SELECT model, score FROM model_scores")}
+    def list_model_scores(self) -> dict[tuple[int, str], float]:
+        rows = self.query("SELECT upstream_id, model, score FROM model_scores")
+        return {(r["upstream_id"], r["model"]): r["score"] for r in rows}
 
-    def set_model_score(self, model: str, actor: str, score: float | None) -> None:
+    def set_model_score(self, model: str, actor: str, score: float | None, upstream_id: int = EVERY) -> None:
         """The administrator's strength score for a model (None removes it: the index decides again)."""
         with self.tx() as db:
             if score is None:
-                db.execute("DELETE FROM model_scores WHERE model = ?", (model,))
+                db.execute("DELETE FROM model_scores WHERE upstream_id = ? AND model = ?", (upstream_id, model))
             else:
                 db.execute(
-                    "INSERT INTO model_scores (model, score, updated_at) VALUES (?, ?, ?) "
-                    "ON CONFLICT(model) DO UPDATE SET score = excluded.score, updated_at = excluded.updated_at",
-                    (model, score, time.time()),
+                    "INSERT INTO model_scores (upstream_id, model, score, updated_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(upstream_id, model) DO UPDATE SET score = excluded.score, "
+                    "updated_at = excluded.updated_at",
+                    (upstream_id, model, score, time.time()),
                 )
-        self.audit(actor, "model.score", model, {"score": score})
+        self.audit(actor, "model.score", model, {"score": score, "upstream": upstream_id})
 
-    def list_model_prices(self) -> dict[str, sqlite3.Row]:
-        return {r["model"]: r for r in self.query("SELECT * FROM model_prices")}
+    def list_model_prices(self) -> dict[tuple[int, str], sqlite3.Row]:
+        return {(r["upstream_id"], r["model"]): r for r in self.query("SELECT * FROM model_prices")}
 
     def set_model_price(
         self,
@@ -1399,23 +1478,30 @@ class Store:
         input_price: float | None,
         output_price: float | None,
         cached_price: float | None,
+        upstream_id: int = EVERY,
     ) -> None:
         with self.tx() as db:
             if reference is None and input_price is None and output_price is None and cached_price is None:
-                db.execute("DELETE FROM model_prices WHERE model = ?", (model,))
+                db.execute("DELETE FROM model_prices WHERE upstream_id = ? AND model = ?", (upstream_id, model))
             else:
                 db.execute(
-                    "INSERT INTO model_prices (model, reference, input, output, cached_input, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(model) DO UPDATE SET reference = excluded.reference, "
-                    "input = excluded.input, output = excluded.output, cached_input = excluded.cached_input, "
-                    "updated_at = excluded.updated_at",
-                    (model, reference, input_price, output_price, cached_price, time.time()),
+                    "INSERT INTO model_prices (upstream_id, model, reference, input, output, cached_input, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(upstream_id, model) DO UPDATE SET "
+                    "reference = excluded.reference, input = excluded.input, output = excluded.output, "
+                    "cached_input = excluded.cached_input, updated_at = excluded.updated_at",
+                    (upstream_id, model, reference, input_price, output_price, cached_price, time.time()),
                 )
         self.audit(
             actor,
             "price.update",
             model,
-            {"reference": reference, "input": input_price, "output": output_price, "cached": cached_price},
+            {
+                "reference": reference,
+                "input": input_price,
+                "output": output_price,
+                "cached": cached_price,
+                "upstream": upstream_id,
+            },
         )
 
     def recent_activity(self, since: float) -> list[sqlite3.Row]:
@@ -1739,11 +1825,13 @@ class Store:
 
     def due_jobs(self, now: float, limit: int, idle_too: bool = True) -> list[sqlite3.Row]:
         """``idle_too`` False: leave out "spare capacity only" jobs (live requests are waiting), so they can't fill
-        the ``limit`` ahead of jobs that may run now."""
+        the ``limit`` ahead of jobs that may run now. A job past its deadline is never due, even if it was added
+        just after the tick expired the others: the next tick expires it."""
         return self.query(
-            "SELECT * FROM jobs WHERE status = 'queued' AND (run_at IS NULL OR run_at <= ?) AND (? OR idle_only = 0) "
+            "SELECT * FROM jobs WHERE status = 'queued' AND (run_at IS NULL OR run_at <= ?) "
+            "AND (deadline IS NULL OR deadline > ?) AND (? OR idle_only = 0) "
             "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created LIMIT ?",
-            (now, int(idle_too), limit),
+            (now, now, int(idle_too), limit),
         )
 
     def claim_job(self, job_id: str) -> bool:

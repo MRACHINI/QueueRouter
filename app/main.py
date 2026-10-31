@@ -48,6 +48,7 @@ from .compaction import compact as compact_request
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
 from .limits import OVERFLOW_STATUS, ModelLimits, error_message, overflow_body, overflow_of
+from .names import EVERY
 from .opencode import (
     DEFAULT_OUTPUT,
     PLUGIN_HEADER,
@@ -127,6 +128,15 @@ def sse_error(message: str, status: int, kind: str = "upstream_error") -> bytes:
     return b"data: " + json.dumps(error_body(message, status, kind)).encode() + b"\n\ndata: [DONE]\n\n"
 
 
+def stopped_at(fields: dict, answered: bool = False) -> str:
+    """How far a request had got when its app went away."""
+    if fields["queue_ms"] is None:
+        return "in queue"
+    if fields["ttft_ms"] is None:
+        return "before first byte"
+    return "after answer" if answered else "mid-answer"
+
+
 class RequestLog:
     """Collects one request's metadata; emitted as a single JSON log line at the end."""
 
@@ -154,6 +164,7 @@ class RequestLog:
             "completion_tokens": None,
             "cached_tokens": None,
             "finish_reason": None,
+            "stopped": None,  # cancelled: how far it had got ("in queue", "mid-answer"...)
             "fallback": None,
             "tags": None,
             "run": None,
@@ -332,7 +343,7 @@ def create_app(
     reference.load_file()
     reference_scores = ranking.Scores()  # the index from the reference list, used while there's no key
     circuits = Circuits()
-    alerts = Alerts(store, lambda: app.state.client)
+    alerts = Alerts(store, lambda: app.state.client, lambda: snapshot.names)
     guard = AuthGuard(snapshot.settings.auth_fail_limit, snapshot.settings.auth_block_s)
 
     def available(upstream_id: int) -> bool:
@@ -471,8 +482,12 @@ def create_app(
     price_overrides: dict = {}
 
     def price_on(model: str, target: Target, entry: dict | None, overrides: dict) -> Price | None:
-        """What one request to ``model`` costs on ``target``: nothing extra on a monthly plan, the upstream's own
-        price where its model list states one (OpenRouter), else QueueRouter's price for the name."""
+        """What one request to ``model`` costs on ``target``: yours when set; else nothing extra on a monthly plan,
+        the upstream's own price where its model list states one (OpenRouter), else QueueRouter's price for the name."""
+        found = functools.partial(resolve, model, overrides, prices, target.id)
+        name = snapshot.names.name(model, target.upstream.name)
+        if (target.id, model) in overrides or (EVERY, model) in overrides:
+            return found(name)
         if target.pool.monthly_price:
             return Price(0.0, 0.0, 0.0, source="plan")
         listed = (entry or {}).get("pricing")
@@ -486,18 +501,17 @@ def create_app(
                 rates = []
             if len(rates) == 3 and min(rates) >= 0:  # -1: priced per request (routers)
                 return Price(*(r * 1e6 for r in rates), source="upstream")
-        return resolve(model, overrides, prices)
+        return found(name)
 
     def model_price(model: str, pairs: list, overrides: dict) -> Price | None:
-        """The price opencode is told: yours when set, else the highest across the upstreams serving it (so it
-        never shows less than a request may cost)."""
-        if model in overrides:
-            return resolve(model, overrides, prices)
+        """The price opencode is told: the highest across the upstreams that may serve it (so it never shows less
+        than a request may cost)."""
         known = [p for p in (price_on(model, t, e, overrides) for t, e in pairs) if p is not None]
         return max(known, key=lambda p: (p.input + p.output, p.output)) if known else None
 
-    def cost_of(model: str, prompt: int, completion: int, cached: int) -> float:
-        costs = token_cost(resolve(model, price_overrides, prices), prompt, completion, cached)
+    def cost_of(model: str, prompt: int, completion: int, cached: int, upstream: str | None = None) -> float:
+        upstream_id, name = snapshot.names.id_of(upstream), snapshot.names.name(model, upstream)
+        costs = token_cost(resolve(model, price_overrides, prices, upstream_id, name), prompt, completion, cached)
         return sum(costs) if costs else 0.0
 
     monthly = MonthlyUsage(cost_of)
@@ -743,6 +757,7 @@ def create_app(
     app.state.stats = stats
     app.state.circuits = circuits
     app.state.prices = prices
+    app.state.scores = scores
     app.state.alerts = alerts
     app.state.restart = lambda: os.kill(os.getpid(), signal.SIGTERM)  # Docker's restart policy starts us again
 
@@ -936,6 +951,7 @@ def create_app(
                 {
                     "id": request_id,
                     "client": f["client"],
+                    "label": snapshot.names.of_request(f["model"], f["target_model"], f["upstream"]),
                     "model": f["target_model"] or f["model"],
                     "upstream": f["upstream"],
                     "stage": f.get("stage") or ("queued" if f["queue_ms"] is None else "running"),
@@ -997,7 +1013,10 @@ def create_app(
             },
             **state,
             **stats.snapshot(),
-            "recent": list(stats.recent)[-25:],
+            "recent": [
+                {**r, "label": snapshot.names.of_request(r.get("model"), r.get("target_model"), r.get("upstream"))}
+                for r in list(stats.recent)[-25:]
+            ],
             "runs": runs.snapshot(),
             "alerts_unread": store.unread_notifications(),
             "history": list(history) if full_history else list(history)[-5:],  # live updates: the latest only
@@ -1036,18 +1055,37 @@ def create_app(
                 per_upstream.setdefault(model["id"], []).append(
                     {
                         "id": f"{model['id']}@{target.upstream.name}",
+                        "label": snapshot.names.label(model["id"], target.upstream.name),
                         "upstreams": [f"only {target.upstream.name}"],
                         "context": known["context"] if known else None,
                         "hidden": not offered,
                         "alias": False,
                     }
                 )
+        for row in rows.values():
+            row["label"] = snapshot.names.label_on(row["id"], row["upstreams"])
         for pinned in per_upstream.values():
             if len(pinned) > 1:  # offered by several upstreams: let a choice name one of them
                 rows.update({p["id"]: p for p in pinned})
         for alias in snapshot.aliases.values():
-            rows[alias.name] = {"id": alias.name, "upstreams": [], "context": None, "hidden": False, "alias": True}
-        return sorted(rows.values(), key=lambda r: (r["alias"], r["id"].lower()))
+            rows[alias.name] = {
+                "id": alias.name,
+                "label": alias.name,
+                "upstreams": [],
+                "context": None,
+                "hidden": False,
+                "alias": True,
+            }
+        return sorted(rows.values(), key=lambda r: (r["alias"], r["label"].lower()))
+
+    def model_label(name: str | None, upstream: str | None = None) -> str:
+        """``Provider|name`` for a model as aliases and jobs name it: on that upstream, the one it's pinned to, or
+        every upstream listing it."""
+        bare, pin = split_pin(name)
+        if upstream or pin or not bare or bare in snapshot.aliases:
+            return snapshot.names.label(name, upstream)
+        listing = [t.upstream.name for t in snapshot.upstreams.values() if bare in (catalogs.ids(t.id, raw=True) or ())]
+        return snapshot.names.label_on(bare, listing)
 
     async def upstream_models(upstream_id: int) -> list[str] | None:
         """Every model the upstream lists, hidden ones too (Upstreams page > choose models); None if its
@@ -1061,37 +1099,52 @@ def create_app(
         return sorted(ids, key=str.lower) if ids is not None else None
 
     def context_table() -> list[dict]:
-        """Per model: the context each upstream reports, what was learned from its errors, the plan cap,
-        the manual override and the size in use (the smallest; None = unknown). For the Models page."""
-        rows: dict[str, dict] = {}
+        """One row per model on a provider: what it reports, what was learned from its errors, the plan cap, your
+        size and the one in use (None = unknown); plus one row for a size set for every provider. For the Models
+        page."""
         entries: dict[tuple[int, str], dict] = {}
         for target in snapshot.upstreams.values():
             for model in catalogs.models(target.id):
                 entries[(target.id, model["id"])] = model
-        learned_only = {key for key in context_sizes.learned if key not in entries and key[0] in snapshot.upstreams}
-        for upstream_id, model_id in [*entries, *learned_only]:
-            target = snapshot.upstreams[upstream_id]
+        keys = set(entries) | {k for k in context_sizes.learned if k[0] in snapshot.upstreams}
+        keys |= {k for k in context_sizes.manual if k[0] == EVERY or k[0] in snapshot.upstreams}
+        rows = []
+        for upstream_id, model_id in keys:
+            target = snapshot.upstreams.get(upstream_id)
+            name = target.upstream.name if target else None
             entry = entries.get((upstream_id, model_id))
             reported = model_limits(entry, []) if entry else None
-            used = model_limits(context_sizes.apply(model_id, upstream_id, entry), [target.pool.context_cap])
-            row = rows.setdefault(model_id, {"model": model_id, "upstreams": [], "manual": None, "context": None})
-            row["upstreams"].append(
+            caps = [target.pool.context_cap] if target else []
+            used = model_limits(context_sizes.apply(model_id, upstream_id, entry), caps) if target else None
+            rows.append(
                 {
-                    "id": upstream_id,
-                    "name": target.upstream.name,
+                    "model": model_id,
+                    "upstream_id": upstream_id,
+                    "label": snapshot.names.label(model_id, name),
                     "reported": reported["context"] if reported else None,
                     "learned": context_sizes.learned.get((upstream_id, model_id)),
-                    "cap": target.pool.context_cap,
-                    "used": used["context"] if used else None,
+                    "cap": target.pool.context_cap if target else None,
+                    "manual": context_sizes.manual.get((upstream_id, model_id)),
+                    "context": used["context"] if used else None,
+                    "every": target is None,
                 }
             )
-        for model_id, manual in context_sizes.manual.items():
-            rows.setdefault(model_id, {"model": model_id, "upstreams": [], "manual": None, "context": None})
-            rows[model_id]["manual"] = manual
-        for row in rows.values():
-            used = [u["used"] for u in row["upstreams"]]
-            row["context"] = min(used) if used and all(used) else None
-        return sorted(rows.values(), key=lambda r: r["model"].lower())
+        return sorted(rows, key=lambda r: r["label"].lower())
+
+    def name_table() -> list[dict]:
+        """Every model on a provider and its custom name, for the Models page."""
+        keys = {(t.id, m["id"]) for t in snapshot.upstreams.values() for m in catalogs.models(t.id)}
+        keys |= {k for k in snapshot.names.custom if k[0] in snapshot.upstreams}
+        rows = [
+            {
+                "upstream_id": upstream_id,
+                "upstream": snapshot.upstreams[upstream_id].upstream.name,
+                "model": model_id,
+                "name": snapshot.names.custom.get((upstream_id, model_id), ""),
+            }
+            for upstream_id, model_id in keys
+        ]
+        return sorted(rows, key=lambda r: (r["upstream"].lower(), r["model"].lower()))
 
     async def refresh_prices() -> bool:
         return await prices.refresh(app.state.client)
@@ -1100,18 +1153,24 @@ def create_app(
         score_attempt[0] = time.time()
         return bool(cfg().rank_key) and await scores.refresh(app.state.client, cfg().rank_key)
 
-    def strength_order(names: list[str], manual: dict[str, float]) -> tuple[list[tuple[str, str]], dict[str, dict]]:
+    def strength_order(
+        names: list[str], manual: dict[tuple[int, str], float]
+    ) -> tuple[list[tuple[str, str]], dict[str, dict]]:
         """opencode order of models and aliases ([(name, number prefix)]) and why ({name: score, source}): your
-        own score first, else the index (fine-tunes get their base model's); aliases without one come first."""
+        own score first, else the index, looked up by the custom name (fine-tunes get their base model's); aliases
+        without one come first. ``names``: "model@upstream" and alias names."""
         index, info, ranked, first, rest = cfg().rank_index, {}, [], [], []
         for name in names:
-            if name in manual:
-                info[name] = {"score": manual[name], "source": "yours", "inherited": False}
-                ranked.append((name, manual[name]))
+            bare, pin = split_pin(name)
+            yours = manual.get((pin[0], bare)) if pin else None
+            yours = manual.get((EVERY, bare or "")) if yours is None else yours
+            if yours is not None:
+                info[name] = {"score": yours, "source": "yours", "inherited": False}
+                ranked.append((name, yours))
             elif name in snapshot.aliases:
                 info[name] = {"score": None, "source": "alias", "inherited": False}
                 first.append(name)
-            elif (hit := index_book()[0].score(name, index)) is not None:
+            elif (hit := index_book()[0].score(snapshot.names.name(name), index)) is not None:
                 info[name] = {"score": hit[0], "source": hit[1], "inherited": hit[2]}
                 ranked.append((name, hit[0]))
             else:
@@ -1128,11 +1187,13 @@ def create_app(
             reference_scores.use(reference.index_entries(), reference.fetched_at)
         return reference_scores, "OpenRouter"
 
-    def thinking_for(model_id: str, pairs: list, manual: dict[str, str]) -> thinking_mod.Thinking | None:
+    def thinking_for(model_id: str, pairs: list, manual: dict) -> thinking_mod.Thinking | None:
         """A model's thinking levels: yours, else what the upstream's own list says, else the reference list
         by name; shaped for how that upstream is asked (app/thinking.py)."""
-        if model_id in manual:
-            efforts = thinking_mod.ordered(manual[model_id].split(","))
+        yours = next((manual[(t.id, model_id)] for t, _ in pairs if (t.id, model_id) in manual), None)
+        yours = manual.get((EVERY, model_id)) if yours is None else yours
+        if yours is not None:
+            efforts = thinking_mod.ordered(yours.split(","))
             return thinking_mod.Thinking(thinking_mod.levels(efforts), None, "yours") if efforts else None
         for target, entry in pairs:
             style = thinking_mod.style_of(target.upstream.base_url, entry)
@@ -1141,7 +1202,7 @@ def create_app(
             found = thinking_mod.from_block(entry.get("reasoning"), entry.get("supported_parameters") or ())
             source = target.upstream.name
             if found is None or found == ("none", "high"):  # nothing, or only on / off: the reference may know more
-                ref = reference.thinking(model_id)
+                ref = reference.thinking(snapshot.names.name(model_id, target.upstream.name))
                 if ref is not None and (found is not None or style in ("openai", "openrouter")):
                     found, source = ref, "OpenRouter (reference)"
             if found is None or (style == "unknown" and source != target.upstream.name):
@@ -1150,10 +1211,24 @@ def create_app(
         return None
 
     def ranking_table() -> dict:
-        """The Models page's strength section: every offered model and alias, its score and place."""
-        names = sorted({m for ids in models_by_upstream().values() for m in ids} | set(snapshot.aliases))
-        order, info = strength_order(names, store.list_model_scores())
-        rows = [{"model": name, "prefix": prefix, **info[name]} for name, prefix in order]
+        """The Models page's strength section: every model on a provider and every alias, its score and place."""
+        keys = {f"{m}@{upstream}" for upstream, ids in models_by_upstream().items() for m in ids}
+        order, info = strength_order(sorted(keys | set(snapshot.aliases)), store.list_model_scores())
+        rows = []
+        for key, prefix in order:
+            model, pin = split_pin(key)
+            upstream = snapshot.names.unpin(key)[1]
+            rows.append(
+                {
+                    "model": model,
+                    "upstream_id": pin[0] if pin else EVERY,
+                    "label": snapshot.names.label(key),
+                    "name": snapshot.names.name(key),
+                    "upstream": upstream,
+                    "prefix": prefix,
+                    **info[key],
+                }
+            )
         book, via = index_book()
         return {
             "rows": rows,
@@ -1167,17 +1242,23 @@ def create_app(
         }
 
     def thinking_table() -> dict:
-        """The Models page's thinking section: per offered model, the levels found (and where), and yours."""
-        pairs: dict[str, list] = {}
+        """The Models page's thinking section: per model on a provider, the levels found (and where), and yours."""
+        manual = store.list_model_thinking()
+        rows = []
         for target in snapshot.upstreams.values():
             if target.usable:
                 for entry in catalogs.models(target.id):
-                    pairs.setdefault(entry["id"], []).append((target, entry))
-        manual = store.list_model_thinking()
-        rows = []
-        for model in sorted(pairs):
-            found = thinking_for(model, pairs[model], {})
-            rows.append({"model": model, "found": found, "yours": manual.get(model)})
+                    model = entry["id"]
+                    rows.append(
+                        {
+                            "model": model,
+                            "upstream_id": target.id,
+                            "label": snapshot.names.label(model, target.upstream.name),
+                            "found": thinking_for(model, [(target, entry)], {}),
+                            "yours": manual.get((target.id, model), manual.get((EVERY, model))),
+                        }
+                    )
+        rows.sort(key=lambda r: r["label"].lower())
         return {
             "rows": rows,
             "fetched_at": reference.fetched_at,
@@ -1226,6 +1307,9 @@ def create_app(
             refresh_scores,
             ranking_table,
             thinking_table,
+            name_table,
+            lambda: snapshot.names,
+            model_label,
         ),
     )
 
@@ -1727,17 +1811,20 @@ def create_app(
         allowed = client.policy.allowed_models
         result: dict[str, dict] = {}
         for model_id in sorted(served):
-            if not allowed or model_id in allowed:
-                serving = [t for t, _ in served[model_id]]
-                limits = limits_on(model_id, serving)
-                name = with_providers(model_id, [t.upstream.name for t in serving])
-                result[model_id] = {"name": name, **({"limit": limits} if limits else {})}
-                if with_thinking and (levels := thinking_for(model_id, served[model_id], manual_thinking)):
-                    result[model_id]["thinking"] = {"variants": levels.variants, "default": levels.default}
-                if with_thinking and (price := model_price(model_id, served[model_id], overrides)):
-                    result[model_id]["cost"] = price_json(price)
-                if with_thinking and reads_images(model_id, served[model_id]):
-                    result[model_id]["input"] = ["text", "image"]
+            for target, entry in served[model_id]:  # one entry per provider: you choose which serves it
+                key = f"{model_id}@{target.upstream.name}"
+                if allowed and model_id not in allowed and key not in allowed:
+                    continue
+                pair = [(target, entry)]
+                limits = limits_on(model_id, [target])
+                name = snapshot.names.label(model_id, target.upstream.name)
+                result[key] = {"name": name, **({"limit": limits} if limits else {})}
+                if with_thinking and (levels := thinking_for(model_id, pair, manual_thinking)):
+                    result[key]["thinking"] = {"variants": levels.variants, "default": levels.default}
+                if with_thinking and (price := model_price(model_id, pair, overrides)):
+                    result[key]["cost"] = price_json(price)
+                if with_thinking and reads_images(model_id, pair):
+                    result[key]["input"] = ["text", "image"]
         for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
             if allowed and alias.name not in allowed and alias.target_model not in allowed:
                 continue
@@ -1755,8 +1842,9 @@ def create_app(
                 output = limits["output"] if limits else DEFAULT_OUTPUT
                 limits = {"context": alias.virtual_context, "output": min(output, alias.virtual_context)}
             result[alias.name] = {
-                "name": with_providers(
-                    f"{alias.name} → {alias.target_model}",
+                "name": f"{alias.name} → "
+                + snapshot.names.label_on(
+                    target or "",
                     [t.upstream.name for t in pinned if t.upstream.name in offered_by.get(target, [])]
                     or [t.upstream.name for t in pinned],
                 ),
@@ -1791,7 +1879,7 @@ def create_app(
             return True
         if False in said:
             return False
-        return bool(reference.images(model))
+        return bool(reference.images(snapshot.names.name(model, pairs[0][0].upstream.name) if pairs else model))
 
     def text_only_fit(payload: dict) -> dict:
         """``payload`` with its images replaced by a note when its model doesn't read them (judged as for
@@ -1819,14 +1907,6 @@ def create_app(
             "output": round(price.output, 6),
             "cache_read": round(price.cached_input, 6),
         }
-
-    def with_providers(label: str, upstreams: list[str]) -> str:
-        """``model · nvidia, arliai``: which upstreams serve it (the model ID itself stays as it is)."""
-        names = list(dict.fromkeys(upstreams))
-        if not names:
-            return label
-        shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
-        return f"{label} · {shown}"
 
     @app.get("/v1/opencode-config")
     async def opencode_config(request: Request):
@@ -3707,6 +3787,7 @@ def create_app(
             return error_response(f"upstream error: {type(exc).__name__}", 502, "upstream_error")
         except asyncio.CancelledError:
             outcome, status = "cancelled", 499
+            rlog.fields["stopped"] = stopped_at(rlog.fields)
             raise
         finally:
             started = _granted_at(rlog)
@@ -3804,6 +3885,7 @@ def create_app(
         except (asyncio.CancelledError, GeneratorExit):
             # Client disconnected: Starlette cancels us, or the generator is closed.
             outcome = "cancelled"
+            rlog.fields["stopped"] = stopped_at(rlog.fields, sniffer.finish_reason is not None)
             raise
         except httpx.HTTPError as exc:  # reading an error body or the stream's start, before any of it was sent
             status = 502

@@ -504,7 +504,8 @@ non-stream in flight → upstream call cancelled.
   leaves that usage-only chunk out of the client's stream; a client that set `include_usage` itself (true or false)
   gets what it asked for.
 - Each request row stores tokens. Costs are worked out when a page is read, at today's prices (official ones, or
-  `model_prices`), so a changed price changes old rows too, the same on the Requests and Usage pages. A council has
+  `model_prices`, per upstream and model), so a changed price changes old rows too, the same on the Requests and Usage
+  pages. A council has
   no model of its own: its row adds up the calls made for it, which keep their own rows and alone count as usage.
 - ArliAI is flat-rate, so cost is optional — useful for pay-per-token upstreams added later.
 - Nightly rollup into `usage_daily`; UI charts per client / model / upstream / day.
@@ -1436,6 +1437,21 @@ v0.50.0: updates clients don't notice.
   limit, and both would run jobs and schedules on one database.
 - Draining turns itself off on the next start (maintenance stays: it's meant to last), says when nothing is left,
   and tells clients to retry in 30 s, not 300.
+v0.51.0: a model on a provider is one entry.
+- Every list has one row per provider and model, shown as `Provider|name` (app/names.py is the only place that builds
+  it). Custom name, price, score, context and thinking levels belong to that row. Settings from before keep working
+  for every provider (`upstream_id` 0) until a row has its own; a row's blank score or levels clears those too.
+- A custom name is what people see and what the automatic score, price and thinking levels are looked up by. The real
+  ID stays what's stored, sent to the provider and sent back by opencode: names are read when a page is shown, so old
+  rows get them too, and no setting, alias or quota depends on them. Apps can't ask for one: several can share it.
+- opencode lists `model@upstream`, one entry per provider, using the pin that aliases already had. So a model there no
+  longer fails over between providers; aliases with fallbacks do that. A plain ID still reaches any provider.
+- Usage is per provider, with each provider's price, on the Usage page and in monthly cost quotas. The Requests, Now,
+  Response times and trace tables lost their Upstream column: it's in the name, and details show the real ID.
+- Cancelled requests record how far they got: in queue, before first byte, mid-answer, after answer. QueueRouter still
+  can't tell who closed the connection.
+- `Via` is neither forwarded to providers nor listed as an app identifier (the gate adds it).
+- A job past its deadline is never picked up: one added just after a tick had expired the others could run anyway.
 
 ### Later (agreed, not scheduled)
 

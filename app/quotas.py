@@ -37,19 +37,21 @@ class Used:
 
 @dataclass
 class MonthlyUsage:
-    cost_of: Callable[[str, int, int, int], float]  # (model, prompt, completion, cached) -> USD
+    cost_of: Callable[[str, int, int, int, str | None], float]  # (model, prompt, completion, cached, upstream) -> USD
     month: str = ""
     base: dict[str, Used] = field(default_factory=dict)
     extra: dict[str, Used] = field(default_factory=dict)
 
     def refresh(self, rows: Iterable, now: float | None = None) -> None:
-        """``rows``: this month's usage_daily rows (client, model, requests, prompt/completion/cached tokens)."""
+        """``rows``: this month's usage_daily rows (client, model, upstream, requests, tokens)."""
         self.month = month_of(now or time.time())
         base: dict[str, Used] = {}
         for r in rows:
             prompt, completion, cached = r["prompt_tokens"] or 0, r["completion_tokens"] or 0, r["cached_tokens"] or 0
             base.setdefault(r["client"], Used()).add(
-                r["requests"] or 0, prompt + completion, self.cost_of(r["model"], prompt, completion, cached)
+                r["requests"] or 0,
+                prompt + completion,
+                self.cost_of(r["model"], prompt, completion, cached, r["upstream"]),
             )
         self.base, self.extra = base, {}
 
@@ -61,7 +63,7 @@ class MonthlyUsage:
             return
         prompt, completion = entry.get("prompt_tokens") or 0, entry.get("completion_tokens") or 0
         model = entry.get("target_model") or entry.get("model") or ""
-        cost = self.cost_of(model, prompt, completion, entry.get("cached_tokens") or 0)
+        cost = self.cost_of(model, prompt, completion, entry.get("cached_tokens") or 0, entry.get("upstream"))
         self.extra.setdefault(entry.get("client") or "default", Used()).add(1, prompt + completion, cost)
 
     def used(self, client: str) -> Used:

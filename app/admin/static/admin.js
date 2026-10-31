@@ -356,7 +356,7 @@ function liveDashboard(root) {
       stage.className = r.stage === "queued" ? "muted" : "";
       if (r.error) stage.title = r.error;
       tr.append(
-        withTitle(cell(r.client, "Client"), uaTitle(r)), cell(r.model, "Model"), cell(r.upstream, "Upstream"), stage, elapsed,
+        withTitle(cell(r.client, "Client"), uaTitle(r)), cell(r.label, "Model"), stage, elapsed,
         cell(r.ttft_ms === null ? (r.stage === "running" ? "waiting…" : "—") : fmtMs(r.ttft_ms), "First byte"),
       );
       return tr;
@@ -440,7 +440,7 @@ function liveDashboard(root) {
       if (r.cached_tokens) input.title = `${count(r.cached_tokens)} of them cached`;
       tr.append(
         cell(new Date(r.ts * 1000).toLocaleTimeString(), "Time"), withTitle(cell(r.client, "Client"), uaTitle(r)),
-        cell(r.priority, "Prio"), cell(r.model, "Model"), cell(r.outcome, "Outcome"),
+        cell(r.priority, "Prio"), cell(r.label, "Model"), cell(r.outcome, "Outcome"),
         cell(r.queue_ms, "Queue ms"), cell(r.ttft_ms, "First byte ms"), cell(r.upstream_ms, "Upstream ms"),
         input, cell(count(r.completion_tokens), "Out tokens"),
       );
@@ -681,7 +681,7 @@ function localTimes(scope) {
 // details when you open it. Queued and running requests come from the live stream, and only the rows that changed
 // are redrawn; finished ones are fetched as they're written, and wait behind a button while you're scrolled down.
 function liveRequests(root) {
-  const COLUMNS = 13;
+  const COLUMNS = 12;
   const AT_TOP_PX = 150;
   const nowBody = document.getElementById("now-requests");
   const nowCount = document.getElementById("now-count");
@@ -751,16 +751,15 @@ function liveRequests(root) {
     if (r.priority && r.priority !== "normal") cell.append(" ", el("span", `badge ${r.priority}`, r.priority));
     return cell;
   };
-  const modelCell = (r, name) => {
+  const modelCell = (r) => {
     const marks = [];
     if (r.council) marks.push("council");
     if (r.compaction) marks.push("compacted");
     if (r.role) marks.push(r.role);
-    const shown = r.target_model && r.target_model !== name ? `${name || "—"} → ${r.target_model}` : name || "—";
     const cell = td("Model", "");
-    cell.title = [shown, ...marks].join(" · ");
+    cell.title = [r.label, ...marks].join(" · ");
     for (const mark of marks) cell.append(el("span", "badge", mark), " ");
-    cell.append(shown);
+    cell.append(r.label || "—");
     return cell;
   };
 
@@ -780,6 +779,8 @@ function liveRequests(root) {
     };
     box.replaceChildren();
     line("Id", copy(d.id));
+    const realId = d.target_model || d.requested_model || d.model;
+    if (realId) line("Model ID", copy(realId));
     if (d.priority) line("Priority", d.priority);
     if (d.user_agent) line("App", copy(d.user_agent));
     if (d.sent_user_agent) line("Sent as", copy(d.sent_user_agent));
@@ -892,7 +893,7 @@ function liveRequests(root) {
     const tr = el("tr", "req live");
     tr.dataset.id = r.id;
     tr.append(
-      timeCell(r), clientCell(r), modelCell(r, r.requested_model || r.model), text("Upstream", r.upstream), outcome,
+      timeCell(r), clientCell(r), modelCell(r), outcome,
       queue, td("First byte ms", "num", first), took, input, td("Cached", "num", "—"), td("Out", "num", "—"),
       td("Total", "num", "—"), text("Finish", r.stream ? "streaming" : ""),
     );
@@ -949,7 +950,7 @@ function liveRequests(root) {
 
   // -- finished --------------------------------------------------------------------------------------------------
   const finishedRow = (r) => {
-    const outcome = text("Outcome", `${r.outcome || "—"}${r.status ? ` ${r.status}` : ""}`);
+    const outcome = text("Outcome", `${r.outcome || "—"}${r.stopped ? ` ${r.stopped}` : r.status ? ` ${r.status}` : ""}`);
     if (r.retries) outcome.append(el("span", "muted", ` ↻${r.retries}`));
     if (r.outcome && r.outcome !== "done") outcome.classList.add("bad");
     const total = td("Total", "num", r.cost ? money(r.cost) : "—");
@@ -961,7 +962,7 @@ function liveRequests(root) {
     const tr = el("tr", "req");
     tr.dataset.id = r.id;
     tr.append(
-      timeCell(r), clientCell(r), modelCell(r, r.model), text("Upstream", r.upstream), outcome,
+      timeCell(r), clientCell(r), modelCell(r), outcome,
       td("Queue ms", "num", milliseconds(r.queue_ms)), td("First byte ms", "num", milliseconds(r.ttft_ms)),
       td("Upstream ms", "num", milliseconds(r.upstream_ms)), spend("In", r.tokens_in, r.cost_in),
       spend("Cached", r.tokens_cached, r.cost_cached), spend("Out", r.tokens_out, r.cost_out), total,
@@ -1174,7 +1175,7 @@ function liveRequests(root) {
         const have = new Set([...select.options].map((option) => option.value));
         for (const value of choices[select.name] || []) {
           if (have.has(value)) continue;
-          const option = el("option", "", value);
+          const option = el("option", "", (choices.labels || {})[value] || value);
           option.value = value;
           select.append(option);
         }
@@ -1263,7 +1264,8 @@ function chipPicker(root, choices) {
       chip.className = "chip";
       chip.title = describe(byId.get(id));
       if (!byId.has(id)) chip.classList.add("unknown");
-      chip.textContent = (ordered && values.length > 1 ? `${i + 1}. ` : "") + id;
+      chip.textContent = (ordered && values.length > 1 ? `${i + 1}. ` : "") + (byId.get(id)?.label || id);
+      chip.title = id;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "×";
@@ -1294,7 +1296,7 @@ function chipPicker(root, choices) {
     const words = search.value.toLowerCase().split(/\s+/).filter(Boolean);
     shown = choices
       .filter((c) => single || !values.includes(c.id))
-      .filter((c) => words.every((w) => c.id.toLowerCase().includes(w) || describe(c).toLowerCase().includes(w)))
+      .filter((c) => words.every((w) => `${c.id} ${c.label || ""} ${describe(c)}`.toLowerCase().includes(w)))
       .slice(0, 60);
     active = 0;
     menu.replaceChildren(...shown.map((c, i) => {
@@ -1303,7 +1305,7 @@ function chipPicker(root, choices) {
       item.className = i === active ? "active" : "";
       const name = document.createElement("span");
       name.className = "mono";
-      name.textContent = c.id;
+      name.textContent = c.label || c.id;
       const meta = document.createElement("span");
       meta.className = "muted small";
       meta.textContent = ` ${describe(c)}`;

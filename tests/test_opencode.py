@@ -34,7 +34,7 @@ async def test_opencode_config(make_stack):
             "apiKey": f"{{env:{KEY_ENV}}}",
             "timeout": False,
         }
-        assert provider["models"]["mock-model"]["limit"] == {"context": 262_144, "output": 16_384}
+        assert provider["models"]["mock-model@upstream"]["limit"] == {"context": 262_144, "output": 16_384}
 
         # an ArliAI Core plan on the pool caps the advertised context; aliases are included
         await login(c, stack.url)
@@ -44,9 +44,9 @@ async def test_opencode_config(make_stack):
         await c.post(f"/admin/pools/{pool.id}", data=form)
         await add_alias(c, "smart", "mock-model")
         models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
-        assert models["mock-model"]["limit"]["context"] == 32_768
+        assert models["mock-model@upstream"]["limit"]["context"] == 32_768
         assert models["smart"] == {
-            "name": "smart → mock-model · upstream",
+            "name": "smart → upstream|mock-model",
             "limit": {"context": 32_768, "output": 16_384},
         }
 
@@ -92,7 +92,7 @@ async def test_admin_download_of_client_config(make_stack):
         provider = r.json()["provider"]["queuerouter"]
         assert provider["options"]["apiKey"] == f"{{env:{KEY_ENV}}}"  # the key itself is never exported
         assert provider["options"]["baseURL"] == "https://qr.example.com/v1"
-        assert "mock-model" in provider["models"]
+        assert "mock-model@upstream" in provider["models"]
         missing = await c.get("/admin/clients/9999/opencode.json")
         assert missing.status_code == 303 and "client_unavailable" in missing.headers["location"]
 
@@ -158,6 +158,8 @@ async def test_model_names_show_providers(make_stack, make_mock):
         await add_alias(c, "pinned", "mock-model", upstream_ids=(second.id,))
         await add_alias(c, "ghost", "not-served")
         models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
-    assert models["mock-model"]["name"] == "mock-model · upstream, second"  # the ID itself is unchanged
-    assert models["pinned"]["name"] == "pinned → mock-model · second"
-    assert models["ghost"]["name"] == "ghost → not-served · upstream, second"  # where it would be sent
+    assert models["mock-model@upstream"]["name"] == "upstream|mock-model"  # one entry per provider
+    assert models["mock-model@second"]["name"] == "second|mock-model"
+    assert "mock-model" not in models
+    assert models["pinned"]["name"] == "pinned → second|mock-model"
+    assert models["ghost"]["name"] == "ghost → upstream, second|not-served"  # where it would be sent

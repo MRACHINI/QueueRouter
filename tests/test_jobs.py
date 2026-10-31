@@ -53,6 +53,18 @@ def test_restart_requeues_running_jobs(tmp_path):
     store.close()
 
 
+def test_a_job_past_its_deadline_is_never_due(tmp_path):
+    """Added just after a tick expired the others: it must wait to be expired, not run."""
+    store = open_store(Bootstrap(data_dir=str(tmp_path)), None)
+    now = time.time()
+    late = new_job("c", {"request": CHAT, "deadline": now - 1}) | {"id": "job_late"}
+    fine = new_job("c", {"request": CHAT, "deadline": now + 60}) | {"id": "job_fine"}
+    store.create_jobs([late, fine, new_job("c", {"request": CHAT}) | {"id": "job_any"}])
+    assert sorted(r["id"] for r in store.due_jobs(now, 10)) == ["job_any", "job_fine"]
+    assert store.expire_jobs(now) == [] and store.get_job("job_late")["status"] == "expired"
+    store.close()
+
+
 def test_a_batch_that_cannot_be_finished_is_marked_failed(tmp_path):
     """Its files can't be written (here: a result that can't be decrypted): failed, instead of being tried again
     on every tick, which held up every other job and stopped QueueRouter from starting."""

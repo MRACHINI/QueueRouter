@@ -4,7 +4,7 @@ Many providers (NVIDIA, Gemini's OpenAI endpoint...) list models without a conte
 sources fill the gap:
   learned - read from a provider's own "prompt too long" error ("maximum context length is N"),
             per upstream + model, the first time a request is too big;
-  manual  - set per model on the Models page (also corrects a wrong reported value).
+  manual  - set per provider and model on the Models page (also corrects a wrong reported value).
 Manual wins over learned, learned over what the model list says; plan caps still apply on top.
 
 Every provider words its overflow error differently; they are rewritten into OpenAI's form
@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+
+from .names import EVERY
 
 # The phrases providers use for "the prompt doesn't fit" (not "max_tokens is too big").
 _OVERFLOW = re.compile(
@@ -114,24 +116,27 @@ class Limit:
 
 
 class ModelLimits:
-    """Manual (per model) and learned (per upstream + model) limits, kept in memory."""
+    """Manual and learned limits per upstream + model, kept in memory (manual with upstream EVERY: on any)."""
 
     def __init__(self) -> None:
-        self.manual: dict[str, Limit] = {}
+        self.manual: dict[tuple[int, str], Limit] = {}
         self.learned: dict[tuple[int, str], int] = {}
 
     def load(self, rows: list[dict]) -> None:
         manual, learned = {}, {}
         for row in rows:
             if row["source"] == "manual":
-                manual[row["model"]] = Limit(row["context"], row["output"])
+                manual[(row["upstream_id"], row["model"])] = Limit(row["context"], row["output"])
             elif row["context"]:
                 learned[(row["upstream_id"], row["model"])] = row["context"]
         self.manual, self.learned = manual, learned
 
+    def manual_for(self, model: str, upstream_id: int) -> Limit | None:
+        return self.manual.get((upstream_id, model)) or self.manual.get((EVERY, model))
+
     def apply(self, model: str, upstream_id: int, entry: dict | None) -> dict | None:
         """``entry`` (a /v1/models item) with known limits filled in; unchanged if none."""
-        manual = self.manual.get(model)
+        manual = self.manual_for(model, upstream_id)
         learned = self.learned.get((upstream_id, model))
         if not manual and not learned:
             return entry
@@ -145,5 +150,5 @@ class ModelLimits:
         return merged
 
     def known(self, model: str, upstream_id: int) -> int | None:
-        manual = self.manual.get(model)
+        manual = self.manual_for(model, upstream_id)
         return (manual.context if manual else None) or self.learned.get((upstream_id, model))

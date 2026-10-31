@@ -19,12 +19,12 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
   <tr id="alias-{{ a.name }}">
     <td data-label="Alias"><a href="/admin/aliases/{{ a.id }}"><strong><code>{{ a.name }}</code></strong></a>{% if not a.enabled %} <span class="badge">disabled</span>{% endif %}
       {% if a.notes %}<div class="small muted">{{ a.notes }}</div>{% endif %}</td>
-    <td data-label="Sends to" class="small"><code>{{ a.target_model }}</code>{% for fb in a.fallbacks %} → <code>{{ fb }}</code>{% endfor %}
+    <td data-label="Sends to" class="small"><code>{{ a.target_model | model_label }}</code>{% for fb in a.fallbacks %} → <code>{{ fb | model_label }}</code>{% endfor %}
       <div class="muted">{% if a.upstream_ids %}on {% for uid in a.upstream_ids %}{{ upstream_names.get(uid, uid) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}on any upstream{% endif %}</div></td>
     <td data-label="Extras" class="small">
       {% if a.compact != "off" %}<span class="badge" title="Conversations too big for the model are shrunk">{{ a.compact }}{% if a.compact_model %} with {{ a.compact_model }}{% endif %}</span>{% endif %}
       {% if a.virtual_context %}<span class="badge" title="Context size told to apps">{{ "{:,}".format(a.virtual_context) }} context</span>{% endif %}
-      {% if a.council != "off" %}<span class="badge" title="Members: {{ a.council_members | join(', ') }}">council {{ a.council }} ({{ a.council_members | length }}){% if a.council_search %} + web search{% endif %}</span>{% endif %}
+      {% if a.council != "off" %}<span class="badge" title="Members: {{ a.council_members | map('model_label') | join(', ') }}">council {{ a.council }} ({{ a.council_members | length }}){% if a.council_search %} + web search{% endif %}</span>{% endif %}
       {% if a.params %}<span class="badge" title="{{ a.params }}">rules</span>{% endif %}
       {% if a.compact == "off" and not a.virtual_context and a.council == "off" and not a.params %}<span class="muted">—</span>{% endif %}</td>
     <td data-label=""><div class="row wrap">
@@ -42,11 +42,46 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
 </table>
 </div>
 
+<h2 id="names">Model names</h2>
+<p class="muted small">Give a model on a provider your own name. It shows everywhere as <span class="mono">Provider|your name</span>,
+opencode included, and the model's automatic score, price and thinking levels are looked up by it. The real ID is still
+what's sent to the provider. Apps can't ask for a model by this name (several can share one): use an alias for that. Empty
+the field and Save to go back to the ID.</p>
+<details class="card" {% if model_names | selectattr("name") | list %}open{% endif %}>
+  <summary><strong>{{ model_names | length }} models</strong>
+    <span class="badge">{{ model_names | selectattr("name") | list | length }} named</span></summary>
+  <div class="table-wrap">
+  <table class="cards">
+    <thead><tr><th>Provider</th><th>Model ID</th><th>Custom name</th></tr></thead>
+    <tbody>
+    {% for n in model_names %}
+    <tr>
+      <td data-label="Provider">{{ n.upstream }}</td>
+      <td data-label="Model ID" class="mono small wrap-any">{{ n.model }}</td>
+      <td data-label="Custom name">
+        <form method="post" action="/admin/model-names" class="row wrap">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="upstream_id" value="{{ n.upstream_id }}">
+          <input type="hidden" name="model" value="{{ n.model }}">
+          <input name="name" value="{{ n.name }}" maxlength="120" placeholder="custom name" aria-label="Custom name" class="grow">
+          <button type="submit" class="secondary">Save</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3" class="muted">No models loaded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</details>
+
 <h2 id="contexts">Context sizes</h2>
 <p class="muted small">How many tokens each model accepts. QueueRouter checks requests against it before queuing,
 and opencode is told it (so it compacts in time). It comes from the provider's model list; when a provider doesn't
 say, QueueRouter <strong>learns</strong> it from the provider's own "too long" error. Set it here by hand to fill a gap
-or correct a wrong value (applies on every upstream; a plan's context cap still applies on top).</p>
+or correct a wrong value: on a row for that provider only, in this form for every provider that offers the model (a row's own
+value wins; a plan's context cap still applies on top).</p>
 <form method="post" action="/admin/model-limits" class="card row wrap">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input name="model" required list="model-ids" placeholder="model id" aria-label="Model" class="grow">
@@ -54,33 +89,32 @@ or correct a wrong value (applies on every upstream; a plan's context cap still 
   <input type="number" name="output" min="1" placeholder="max output (optional)" aria-label="Max output tokens">
   <button type="submit" class="secondary">Set</button>
 </form>
-{% set unknown = contexts | selectattr("context", "none") | list %}
+{% set unknown = contexts | rejectattr("every") | selectattr("context", "none") | list %}
 <details class="card" {% if contexts | selectattr("manual") | list %}open{% endif %}>
   <summary><strong>{{ contexts | length }} models</strong>
     {% if unknown %}<span class="badge">{{ unknown | length }} unknown</span>{% endif %}</summary>
   <div class="table-wrap">
   <table class="cards">
-    <thead><tr><th>Model</th><th>In use</th><th>Per upstream</th><th>Manual</th></tr></thead>
+    <thead><tr><th>Model</th><th>In use</th><th>Details</th><th>Manual</th></tr></thead>
     <tbody>
     {% for c in contexts %}
     <tr>
-      <td data-label="Model" class="mono small wrap-any">{{ c.model }}</td>
-      <td data-label="In use">{{ "{:,}".format(c.context) if c.context else "unknown" }}</td>
-      <td data-label="Per upstream" class="small">
-        {% for u in c.upstreams %}<div>{{ u.name }}:
-          {% if u.reported %}reports {{ "{:,}".format(u.reported) }}{% else %}<span class="muted">not reported</span>{% endif %}
-          {% if u.learned %}· <strong>learned {{ "{:,}".format(u.learned) }}</strong>
-            <form method="post" action="/admin/model-limits/forget" class="inline">
-              <input type="hidden" name="csrf" value="{{ csrf }}">
-              <input type="hidden" name="upstream_id" value="{{ u.id }}">
-              <input type="hidden" name="model" value="{{ c.model }}">
-              <button type="submit" class="ghost small" title="Forget the learned size">forget</button>
-            </form>{% endif %}
-          {% if u.cap %}· plan cap {{ "{:,}".format(u.cap) }}{% endif %}</div>
-        {% endfor %}</td>
+      <td data-label="Model" class="mono small wrap-any">{{ c.label }}{% if c.every %} <span class="badge">every provider</span>{% endif %}</td>
+      <td data-label="In use">{{ "{:,}".format(c.context) if c.context else ("—" if c.every else "unknown") }}</td>
+      <td data-label="Details" class="small">
+        {% if not c.every %}{% if c.reported %}reports {{ "{:,}".format(c.reported) }}{% else %}<span class="muted">not reported</span>{% endif %}
+        {% if c.learned %}· <strong>learned {{ "{:,}".format(c.learned) }}</strong>
+          <form method="post" action="/admin/model-limits/forget" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="upstream_id" value="{{ c.upstream_id }}">
+            <input type="hidden" name="model" value="{{ c.model }}">
+            <button type="submit" class="ghost small" title="Forget the learned size">forget</button>
+          </form>{% endif %}
+        {% if c.cap %}· plan cap {{ "{:,}".format(c.cap) }}{% endif %}{% endif %}</td>
       <td data-label="Manual">
         <form method="post" action="/admin/model-limits" class="row wrap">
           <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="upstream_id" value="{{ c.upstream_id }}">
           <input type="hidden" name="model" value="{{ c.model }}">
           <input type="number" name="context" min="1024" value="{{ c.manual.context if c.manual and c.manual.context else '' }}" placeholder="context" aria-label="Context tokens" class="price">
           <input type="number" name="output" min="1" value="{{ c.manual.output if c.manual and c.manual.output else '' }}" placeholder="output" aria-label="Max output tokens" class="price">
@@ -99,11 +133,11 @@ or correct a wrong value (applies on every upstream; a plan's context cap still 
 
 <h2 id="ranking">Strength order in opencode</h2>
 <p class="muted small">With <a href="/admin/settings">Settings → opencode → Order models by strength</a> on, the
-opencode model list is numbered: aliases first (<span class="mono">00</span>), then the strongest models
-with their score (<span class="mono">01 · 58.3 · …</span>, <span class="mono">02 · 52.0 · …</span>; a
+opencode model list is numbered: aliases first (<span class="mono">00</span>), then the strongest models, one entry per provider,
+with their score (<span class="mono">01|58.3|…</span>, <span class="mono">02|52.0|…</span>; a
 <span class="mono">~</span> before it: the base model's), then models without a score. A model's score is yours
 when you set one here (same scale as the index; it can also move an alias into the list), else the
-{{ ranking.index }} index{% if not ranking.enabled %} · <strong>ordering is off</strong>{% endif %}. Variants such as
+{{ ranking.index }} index, looked up by the model's custom name when it has one{% if not ranking.enabled %} · <strong>ordering is off</strong>{% endif %}. Variants such as
 fine-tunes get their base model's score (marked "from …").</p>
 <div class="card row wrap">
   <span class="small">
@@ -130,15 +164,16 @@ fine-tunes get their base model's score (marked "from …").</p>
     {% for r in ranking.rows %}
     <tr>
       <td data-label="#" class="mono">{{ r.prefix or "–" }}</td>
-      <td data-label="Model" class="mono small wrap-any">{{ r.model }}</td>
+      <td data-label="Model" class="mono small wrap-any">{{ r.label }}</td>
       <td data-label="Score" class="small">
         {% if r.source == "alias" %}<span class="muted">alias</span>
         {% elif r.score is none %}<span class="muted">no score</span>
         {% elif r.source == "yours" %}{{ "%.1f" | format(r.score) }} <span class="muted">yours</span>
-        {% else %}{{ "%.1f" | format(r.score) }}{% if r.inherited %} <span class="muted">from {{ r.source }}</span>{% elif r.source != r.model %} <span class="muted">{{ r.source }}</span>{% endif %}{% endif %}</td>
+        {% else %}{{ "%.1f" | format(r.score) }}{% if r.inherited %} <span class="muted">from {{ r.source }}</span>{% elif r.source != r.name %} <span class="muted">{{ r.source }}</span>{% endif %}{% endif %}</td>
       <td data-label="Your score">
         <form method="post" action="/admin/model-scores" class="row wrap">
           <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="upstream_id" value="{{ r.upstream_id }}">
           <input type="hidden" name="model" value="{{ r.model }}">
           <input type="number" name="score" min="0" max="1000" step="0.1" value="{{ r.score if r.source == 'yours' else '' }}" placeholder="score" aria-label="Your score" class="price">
           <button type="submit" class="secondary">Save</button>
@@ -173,13 +208,14 @@ through the QueueRouter plugin (opencode 2.x; re-install the plugin once to get 
     <tbody>
     {% for r in thinking.rows %}
     <tr>
-      <td data-label="Model" class="mono small wrap-any">{{ r.model }}</td>
+      <td data-label="Model" class="mono small wrap-any">{{ r.label }}</td>
       <td data-label="Detected" class="small">
         {% if r.found %}{{ r.found.summary }} <span class="muted">· {{ r.found.source }}</span>
         {% else %}<span class="muted">none</span>{% endif %}</td>
       <td data-label="Yours">
         <form method="post" action="/admin/model-thinking" class="row wrap">
           <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="upstream_id" value="{{ r.upstream_id }}">
           <input type="hidden" name="model" value="{{ r.model }}">
           <input name="levels" value="{{ (r.yours or '') | replace(',', ', ') }}" placeholder="e.g. none, low, high" aria-label="Your levels" class="grow">
           <button type="submit" class="secondary">Save</button>
@@ -198,8 +234,8 @@ through the QueueRouter plugin (opencode 2.x; re-install the plugin once to get 
 <h2 id="pricing">Reference prices</h2>
 <p class="muted small">What your tokens would cost at official API prices (USD per million tokens), used for the
 cost and savings figures on the Usage page. Prices come from <a href="https://models.dev" rel="noopener">models.dev</a>:
-the model creator's own price when they sell it, otherwise the median across providers. Override per model with
-another models.dev reference or your own prices.
+the model creator's own price when they sell it, otherwise the median across providers, found by the model's custom
+name when it has one. Each row is one provider's model: override it with another models.dev reference or your own prices.
 {% if catalog_size %}Catalog: {{ "{:,}".format(catalog_size) }} priced models, updated {{ catalog_age_h }} h ago.
 {% else %}<strong>The price catalog hasn't been downloaded yet.</strong>{% endif %}</p>
 <form method="post" action="/admin/prices/refresh" class="row">
@@ -214,7 +250,7 @@ another models.dev reference or your own prices.
   {% for p in pricing %}
   {% set o = p.override %}
   <tr>
-    <td data-label="Model" class="mono small wrap-any">{{ p.model }}{% if not p.offered %} <span class="badge" title="No upstream offers this name now; it is here because of recent usage or a manual price">not offered</span>{% endif %}</td>
+    <td data-label="Model" class="mono small wrap-any">{{ p.label }}{% if not p.upstream_id %} <span class="badge" title="Applies wherever this model has no price of its own">every provider</span>{% endif %}{% if not p.offered %} <span class="badge" title="No upstream offers this name now; it is here because of recent usage or a manual price">not offered</span>{% endif %}</td>
     <td data-label="Input">{{ "$%.3f" | format(p.price.input) if p.price else "—" }}</td>
     <td data-label="Cached input">{{ "$%.4f" | format(p.price.cached_input) if p.price else "—" }}</td>
     <td data-label="Output">{{ "$%.3f" | format(p.price.output) if p.price else "—" }}</td>
@@ -223,6 +259,7 @@ another models.dev reference or your own prices.
     <td data-label="">
       <form method="post" action="/admin/prices" class="row wrap">
         <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="upstream_id" value="{{ p.upstream_id }}">
         <input type="hidden" name="model" value="{{ p.model }}">
         <input name="reference" list="price-refs" value="{{ o.reference if o and o.reference else '' }}" placeholder="models.dev reference" aria-label="Reference" class="grow">
         <input type="number" step="any" min="0" name="input" value="{{ o.input if o and o.input is not none else '' }}" placeholder="in $" aria-label="Input price" class="price">
@@ -233,6 +270,7 @@ another models.dev reference or your own prices.
       {% if o %}
       <form method="post" action="/admin/prices" class="row">
         <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="upstream_id" value="{{ p.upstream_id }}">
         <input type="hidden" name="model" value="{{ p.model }}">
         <button type="submit" class="ghost small">Remove price</button>
       </form>
@@ -247,14 +285,14 @@ another models.dev reference or your own prices.
 </div>
 <p class="small muted">Lists the models your upstreams offer, plus names used in the last 30 days and manual prices.
 Empty override = automatic. Manual prices win over a reference; <em>Remove price</em> goes back to automatic.
-Costs are counted for the model that answered (an alias's target), so price the target, not the alias. Prices apply to
-past usage too.</p>
+Costs are counted for the model that answered on the provider that served it (an alias's target), so price the target,
+not the alias. Prices apply to past usage too.</p>
 
 <h2>Models per upstream</h2>
 {% for name, ids in models.items() %}
 <details class="card">
   <summary><strong>{{ name }}</strong> <span class="muted small">{{ ids | length }} models</span></summary>
-  {% if ids %}<ul class="mono small columns">{% for m in ids %}<li>{{ m }}</li>{% endfor %}</ul>
+  {% if ids %}<ul class="mono small columns">{% for m in ids %}<li>{{ m | model_name(name) }}</li>{% endfor %}</ul>
   {% else %}<p class="small muted">Model list not loaded yet (or the upstream doesn't provide one).</p>{% endif %}
 </details>
 {% else %}

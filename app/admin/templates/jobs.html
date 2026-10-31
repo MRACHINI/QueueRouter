@@ -115,7 +115,7 @@ form: <code>0 2 * * *</code> = every day at 02:00, <code>*/15 * * * *</code> = e
     <td data-label="Status"><span class="badge {{ 'ok' if j.status == 'succeeded' else 'high' if j.status in ('failed', 'expired') else '' }}">{{ j.status }}</span>
       {% if j.error %}<div class="small muted">{{ j.error }}</div>{% endif %}
       {% if j.callback_status %}<div class="small muted">callback: {{ j.callback_status }}</div>{% endif %}</td>
-    <td data-label="Model" class="wrap-any">{{ j.model or "" }}</td>
+    <td data-label="Model" class="wrap-any">{{ (j.model or "") | model_label }}</td>
     <td data-label="Tokens">{% if j.usage %}{{ j.usage.prompt_tokens }} / {{ j.usage.completion_tokens }}{% endif %}</td>
     <td data-label="">
       {% if user.can("operator") %}

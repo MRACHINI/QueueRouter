@@ -24,7 +24,8 @@ Upstreams page) and reload this page.</p>
   <small class="muted">Off: a new model stays hidden until you tick it here.</small>
   <ul class="plain columns picker">
     {% for r in rows %}
-    <li data-picker-item="{{ r.id | lower }}"><label class="check mono small"><input type="checkbox" name="model_{{ loop.index }}" value="{{ r.id }}" {% if r.offered %}checked{% endif %}> {{ r.id }}</label></li>
+    {% set named = r.id | model_name(upstream.name) %}
+    <li data-picker-item="{{ (r.id ~ ' ' ~ named) | lower }}"><label class="check mono small"><input type="checkbox" name="model_{{ loop.index }}" value="{{ r.id }}" {% if r.offered %}checked{% endif %}> {{ r.id }}{% if named != r.id %} <span class="muted">({{ named }})</span>{% endif %}</label></li>
     {% endfor %}
   </ul>
   <div class="align-end"><button type="submit">Save</button></div>

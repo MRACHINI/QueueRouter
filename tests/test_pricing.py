@@ -50,11 +50,11 @@ def test_no_match(catalog):
 
 
 def test_overrides(catalog):
-    manual = {"m": {"reference": None, "input": 1.0, "output": 2.0, "cached_input": None}}
+    manual = {(0, "m"): {"reference": None, "input": 1.0, "output": 2.0, "cached_input": None}}
     price = resolve("m", manual, catalog)
     assert (price.input, price.output, price.cached_input, price.source) == (1.0, 2.0, 1.0, "manual")
     referenced = {
-        "open-model-7b": {
+        (0, "open-model-7b"): {
             "reference": "deepseek/deepseek-v4-flash",
             "input": None,
             "output": None,
@@ -78,6 +78,7 @@ def test_summarize_usage_totals_and_savings(catalog):
             "day": "2026-10-19",
             "client": "oc",
             "model": "DeepSeek-V4-Flash-0731",
+            "upstream": "up",
             "requests": 3,
             "errors": 0,
             "prompt_tokens": 2_000_000,
@@ -88,6 +89,7 @@ def test_summarize_usage_totals_and_savings(catalog):
             "day": "2026-10-19",
             "client": "oc",
             "model": "unknown",
+            "upstream": "up",
             "requests": 1,
             "errors": 1,
             "prompt_tokens": 100,
@@ -148,6 +150,6 @@ async def test_usage_page_shows_costs(make_stack):
         usage = (await c.get("/admin/usage")).text
         assert "At official prices" in usage and "Plan costs more by" in usage and "plan: " in usage
         csv_rows = (await c.get("/admin/usage.csv?by=model")).text.strip().splitlines()
-        cost = float(csv_rows[1].split(",")[-1])
+        cost = float(csv_rows[1].split(",")[8])
         # 10 prompt (4 cached) + 5 completion tokens
         assert cost == pytest.approx((6 * 1 + 4 * 0.1 + 5 * 2) / 1e6, abs=1e-4)

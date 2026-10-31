@@ -18,11 +18,10 @@ def test_month_math():
 
 
 def test_monthly_usage_and_limits():
-    usage = MonthlyUsage(lambda model, p, c, cached: (p + c) / 1000)
+    usage = MonthlyUsage(lambda model, p, c, cached, upstream: (p + c) / 1000)
     now = calendar.timegm((2026, 5, 10, 0, 0, 0))
-    rows = [
-        {"client": "a", "model": "m", "requests": 3, "prompt_tokens": 100, "completion_tokens": 50, "cached_tokens": 0}
-    ]
+    tokens = {"prompt_tokens": 100, "completion_tokens": 50, "cached_tokens": 0}
+    rows = [{"client": "a", "model": "m", "upstream": "u", "requests": 3, **tokens}]
     usage.refresh(rows, now)
     usage.observe({"client": "a", "ts": now, "prompt_tokens": 10, "completion_tokens": 5, "model": "m"})
     usage.observe({"client": "a", "ts": now - 40 * 86_400, "prompt_tokens": 999})  # last month: ignored

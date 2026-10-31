@@ -58,7 +58,7 @@ included — <a href="/admin/models#pricing">set a price</a>.</p>
   <tbody>
   {% for m in models %}
   <tr>
-    <td data-label="Model" class="wrap-any">{{ m.model }}</td>
+    <td data-label="Model" class="wrap-any">{{ m.label }}</td>
     <td data-label="Requests" class="num">{{ "{:,}".format(m.requests) }}</td>
     <td data-label="Errors" class="num">{{ "{:,}".format(m.errors) }}</td>
     {{ spend("In", m.input_tokens, m.cost_in) }}
@@ -93,7 +93,7 @@ included — <a href="/admin/models#pricing">set a price</a>.</p>
   <tr>
     <td data-label="Day">{{ r.day }}</td>
     <td data-label="Client">{{ r.client }}</td>
-    {% if by_model %}<td data-label="Model" class="wrap-any">{{ r.model }}</td>{% endif %}
+    {% if by_model %}<td data-label="Model" class="wrap-any">{{ r.label }}</td>{% endif %}
     <td data-label="Requests" class="num">{{ "{:,}".format(r.requests) }}</td>
     <td data-label="Errors" class="num">{{ "{:,}".format(r.errors) }}</td>
     {{ spend("In", r.input_tokens, r.cost_in) }}
