@@ -86,7 +86,9 @@ from a **web admin UI**.
   whether models the provider adds later appear automatically.
 - **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
   reject), max queued / active, queue and total timeouts, retry budget.
-- **Operating modes**: running, paused, draining, maintenance.
+- **Operating modes**: running, paused, draining (ends by itself on the next start), maintenance.
+- **Updates clients don't notice**: running requests finish and new ones wait at a small gate in front of
+  QueueRouter while it restarts (see [Update](#update)).
 - **Recurring jobs**: cron schedules (UTC, e.g. `0 2 * * *`) that create jobs — from the admin Jobs
   page or `/v1/schedules`; pause, resume or run now.
 - **Monthly quotas** per client: requests, tokens and cost (at official prices) per calendar month;
@@ -143,7 +145,7 @@ from a **web admin UI**.
 
 ```
 opencode ───┐                                     ┌─► ArliAI account A (2 in flight)
-scripts ────┼─► Traefik (HTTPS) ─► QueueRouter ───┼─► ArliAI account B (2 in flight)
+scripts ────┼─► Traefik ─► gate ─► QueueRouter ───┼─► ArliAI account B (2 in flight)
 n8n ────────┘                      (smart queue)  └─► other provider / local model
 ```
 
@@ -174,9 +176,27 @@ services:
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
     cap_add: [CHOWN, SETUID, SETGID]   # only at start: fix /data ownership, then dropped
-    stop_grace_period: 60s
+    stop_grace_period: 11m       # an update lets running requests finish (up to 10 minutes)
     deploy:
       replicas: 1                # never scale: the queue lives in memory
+    networks: [traefik]
+    labels:
+      - traefik.enable=false     # Traefik talks to the gate
+
+  gate:                          # holds new requests while QueueRouter restarts; see "Update"
+    image: caddy:2.11.7-alpine
+    command: [caddy, run, --config, /etc/caddy/gate.caddyfile, --adapter, caddyfile]
+    configs:
+      - source: gate
+        target: /etc/caddy/gate.caddyfile
+    environment:
+      XDG_CONFIG_HOME: /tmp
+      XDG_DATA_HOME: /tmp
+    expose: ["8000"]
+    restart: unless-stopped
+    user: "10001:10001"
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]  # the Caddy binary carries it and won't start without
     networks: [traefik]
     labels:
       - traefik.enable=true
@@ -187,6 +207,29 @@ services:
       - traefik.http.routers.queuerouter.tls.certresolver=letsencrypt
       - traefik.http.services.queuerouter.loadbalancer.server.port=8000
 
+configs:
+  gate:
+    content: |
+      {
+        admin off
+        auto_https off
+        persist_config off
+        servers {
+          trusted_proxies static private_ranges
+        }
+      }
+      :8000 {
+        reverse_proxy queuerouter:8000 {
+          flush_interval -1
+          lb_try_duration 5m
+          lb_try_interval 500ms
+          request_buffers 25MiB
+          transport http {
+            keepalive off
+          }
+        }
+      }
+
 volumes:
   qr_data:
 
@@ -194,6 +237,9 @@ networks:
   traefik:
     external: true
 ```
+
+The gate needs Docker Compose 2.23 or newer for `configs` with `content`. It's also why `TRUSTED_PROXIES` must
+be a network that includes it (see [Behind a reverse proxy](#behind-a-reverse-proxy)).
 
 ```bash
 docker compose up -d
@@ -213,8 +259,24 @@ No Traefik? Use [docker-compose.caddy.yml](docker-compose.caddy.yml) (Caddy gets
 automatically). Other reverse proxies work too: route to `queuerouter:8000`, **disable response
 buffering** and allow long responses (Nginx: `proxy_buffering off; proxy_read_timeout 1h;`).
 
-Update: `docker compose pull && docker compose up -d` (database migrations run automatically,
-with a backup in `/data/backups` first).
+### Update
+
+```bash
+docker compose pull queuerouter && docker compose up -d queuerouter
+```
+
+Database migrations run automatically, with a backup in `/data/backups` first. Clients don't see an error:
+
+1. The old version stops taking new requests and finishes what it has, queued ones included, for up to 10 minutes.
+2. New requests wait at the gate, for up to 5 minutes (`lb_try_duration`). Streaming clients see nothing meanwhile.
+3. The new version starts and answers them.
+
+New requests wait for the slowest running one, so that's usually seconds, sometimes minutes. A request still
+running after 10 minutes is cut, and one held for more than 5 gets an error. The gate itself has a fixed version
+and isn't touched by this command; updating it is the one thing that does cut requests.
+
+Prefer to choose the moment? Set **Draining** on the Dashboard: new requests get your message and a 503, and
+it says when nothing is left. It turns itself off on the next start.
 
 ### Data volume permissions
 
@@ -355,7 +417,8 @@ TRUSTED_PROXIES=172.18.0.0/16
 ```
 
 If it's missing, every request appears to come from the proxy (one address for everyone), and the log says so
-once: `untrusted_proxy`.
+once: `untrusted_proxy`. With the gate, the gate is what connects to QueueRouter: a subnet covers it, a single
+Traefik address doesn't.
 
 ## API
 

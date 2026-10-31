@@ -168,3 +168,27 @@ async def test_modes(make_stack):
         assert "upgrading" in (await c.get("/admin")).text
         await set_mode(c, "running")
         assert (await c.post(api, headers=stack.headers, json=chat("again"))).status_code == 200
+
+
+async def test_draining_ends_with_a_restart(make_stack, tmp_path):
+    bootstrap = {**OWNER, "data_dir": str(tmp_path / "shared")}
+    api = "/v1/chat/completions"
+    first = make_stack(bootstrap=bootstrap)
+    async with httpx.AsyncClient(base_url=first.url, timeout=30) as c:
+        await login(c, first.url)
+        await set_mode(c, "draining", "updating")
+        refused = await c.post(api, headers=first.headers, json=chat("x"))
+        assert refused.status_code == 503 and refused.headers["retry-after"] == "30"
+        assert 'id="drain-left"' in (await c.get("/admin")).text
+
+    second = make_stack(bootstrap=bootstrap)
+    async with httpx.AsyncClient(base_url=second.url, timeout=30) as c:
+        assert (await c.post(api, headers=second.headers, json=chat("y"))).status_code == 200
+        await login(c, second.url)
+        await set_mode(c, "maintenance", "planned work")
+        refused = await c.post(api, headers=second.headers, json=chat("z"))
+        assert refused.status_code == 503 and refused.headers["retry-after"] == "300"
+
+    third = make_stack(bootstrap=bootstrap)  # maintenance is meant to last: it stays
+    assert third.app.state.store.get_meta("mode") == "maintenance"
+    assert third.app.state.store.get_meta("maintenance_message") == "planned work"

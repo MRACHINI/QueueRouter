@@ -1420,6 +1420,22 @@ v0.49.0: faster, smaller, self-healing Requests and Usage pages.
 - The admin pages' long reads have their own read-only database connection: they can't hold up requests or the
   background loop by holding the store's lock.
 - "Last N days" on the Usage page counted N+1 calendar days against N days of plan price; it's N days, today included.
+v0.50.0: updates clients don't notice.
+- docker-compose.yml puts a small Caddy ("gate") between Traefik and QueueRouter, with a fixed version so it isn't
+  restarted by an update. A request can't outlive the process holding it, so only something that stays up can hold
+  new requests. On SIGTERM uvicorn closes its port and finishes what it has; the gate's dials fail and it retries
+  for up to 5 minutes (`lb_try_duration`). Docker removes the container from Traefik while it's away, so Traefik's
+  own retry couldn't do this.
+- Running and queued requests get 10 minutes on shutdown (was 50 s); stop_grace_period 11 minutes.
+- `keepalive off`: a closing QueueRouter can't be handed a request on an old connection. `request_buffers`: Traefik
+  would otherwise give up (read timeout, 60 s) on a large body nobody is reading yet. Caddy 2.11.4 or newer is
+  needed: older versions lose a request's body when they retry.
+- Tested with a real redeploy through Traefik: a 90 s stream finished, and of 221 new requests sent during it none
+  failed. They waited up to 95 s, a 5 MB body for 72 s.
+- Rejected: old and new side by side. Queue and slots are in memory, so together they could exceed a provider's
+  limit, and both would run jobs and schedules on one database.
+- Draining turns itself off on the next start (maintenance stays: it's meant to last), says when nothing is left,
+  and tells clients to retry in 30 s, not 300.
 
 ### Later (agreed, not scheduled)
 

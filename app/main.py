@@ -780,7 +780,8 @@ def create_app(
         """Draining and maintenance refuse new requests; paused still accepts (and queues)."""
         if snapshot.mode in ("draining", "maintenance"):
             message = snapshot.maintenance_message or f"QueueRouter is {snapshot.mode}; try again later"
-            return error_response(message, 503, snapshot.mode, **{"Retry-After": "300"})
+            retry = "30" if snapshot.mode == "draining" else "300"  # draining ends with a restart, soon
+            return error_response(message, 503, snapshot.mode, **{"Retry-After": retry})
         return None
 
     def policy_refusal(client: ClientKey, model: str | None, target: str | None = None) -> JSONResponse | None:

@@ -10,7 +10,7 @@
   {% if state.mode != "running" %}
   <p class="notice err" role="status"><strong>Mode: {{ state.mode }}</strong> —
     {% if state.mode == "paused" %}requests are accepted and queued, but none are started.
-    {% elif state.mode == "draining" %}new requests get 503; the queue is still being worked off.
+    {% elif state.mode == "draining" %}new requests get 503; the queue is still being worked off. Draining turns itself off on the next start. <strong id="drain-left"></strong>
     {% else %}new requests get 503 and queued ones were cancelled; running ones finish.{% endif %}
     {% if state.maintenance_message %}<br>Message: {{ state.maintenance_message }}{% endif %}</p>
   {% endif %}

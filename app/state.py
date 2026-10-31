@@ -90,4 +90,8 @@ def open_store(bootstrap: Bootstrap, seed: Settings | None) -> Store:
                 }
             )
         )
+    if store.get_meta("mode") == "draining":  # it was for this restart: the new start takes requests again
+        store.set_meta("mode", "running")
+        store.set_meta("maintenance_message", "")
+        store.audit("system", "mode", "running", {"message": "draining ends with a restart"})
     return store

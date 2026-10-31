@@ -378,6 +378,10 @@ function liveDashboard(root) {
     const meter = root.querySelector('[data-k="slots"]');
     if (meter) { meter.max = s.max_concurrency; meter.value = s.active; }
     set("queued", s.queued);
+    const drainLeft = document.getElementById("drain-left");
+    if (drainLeft) {
+      drainLeft.textContent = s.active || s.queued ? `${s.active} running, ${s.queued} queued.` : "Nothing left: safe to redeploy.";
+    }
     set("lane_high", s.queued_by_lane.high);
     set("lane_normal", s.queued_by_lane.normal);
     set("lane_low", s.queued_by_lane.low);

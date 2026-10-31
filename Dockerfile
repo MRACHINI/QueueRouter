@@ -35,4 +35,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --start-interval=2s -
 # One process, one worker: the queue and slot counts live in memory.
 ENTRYPOINT ["queuerouter-entrypoint"]
 CMD ["uvicorn", "app.main:build_app", "--factory", "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "1", "--no-server-header", "--no-access-log", "--timeout-graceful-shutdown", "50"]
+     "--workers", "1", "--no-server-header", "--no-access-log", "--timeout-graceful-shutdown", "600"]

@@ -3,5 +3,12 @@
 	reverse_proxy queuerouter:8000 {
 		# Flush every byte immediately so streaming and queue keep-alives reach clients.
 		flush_interval -1
+		# While QueueRouter restarts, new requests wait here instead of failing.
+		lb_try_duration 5m
+		lb_try_interval 500ms
+		request_buffers 25MiB
+		transport http {
+			keepalive off
+		}
 	}
 }
