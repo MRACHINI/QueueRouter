@@ -207,17 +207,53 @@ def resolve(model: str, overrides: dict, catalog: PriceCatalog) -> Price | None:
     return catalog.match(model)
 
 
-def token_cost(price: Price | None, prompt: int, completion: int, cached: int) -> tuple[float, float] | None:
-    """(input cost, output cost) in USD; cached prompt tokens at the cheaper cached rate."""
+def token_costs(price: Price | None, prompt: int, completion: int, cached: int) -> tuple[float, float, float] | None:
+    """(normal input, cached input, output) in USD; cached prompt tokens at the cheaper cached rate."""
     if price is None:
         return None
     cached = min(cached or 0, prompt or 0)
-    cost_in = ((prompt or 0) - cached) * price.input / 1e6 + cached * price.cached_input / 1e6
-    cost_out = (completion or 0) * price.output / 1e6
-    return cost_in, cost_out
+    normal = ((prompt or 0) - cached) * price.input / 1e6
+    return normal, cached * price.cached_input / 1e6, (completion or 0) * price.output / 1e6
+
+
+def token_cost(price: Price | None, prompt: int, completion: int, cached: int) -> tuple[float, float] | None:
+    """(input cost, output cost) in USD."""
+    costs = token_costs(price, prompt, completion, cached)
+    return None if costs is None else (costs[0] + costs[1], costs[2])
 
 
 PRICE_PER_MONTH_DAYS = 30.4375
+
+
+def _empty_usage() -> dict:
+    return {
+        "requests": 0,
+        "errors": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cached_tokens": 0,
+        "input_tokens": 0,  # prompt tokens that weren't cached
+        "cost_in": 0.0,
+        "cost_cached": 0.0,
+        "cost_out": 0.0,
+        "cost": 0.0,
+        "priced": True,
+        "unpriced_tokens": 0,
+    }
+
+
+def _add_usage(out: dict, row, costs: tuple[float, float, float] | None) -> None:
+    for field in ("requests", "errors", "prompt_tokens", "completion_tokens", "cached_tokens"):
+        out[field] += row[field] or 0
+    out["input_tokens"] += max((row["prompt_tokens"] or 0) - (row["cached_tokens"] or 0), 0)
+    if costs is None:
+        out["priced"] = False
+        out["unpriced_tokens"] += (row["prompt_tokens"] or 0) + (row["completion_tokens"] or 0)
+    else:
+        out["cost_in"] += costs[0]
+        out["cost_cached"] += costs[1]
+        out["cost_out"] += costs[2]
+        out["cost"] += sum(costs)
 
 
 def summarize_usage(rows, overrides: dict, catalog: PriceCatalog, by_model: bool, plan_per_month: float, days: int):
@@ -228,48 +264,66 @@ def summarize_usage(rows, overrides: dict, catalog: PriceCatalog, by_model: bool
     """
     prices: dict[str, Price | None] = {}
     grouped: dict[tuple, dict] = {}
-    totals = {
-        "requests": 0,
-        "errors": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "cached_tokens": 0,
-        "cost_in": 0.0,
-        "cost_out": 0.0,
-        "unpriced_tokens": 0,
-    }
+    totals = _empty_usage()
     for row in rows:
         model = row["model"]
         if model not in prices:
             prices[model] = resolve(model, overrides, catalog)
-        cost = token_cost(prices[model], row["prompt_tokens"], row["completion_tokens"], row["cached_tokens"])
+        costs = token_costs(prices[model], row["prompt_tokens"], row["completion_tokens"], row["cached_tokens"])
         key = (row["day"], row["client"], model) if by_model else (row["day"], row["client"])
-        out = grouped.setdefault(
-            key,
-            {
-                "day": row["day"],
-                "client": row["client"],
-                "model": model if by_model else None,
-                "requests": 0,
-                "errors": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "cached_tokens": 0,
-                "cost": 0.0,
-                "priced": True,
-            },
-        )
-        for field in ("requests", "errors", "prompt_tokens", "completion_tokens", "cached_tokens"):
-            out[field] += row[field] or 0
-            totals[field] += row[field] or 0
-        if cost is None:
-            out["priced"] = False
-            totals["unpriced_tokens"] += (row["prompt_tokens"] or 0) + (row["completion_tokens"] or 0)
-        else:
-            out["cost"] += cost[0] + cost[1]
-            totals["cost_in"] += cost[0]
-            totals["cost_out"] += cost[1]
-    totals["cost"] = totals["cost_in"] + totals["cost_out"]
+        fresh = {"day": row["day"], "client": row["client"], "model": model if by_model else None}
+        _add_usage(grouped.setdefault(key, {**fresh, **_empty_usage()}), row, costs)
+        _add_usage(totals, row, costs)
     totals["plan_cost"] = plan_per_month * days / PRICE_PER_MONTH_DAYS
     totals["savings"] = totals["cost"] - totals["plan_cost"]
     return list(grouped.values()), totals, prices
+
+
+def model_costs(rows, overrides: dict, catalog: PriceCatalog) -> tuple[list[dict], dict]:
+    """Usage rows -> one row per model, dearest first, plus their total."""
+    prices: dict[str, Price | None] = {}
+    grouped: dict[str, dict] = {}
+    total = _empty_usage()
+    for row in rows:
+        model = row["model"]
+        if model not in prices:
+            prices[model] = resolve(model, overrides, catalog)
+        costs = token_costs(prices[model], row["prompt_tokens"], row["completion_tokens"], row["cached_tokens"])
+        _add_usage(grouped.setdefault(model, {"model": model, **_empty_usage()}), row, costs)
+        _add_usage(total, row, costs)
+    return sorted(grouped.values(), key=lambda r: (-r["cost"], -r["prompt_tokens"], r["model"])), total
+
+
+def request_costs(rows, calls, overrides: dict, catalog: PriceCatalog) -> list[dict]:
+    """Request rows -> dicts with their tokens split and what each part cost, at today's prices. A council has no
+    model of its own to price: it adds up ``calls``, the rows of its members' and judge's calls (their ``parent``)."""
+    prices: dict[str, Price | None] = {}
+    by_parent: dict[str, list] = {}
+    for call in calls:
+        by_parent.setdefault(call["parent"], []).append(call)
+    out = []
+    for row in rows:
+        made = by_parent.get(row["id"], []) if row["council"] else []
+        used = _empty_usage()
+        for part in made or [row]:
+            model = part["target_model"] or part["model"]
+            if model not in prices:
+                prices[model] = resolve(model, overrides, catalog)
+            costs = token_costs(prices[model], part["prompt_tokens"], part["completion_tokens"], part["cached_tokens"])
+            _add_usage(used, {**dict(part), "requests": 0, "errors": 0}, costs)
+        tokens = used["prompt_tokens"] or used["completion_tokens"]
+        out.append(
+            {
+                **dict(row),
+                "calls": len(made),
+                "tokens_in": used["input_tokens"] if tokens else None,
+                "tokens_cached": used["cached_tokens"] if tokens else None,
+                "tokens_out": used["completion_tokens"] if tokens else None,
+                "cost_in": used["cost_in"],
+                "cost_cached": used["cost_cached"],
+                "cost_out": used["cost_out"],
+                "cost": used["cost"] if tokens else None,
+                "priced": used["priced"],
+            }
+        )
+    return out

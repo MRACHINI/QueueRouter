@@ -97,13 +97,13 @@ async def test_content_logging(make_stack):
 
         # reading needs the content permission, and is audited
         assert (await c.get(f"/admin/requests/{plain_id}/content")).status_code == 403
-        assert "/content" not in (await c.get("/admin/requests")).text.split('id="finished-requests"')[1]
+        assert (await c.get(f"/admin/api/requests/{plain_id}")).json()["has_content"] is False
         owner = store.get_admin(username="owner")
         store.update_admin(owner.id, "test", can_view_content=True)
         page = await c.get(f"/admin/requests/{plain_id}/content")
         assert page.status_code == 200 and "secret plan" in page.text
         assert any(r["action"] == "content.view" for r in store.list_audit(10))
-        assert f"/admin/requests/{plain_id}/content" in (await c.get("/admin/requests")).text
+        assert (await c.get(f"/admin/api/requests/{plain_id}")).json()["has_content"] is True
 
         await c.post(f"/admin/clients/{client_id}/purge-content", data={"csrf": csrf})
         assert store.get_content(plain_id) is None

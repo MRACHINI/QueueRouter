@@ -71,7 +71,7 @@ async def test_time_to_first_byte_recorded(make_stack):
         await login(c, stack.url)
         assert "First byte ms" in (await c.get("/admin/requests")).text
         usage = (await c.get("/admin/usage")).text
-        assert 'id="usage-live" data-stream="/admin/api/live"' in usage
+        assert 'id="usage-live" data-stream="/admin/api/live?view=brief"' in usage
     assert stack.app.state.stats.ttft_hist.n == 2
 
 

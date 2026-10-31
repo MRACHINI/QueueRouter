@@ -117,7 +117,5 @@ async def test_sent_user_agent_is_recorded_and_copyable(make_stack):
         assert [r["sent_user_agent"] for r in rows] == [sent, None]  # kept = nothing extra to show
         assert all(r["user_agent"] == "myapp/1.0" for r in rows)
 
-        page = (await c.get("/admin/requests")).text
-        assert 'data-copy-text="myapp/1.0"' in page
-        assert 'data-copy-text="edge &#34;client1&#34;"' in page  # the exact text, safely escaped
-        assert "sent: edge &#34;client1&#34;" in page
+        details = (await c.get(f"/admin/api/requests/{rows[0]['id']}")).json()
+        assert details["user_agent"] == "myapp/1.0" and details["sent_user_agent"] == sent

@@ -503,7 +503,9 @@ non-stream in flight → upstream call cancelled.
   `stream_options.include_usage=true` on streamed chat/completions requests if the client didn't (since v0.44.0) and
   leaves that usage-only chunk out of the client's stream; a client that set `include_usage` itself (true or false)
   gets what it asked for.
-- Each request row stores tokens + optional cost from `model_prices`.
+- Each request row stores tokens. Costs are worked out when a page is read, at today's prices (official ones, or
+  `model_prices`), so a changed price changes old rows too, the same on the Requests and Usage pages. A council has
+  no model of its own: its row adds up the calls made for it, which keep their own rows and alone count as usage.
 - ArliAI is flat-rate, so cost is optional — useful for pay-per-token upstreams added later.
 - Nightly rollup into `usage_daily`; UI charts per client / model / upstream / day.
 - Rate limits (TPM/TPD) and quotas read the same counters.
@@ -1402,6 +1404,22 @@ v0.48.0: admin accounts.
 - Turning 2FA on asks for the current password too (a stolen session alone could tie the account to another
   phone), and turning it on or off or making new recovery codes signs out the account's other sessions; this
   browser gets a new one.
+v0.49.0: faster, smaller, self-healing Requests and Usage pages.
+- Requests: the page opens empty and fetches 50 rows at a time, older ones as you scroll, a row's details when it's
+  opened, and its filter choices (kept 60 s). Every row is one line, with queued and running rows in the same table
+  (one header, which stays in view). In, cached and out tokens each show their cost, and the row its total.
+- One row renderer in admin.js: only changed rows are redrawn, and new rows wait behind a button while you're
+  scrolled down. Filters apply without a page load. /admin/requests/rows and the row templates are gone.
+- Usage: one tile per kind of token, always with the full number; a table of cost per model (1 day, 1 week or 30
+  days, UTC: daily totals have no hours); in, cached and out with their cost per day and per model. The page fetches
+  /admin/usage/body and changes only what differs.
+- Both pages use `?view=brief` on the live stream (requests in flight and the usage version, no database read).
+  The server sends something every 5 s; 15 s of silence reconnects with growing waits (up to 30 s), a hidden tab
+  holds no connection, every reconnection fetches what was missed, and a session that ended says so. EventSource
+  alone stops for good on an error page, and a connection lost during sleep can stay silent.
+- The admin pages' long reads have their own read-only database connection: they can't hold up requests or the
+  background loop by holding the store's lock.
+- "Last N days" on the Usage page counted N+1 calendar days against N days of plan price; it's N days, today included.
 
 ### Later (agreed, not scheduled)
 

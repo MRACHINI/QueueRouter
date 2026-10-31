@@ -973,6 +973,10 @@ def create_app(
         )
         return (queue.active, queue.queued, sum(stats.outcomes.values()), stages, usage_version[0], snapshot.mode)
 
+    def live_brief() -> dict:
+        """What the Requests and Usage pages need from the live stream. Unlike live_state, it reads no database."""
+        return {"inflight": inflight_view(), "usage_version": usage_version[0]}
+
     def live_state(full_history: bool = True) -> dict:
         state = queue_state()
         pool_names = {p.id: p.name for p in snapshot.pools.values()}
@@ -1213,6 +1217,7 @@ def create_app(
             lambda: app.state.restart(),
             lambda name: monthly.used(name),
             live_signature,
+            live_brief,
             context_table,
             upstream_models,
             model_choices,

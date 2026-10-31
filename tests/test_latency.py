@@ -82,8 +82,8 @@ async def test_streamed_requests_are_timed_and_shown(make_stack):
         assert '<polyline class="line l1"' in page.text or '<circle class="dot l1"' in page.text
         assert (await c.get("/admin/response-times?window=1h")).status_code == 200
         assert (await c.get("/admin/response-times?window=forever")).status_code == 200  # falls back to 24h
-        listing = (await c.get("/admin/requests")).text
-        assert "tok/s" in listing and f"token {streamed['first_token_ms']}" in listing
+        details = (await c.get(f"/admin/api/requests/{streamed['id']}")).json()
+        assert details["tokens_per_s"] > 10 and details["first_token_ms"] == streamed["first_token_ms"]
 
         alerts = stack.app.state.alerts
         store.save_alert_rule("slow_first_token", True, 0.001, 3600, 3600, "t")

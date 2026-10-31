@@ -179,8 +179,10 @@ async def test_members_carry_the_apps_identity_and_their_role(make_stack):
         assert sorted(row["role"] for row in helpers) == ["council judge", "council member 1/2", "council member 2/2"]
         assert all(row["parent"] == council["id"] and row["user_agent"] == "opencode/2.1.4" for row in helpers)
         assert all("x-opencode-session-id" in (row["client_headers"] or "") for row in helpers)
-        page = (await c.get("/admin/requests")).text
-        assert f"for {council['id']}" in page and "council member 1/2" in page
+        listed = (await c.get("/admin/api/requests")).json()["rows"]
+        assert any(r["parent"] == council["id"] and r["role"] == "council member 1/2" for r in listed)
+        shown = next(r for r in listed if r["id"] == council["id"])
+        assert shown["calls"] == 3  # its cost adds up its members and its judge
 
 
 async def test_one_member_and_many(make_stack):

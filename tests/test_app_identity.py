@@ -111,11 +111,11 @@ async def test_identifiers_on_the_requests_page(make_stack):
         ).status_code == 200
         await login(c, stack.url)
         for _ in range(50):
-            page = (await c.get("/admin/requests")).text
-            if "identifiers</summary>" in page:
+            rows = (await c.get("/admin/api/requests")).json()["rows"]
+            if rows:
                 break
             await asyncio.sleep(0.1)
-    assert "3 identifiers</summary>" in page
-    assert 'x-title:</span> <button type="button" class="copy-text inline" data-copy-text="myapp"' in page
-    assert "body.user:" in page and "x-stainless-package-version:" in page
-    assert stack.headers["Authorization"].split()[1] not in page  # the key is never recorded
+        details = (await c.get(f"/admin/api/requests/{rows[0]['id']}")).json()
+    ids = details["client_headers"]
+    assert len(ids) == 3 and ids["x-title"] == "myapp" and ids["body.user"] and ids["x-stainless-package-version"]
+    assert stack.headers["Authorization"].split()[1] not in json.dumps(details)  # the key is never recorded

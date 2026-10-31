@@ -1,0 +1,109 @@
+{# The Usage page's numbers: part of usage.html, and what the open page fetches to bring itself up to date #}
+{% macro usd(v) -%}
+{%- if v >= 100 -%}${{ "{:,.0f}".format(v) }}{%- elif v >= 1 -%}${{ "%.2f" | format(v) }}{%- else -%}${{ "%.4f" | format(v) }}{%- endif -%}
+{%- endmacro %}
+{% macro spend(label, tokens, cost) -%}
+<td data-label="{{ label }}" class="num"><span>{{ "{:,}".format(tokens) }}<span class="price">{% if tokens and cost %}{{ usd(cost) }}{% endif %}</span></span></td>
+{%- endmacro %}
+{% macro total(r) -%}
+<td data-label="Total" class="num">{% if r.cost or r.priced %}{{ usd(r.cost) }}{% else %}—{% endif %}{% if not r.priced %}<span class="muted" title="some tokens have no price">*</span>{% endif %}</td>
+{%- endmacro %}
+<section class="tiles">
+  <div class="tile"><div class="tile-label">Requests</div><div class="tile-value">{{ "{:,}".format(totals.requests) }}</div>
+    <div class="small muted">errors {{ "{:,}".format(totals.errors) }}</div></div>
+  <div class="tile"><div class="tile-label">Tokens in</div><div class="tile-value">{{ "{:,}".format(totals.input_tokens) }}</div>
+    <div class="small muted">≈ {{ usd(totals.cost_in) }}</div></div>
+  <div class="tile"><div class="tile-label">Cached in</div><div class="tile-value">{{ "{:,}".format(totals.cached_tokens) }}</div>
+    <div class="small muted">≈ {{ usd(totals.cost_cached) }}</div></div>
+  <div class="tile"><div class="tile-label">Tokens out</div><div class="tile-value">{{ "{:,}".format(totals.completion_tokens) }}</div>
+    <div class="small muted">≈ {{ usd(totals.cost_out) }}</div></div>
+  <div class="tile"><div class="tile-label">At official prices</div><div class="tile-value">{{ usd(totals.cost) }}</div>
+    <div class="small muted">what this would have cost</div></div>
+  <div class="tile">
+    {% if plan_per_month %}
+    {% if totals.savings >= 0 %}
+    <div class="tile-label">Saved</div>
+    <div class="tile-value good">{{ usd(totals.savings) }}</div>
+    {% else %}
+    <div class="tile-label">Plan costs more by</div>
+    <div class="tile-value">{{ usd(-totals.savings) }}</div>
+    {% endif %}
+    <div class="small muted">plan: {{ usd(totals.plan_cost) }} for {{ days }} day{{ "s" if days > 1 }}</div>
+    {% else %}
+    <div class="tile-label">Saved</div>
+    <div class="tile-value">—</div>
+    <div class="small muted">set the plan price on <a href="/admin/upstreams">Upstreams</a></div>
+    {% endif %}
+  </div>
+</section>
+{% if not catalog_loaded %}
+<p class="notice err small">Prices haven't been downloaded yet, so costs show $0. Check <a href="/admin/models#pricing">Models → Reference prices</a>.</p>
+{% elif totals.unpriced_tokens %}
+<p class="small muted">{{ "{:,}".format(totals.unpriced_tokens) }} tokens are from models without a price and aren't
+included — <a href="/admin/models#pricing">set a price</a>.</p>
+{% endif %}
+<p class="small muted">Estimates at the official per-token API prices (models.dev), not what you pay ArliAI. In = tokens that weren't cached.</p>
+
+<section class="charts">{% for chart in charts %}{{ chart | safe }}{% endfor %}</section>
+
+<div class="row between wrap">
+  <h2>Cost per model (UTC)</h2>
+  <div class="seg" role="group" aria-label="Range of this table">
+    {% for d in model_ranges %}<a href="/admin/usage?days={{ days }}{% if by_model %}&amp;by=model{% endif %}&amp;model_days={{ d }}" data-model-days="{{ d }}" {% if d == model_days %}aria-current="true"{% endif %}>{{ {1: "1 day", 7: "1 week", 30: "30 days"}[d] }}</a>{% endfor %}
+  </div>
+</div>
+<div class="table-wrap">
+<table class="cards dense">
+  <thead><tr><th>Model</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">In</th><th class="num">Cached</th><th class="num">Out</th><th class="num">Total</th></tr></thead>
+  <tbody>
+  {% for m in models %}
+  <tr>
+    <td data-label="Model" class="wrap-any">{{ m.model }}</td>
+    <td data-label="Requests" class="num">{{ "{:,}".format(m.requests) }}</td>
+    <td data-label="Errors" class="num">{{ "{:,}".format(m.errors) }}</td>
+    {{ spend("In", m.input_tokens, m.cost_in) }}
+    {{ spend("Cached", m.cached_tokens, m.cost_cached) }}
+    {{ spend("Out", m.completion_tokens, m.cost_out) }}
+    {{ total(m) }}
+  </tr>
+  {% else %}
+  <tr><td colspan="7" class="muted">No usage recorded in this period.</td></tr>
+  {% endfor %}
+  {% if models %}
+  <tr class="total">
+    <td data-label="Model">Total</td>
+    <td data-label="Requests" class="num">{{ "{:,}".format(model_total.requests) }}</td>
+    <td data-label="Errors" class="num">{{ "{:,}".format(model_total.errors) }}</td>
+    {{ spend("In", model_total.input_tokens, model_total.cost_in) }}
+    {{ spend("Cached", model_total.cached_tokens, model_total.cost_cached) }}
+    {{ spend("Out", model_total.completion_tokens, model_total.cost_out) }}
+    {{ total(model_total) }}
+  </tr>
+  {% endif %}
+  </tbody>
+</table>
+</div>
+
+<h2>Per day (UTC)</h2>
+<div class="table-wrap">
+<table class="cards dense">
+  <thead><tr><th>Day</th><th>Client</th>{% if by_model %}<th>Model</th>{% endif %}<th class="num">Requests</th><th class="num">Errors</th><th class="num">In</th><th class="num">Cached</th><th class="num">Out</th><th class="num">Total</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td data-label="Day">{{ r.day }}</td>
+    <td data-label="Client">{{ r.client }}</td>
+    {% if by_model %}<td data-label="Model" class="wrap-any">{{ r.model }}</td>{% endif %}
+    <td data-label="Requests" class="num">{{ "{:,}".format(r.requests) }}</td>
+    <td data-label="Errors" class="num">{{ "{:,}".format(r.errors) }}</td>
+    {{ spend("In", r.input_tokens, r.cost_in) }}
+    {{ spend("Cached", r.cached_tokens, r.cost_cached) }}
+    {{ spend("Out", r.completion_tokens, r.cost_out) }}
+    {{ total(r) }}
+  </tr>
+  {% else %}
+  <tr><td colspan="9" class="muted">No usage recorded in this period.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>

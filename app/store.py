@@ -465,6 +465,7 @@ CLIENT_DATA_TABLES = (
     "compaction_summaries",
 )
 
+CALLS_WITHIN_S = 6 * 3600  # a call for a request ends this close to it, at most (longest a request is tracked)
 REQUEST_COLUMNS = (
     "id",
     "ts",
@@ -721,6 +722,13 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.execute("PRAGMA busy_timeout=5000")
+        # The admin pages' long reads get their own connection: WAL lets them run beside writes, and they don't
+        # hold the lock requests and the background loop wait for.
+        self._read_lock = threading.Lock()
+        self._reader = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self._reader.row_factory = sqlite3.Row
+        self._reader.execute("PRAGMA query_only=ON")
+        self._reader.execute("PRAGMA busy_timeout=5000")
 
     @classmethod
     def open(cls, data_dir: str, secret_key: str | None) -> Store:
@@ -733,6 +741,8 @@ class Store:
         return store
 
     def close(self) -> None:
+        with self._read_lock:
+            self._reader.close()
         with self._lock:
             self._db.close()
 
@@ -761,6 +771,11 @@ class Store:
     def query(self, sql: str, params: tuple | dict = ()) -> list[sqlite3.Row]:
         with self._lock:
             return self._db.execute(sql, params).fetchall()
+
+    def read(self, sql: str, params: tuple | dict = ()) -> list[sqlite3.Row]:
+        """Like query, on the admin pages' own connection (see __init__)."""
+        with self._read_lock:
+            return self._reader.execute(sql, params).fetchall()
 
     def encrypt(self, value: str) -> str:
         return self.fernet.encrypt(value.encode("utf-8", "replace")).decode()  # a lone surrogate becomes "?"
@@ -1204,12 +1219,23 @@ class Store:
         oldest first."""
         return self.query("SELECT * FROM requests WHERE id = ? OR parent = ? ORDER BY ts", (request_id, request_id))
 
-    def list_requests(self, limit: int = 200, after: float | None = None, **filters: str) -> list[sqlite3.Row]:
-        """Newest first; ``after`` keeps rows written at or after that time (the page's live refresh)."""
+    def list_requests(
+        self,
+        limit: int = 200,
+        after: float | None = None,
+        before: tuple[float, str] | None = None,
+        columns: str = "*",
+        **filters: str,
+    ) -> list[sqlite3.Row]:
+        """Newest first; ``after`` keeps rows written at or after that time (the page's live refresh),
+        ``before`` the ones older than that row, given as (ts, id) (its next page)."""
         clauses, params = [], []
         if after is not None:
             clauses.append("ts >= ?")
             params.append(after)
+        if before is not None:
+            clauses.append("ts <= ? AND (ts < ? OR id < ?)")
+            params.extend((before[0], before[0], before[1]))
         for column in ("client", "outcome", "model", "upstream"):
             if value := filters.get(column):
                 clauses.append(f"{column} = ?")
@@ -1218,12 +1244,30 @@ class Store:
             clauses.append("(',' || tags || ',') LIKE ?")
             params.append(f"%,{tag},%")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        return self.query(f"SELECT * FROM requests {where} ORDER BY ts DESC LIMIT ?", (*params, limit))  # noqa: S608
+        sql = f"SELECT {columns} FROM requests {where} ORDER BY ts DESC, id DESC LIMIT ?"  # noqa: S608
+        return self.read(sql, (*params, limit))
+
+    def request_row(self, request_id: str) -> sqlite3.Row | None:
+        rows = self.read("SELECT * FROM requests WHERE id = ?", (request_id,))
+        return rows[0] if rows else None
+
+    def calls_of(self, parents: list[sqlite3.Row]) -> list[sqlite3.Row]:
+        """The calls QueueRouter made for these requests (council members and judge, orchestrator calls). They
+        finish around their parent, and the time range keeps this on the ts index."""
+        if not parents:
+            return []
+        marks = ",".join("?" for _ in parents)
+        times = [r["ts"] for r in parents]
+        return self.read(
+            "SELECT parent, model, target_model, prompt_tokens, completion_tokens, cached_tokens FROM requests "
+            f"WHERE ts BETWEEN ? AND ? AND parent IN ({marks})",  # noqa: S608
+            (min(times) - CALLS_WITHIN_S, max(times) + CALLS_WITHIN_S, *(r["id"] for r in parents)),
+        )
 
     def response_rows(self, since: float) -> list[sqlite3.Row]:
         """Timings of the requests finished since ``since``, by the model actually served (app/latency.py).
         Councils are left out: their members' and judge's calls are rows of their own."""
-        return self.query(
+        return self.read(
             "SELECT ts, COALESCE(target_model, model) AS model, upstream, outcome, headers_ms, first_token_ms, "
             "answer_ms, tokens_per_s, stall_ms, backoff_ms FROM requests "
             "WHERE ts >= ? AND upstream IS NOT NULL AND council IS NULL",
@@ -1234,14 +1278,14 @@ class Store:
         values = {
             column: [
                 r[0]
-                for r in self.query(
+                for r in self.read(
                     f"SELECT DISTINCT {column} FROM requests WHERE {column} IS NOT NULL ORDER BY {column} LIMIT 200"
                 )
             ]  # noqa: S608
             for column in ("client", "outcome", "model", "upstream")
         }
         tags: set[str] = set()
-        for (text,) in self.query("SELECT DISTINCT tags FROM requests WHERE tags IS NOT NULL AND tags != '' LIMIT 500"):
+        for (text,) in self.read("SELECT DISTINCT tags FROM requests WHERE tags IS NOT NULL AND tags != '' LIMIT 500"):
             tags.update(text.split(","))
         values["tag"] = sorted(tags)
         return values
@@ -1256,9 +1300,10 @@ class Store:
         )
 
     def usage(self, days: int = 30) -> list[sqlite3.Row]:
-        """Usage per day, client and model (cost is computed per model, then grouped)."""
-        since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86_400))
-        return self.query(
+        """Usage per day, client and model over the last ``days`` days, today included (cost is computed per
+        model, then grouped)."""
+        since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - (days - 1) * 86_400))
+        return self.read(
             "SELECT day, client, model, SUM(requests) AS requests, SUM(errors) AS errors, "
             "SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, "
             "SUM(cached_tokens) AS cached_tokens FROM usage_daily WHERE day >= ? "

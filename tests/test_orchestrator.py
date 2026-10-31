@@ -220,8 +220,8 @@ async def test_roles_and_trace_page(make_stack):
         trace = (await c.get(f"/admin/requests/{council['id']}/trace")).text
         assert "Timeline" in trace and "→ small-model" in trace and "orchestrator member small-model" in trace
         assert "secret project details" not in trace  # content logging is off: no excerpts
-        listing = (await c.get("/admin/requests")).text
-        assert f'href="/admin/requests/{council["id"]}/trace"' in listing
+        listed = (await c.get("/admin/api/requests")).json()["rows"]
+        assert next(r for r in listed if r["id"] == council["id"])["council"]
         assert "member = role: instructions" in (await c.get("/admin/aliases/new")).text
 
 

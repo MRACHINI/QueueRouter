@@ -1,47 +1,44 @@
 {% extends "base.html" %}
 {% block title %}Requests{% endblock %}
+{% block main_class %}container dense-page{% endblock %}
 {% block content %}
-<h1>Requests</h1>
-<p class="muted small">Latest {{ limit }} matching requests — metadata only, never prompts or responses.
-<code>finish_reason = length</code> means the reply was cut off by the token limit.</p>
-
-<form method="get" action="/admin/requests" class="card row wrap">
-  {% for key in ("client", "outcome", "model", "upstream", "tag") %}
-  <label class="inline-field">{{ key }}
-    <select name="{{ key }}">
-      <option value="">all</option>
-      {% for v in options[key] %}<option value="{{ v }}" {% if v == filters[key] %}selected{% endif %}>{{ v }}</option>{% endfor %}
+<div class="row between wrap">
+  <h1>Requests</h1>
+  <form method="get" action="/admin/requests" class="row wrap" id="request-filters">
+    <span class="live-status" id="requests-status" role="status"></span>
+    {% for key, label in (("client", "clients"), ("outcome", "outcomes"), ("model", "models"), ("upstream", "upstreams"), ("tag", "tags")) %}
+    <select name="{{ key }}" aria-label="{{ key }}">
+      <option value="">all {{ label }}</option>
+      {% if filters[key] %}<option value="{{ filters[key] }}" selected>{{ filters[key] }}</option>{% endif %}
     </select>
-  </label>
-  {% endfor %}
-  <button type="submit" class="secondary">Filter</button>
-  <a href="/admin/requests">reset</a>
-</form>
+    {% endfor %}
+    <noscript><button type="submit" class="secondary">Filter</button></noscript>
+    <a href="/admin/requests" id="filters-reset">reset</a>
+  </form>
+</div>
+<p class="muted small">Metadata only, never prompts or responses. Times in ms; costs at today's official prices. Click a row for its
+details. <code>length</code> under Finish means the reply was cut off by the token limit.</p>
+<noscript><p class="notice err">The request list needs JavaScript.</p></noscript>
 
-<section id="requests-live" data-stream="/admin/api/live">
-<h2>Now <span class="badge" id="now-count">0</span> <span class="small muted">queued and running, live</span></h2>
-<div class="table-wrap">
-<table class="cards">
-  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Upstream</th><th>Status</th><th>Queue ms</th><th>First byte ms</th><th>Upstream ms</th><th>In tokens</th><th>Out tokens</th><th>Finish</th></tr></thead>
-  <tbody id="now-requests"><tr><td colspan="11" class="muted">Loading…</td></tr></tbody>
+<section id="requests-live" data-stream="/admin/api/live?view=brief" data-rows="/admin/api/requests" data-filters="/admin/api/requests/filters" data-catch-up="{{ catch_up }}">
+<div class="table-wrap requests-wrap">
+<table class="cards dense requests-table">
+  <colgroup>
+    <col class="c-time"><col class="c-client"><col><col class="c-upstream"><col class="c-outcome">
+    <col class="c-ms"><col class="c-first"><col class="c-ms"><col class="c-in"><col class="c-cached"><col class="c-out">
+    <col class="c-total"><col class="c-finish">
+  </colgroup>
+  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Upstream</th><th>Outcome</th><th class="num" title="Queue ms">Queue</th><th class="num" title="First byte ms">First byte</th><th class="num" title="Upstream ms: from being sent to the last byte">Took</th><th class="num" title="Tokens that weren't cached">In</th><th class="num">Cached</th><th class="num">Out</th><th class="num">Total</th><th>Finish</th></tr></thead>
+  <tbody><tr class="section"><td colspan="13">Now <span class="badge" id="now-count">0</span> <span class="muted">queued and running</span></td></tr></tbody>
+  <tbody id="now-requests"></tbody>
+  <tbody><tr class="section"><td colspan="13">Finished</td></tr></tbody>
+  <tbody id="finished-requests"><tr class="placeholder"><td colspan="13" class="muted">Loading…</td></tr></tbody>
 </table>
 </div>
+<p class="small muted" id="requests-more"></p>
+<button type="button" class="new-rows" id="new-rows" hidden></button>
 </section>
 
-<h2>Finished</h2>
-
-<div class="table-wrap">
-<table class="cards">
-  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Upstream</th><th>Outcome</th><th>Queue ms</th><th>First byte ms</th><th>Upstream ms</th><th>In tokens</th><th>Out tokens</th><th>Finish</th></tr></thead>
-  <tbody id="finished-requests" data-rows="/admin/requests/rows" data-limit="{{ limit }}">
-  {% for r in rows %}
-  {% include "_request_row.html" %}
-  {% else %}
-  <tr><td colspan="11" class="muted">No requests logged yet.</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
 {% if user.can("admin") %}
 <form method="post" action="/admin/requests/purge-content" class="row" data-confirm="Delete every logged prompt and reply?">
   <input type="hidden" name="csrf" value="{{ csrf }}">

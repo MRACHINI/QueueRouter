@@ -44,7 +44,7 @@ from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
 from ..presets import ARLIAI_PLANS, PRESETS, plan_for
-from ..pricing import PriceCatalog, resolve, summarize_usage
+from ..pricing import PriceCatalog, model_costs, request_costs, resolve, summarize_usage
 from ..ranking import CREDIT, CREDIT_URL, Scores
 from ..ranking import INDEXES as RANK_INDEXES
 from ..slots import STRATEGIES
@@ -53,7 +53,7 @@ from ..store import ROLES, Store
 from ..thinking import EFFORTS as THINKING_EFFORTS
 from ..upstream import UA_MODES
 from ..websearch import PROVIDERS as SEARCH_PROVIDERS
-from .charts import lines, usage_charts
+from .charts import day_range, lines, usage_charts
 from .security import (
     AdminSession,
     Sessions,
@@ -85,6 +85,31 @@ ALIAS_ERRORS = {  # what was wrong in the alias editor
 }
 PRICING_DAYS = 30  # the price table lists models used this recently (plus offered and manually priced ones)
 LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes / send anyway
+REQUEST_LIST_COLUMNS = (
+    "id, ts, client, priority, model, target_model, upstream, status, outcome, retries, queue_ms, ttft_ms, "
+    "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, finish_reason, compaction, council, role, parent"
+)
+REQUEST_DETAILS = (  # what opens under a row; the list above stays small
+    "id",
+    "priority",
+    "stream",
+    "user_agent",
+    "sent_user_agent",
+    "tags",
+    "error",
+    "retries",
+    "total_ms",
+    "headers_ms",
+    "first_token_ms",
+    "answer_ms",
+    "tokens_per_s",
+    "stall_ms",
+    "backoff_ms",
+    "compaction",
+    "council",
+    "role",
+    "parent",
+)
 HERE = os.path.dirname(__file__)
 
 # Short, fixed flash messages (passed by code in the redirect URL, never as free text).
@@ -320,6 +345,7 @@ class AdminContext:
     restart: Callable[[], None]
     month_usage: Callable[[str], object]
     live_signature: Callable[[], tuple]
+    live_brief: Callable[[], dict]
     context_table: Callable[[], list[dict]]
     upstream_models: Callable[[int], Awaitable[list[str] | None]]
     model_choices: Callable[[], list[dict]]
@@ -338,7 +364,6 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     sessions = Sessions(store, bootstrap)
     templates = Jinja2Templates(directory=os.path.join(HERE, "templates"))
     templates.env.filters["expiry_date"] = _expiry_date
-    templates.env.filters["fromjson"] = _from_json
     login_guard = AuthGuard(limit_per_minute=5, block_s=300)
     pending_2fa: dict[str, tuple[int, float, str]] = {}  # ticket -> (user id, expires, next)
     pending_setup: dict[str, tuple[str, float]] = {}  # session -> (new TOTP secret, expires)
@@ -576,8 +601,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def api_live(request: Request):
         """Server-sent events: the dashboard state whenever it changes (checked 4x a second), and
         every few seconds anyway. The first message has the full chart history, later ones the
-        latest points only."""
+        latest points only. ``?view=brief`` sends only what the Requests and Usage pages use."""
         require(request, "viewer")
+        brief = request.query_params.get("view") == "brief"
 
         async def events():
             last_signature, last_sent, first = None, 0.0, True
@@ -591,7 +617,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                         return
                 signature = ctx.live_signature()
                 if signature != last_signature or now - last_sent >= LIVE_HEARTBEAT_S:
-                    state = ctx.live_state(full_history=first)
+                    state = ctx.live_brief() if brief else ctx.live_state(full_history=first)
                     yield f"data: {json.dumps(state)}\n\n"
                     first, last_signature, last_sent = False, signature, now
                 await asyncio.sleep(LIVE_CHECK_S)
@@ -1343,71 +1369,109 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         }
         return page(request, "request_trace.html", session, r=main, timeline=timeline, calls=calls, totals=totals)
 
-    REQUEST_ROWS = 300  # shown on the Requests page
-
-    async def request_rows(request: Request, session: AdminSession, after: float | None = None):
-        filters = {k: request.query_params.get(k, "") for k in ("client", "outcome", "model", "upstream", "tag")}
-        rows = await asyncio.to_thread(store.list_requests, REQUEST_ROWS, after, **filters)
-        with_content = (
-            await asyncio.to_thread(store.content_ids, [r["id"] for r in rows])
-            if session.user.can("admin") and session.user.can_view_content  # as the content page requires
-            else set()
-        )
-        return filters, rows, with_content
+    REQUEST_PAGE, REQUEST_CATCH_UP = 50, 300  # rows fetched at a time / at most after being away
+    REQUEST_FILTERS = ("client", "outcome", "model", "upstream", "tag")
+    FILTER_CHOICES_S = 60  # the choices scan the table, so they're kept this long
+    filter_choices: dict = {"at": None, "values": {}}
 
     @app.get("/admin/requests")
     async def requests_log(request: Request):
+        """Only the page: its rows and filter choices come from the /admin/api/requests calls below, so it opens at
+        once however long the log is."""
         session = require(request, "viewer")
-        filters, rows, with_content = await request_rows(request, session)
-        options = await asyncio.to_thread(store.request_filter_values)
-        return page(
-            request,
-            "requests.html",
-            session,
-            rows=rows,
-            filters=filters,
-            options=options,
-            with_content=with_content,
-            limit=REQUEST_ROWS,
-        )
+        filters = {k: request.query_params.get(k, "") for k in REQUEST_FILTERS}
+        return page(request, "requests.html", session, filters=filters, catch_up=REQUEST_CATCH_UP)
 
-    @app.get("/admin/requests/rows")
-    async def requests_log_rows(request: Request):
-        """Only the rows written since ``after`` (same filters): the open page adds them as requests finish,
-        instead of fetching the whole page again each time."""
-        session = require(request, "viewer")
+    @app.get("/admin/api/requests")
+    async def api_requests(request: Request):
+        """Finished requests, newest first, with what each cost: a page of the newest, the page older than a row
+        (``?before=<ts>&before_id=<id>``), or the ones written since a time (``?after=<ts>``, the row at that time
+        included). ``more`` says that there are further rows beyond these."""
+        require(request, "viewer")
+        query = request.query_params
+        filters = {k: query.get(k, "") for k in REQUEST_FILTERS}
         try:
-            after = float(request.query_params.get("after", ""))
+            after = float(query["after"]) if "after" in query else None
+            before = (float(query["before"]), query.get("before_id", "")) if "before" in query else None
         except ValueError:
-            return JSONResponse({"error": {"message": "after must be a timestamp", "code": 400}}, status_code=400)
-        _, rows, with_content = await request_rows(request, session, after)
-        return templates.TemplateResponse(request, "requests_rows.html", {"rows": rows, "with_content": with_content})
+            message = {"error": {"message": "after and before must be timestamps", "code": 400}}
+            return JSONResponse(message, status_code=400)
+        limit = REQUEST_CATCH_UP if after is not None else REQUEST_PAGE
 
-    async def usage_summary(request: Request):
+        def load() -> dict:
+            rows = store.list_requests(limit + 1, after, before, REQUEST_LIST_COLUMNS, **filters)
+            calls = store.calls_of([r for r in rows[:limit] if r["council"]])
+            costed = request_costs(rows[:limit], calls, store.list_model_prices(), ctx.prices)
+            return {"rows": costed, "more": len(rows) > limit}
+
+        return JSONResponse(await asyncio.to_thread(load))
+
+    @app.get("/admin/api/requests/filters")
+    async def api_request_filters(request: Request):
+        """What the Requests page's filters can choose from."""
+        require(request, "viewer")
+        now = time.monotonic()
+        if filter_choices["at"] is None or now - filter_choices["at"] > FILTER_CHOICES_S:
+            values = await asyncio.to_thread(store.request_filter_values)
+            filter_choices.update(at=now, values=values)
+        return JSONResponse(filter_choices["values"])
+
+    @app.get("/admin/api/requests/{request_id}")
+    async def api_request(request_id: str, request: Request):
+        """What opens under a row on the Requests page."""
+        session = require(request, "viewer")
+        row = await asyncio.to_thread(store.request_row, request_id)
+        if row is None:
+            return JSONResponse({"error": {"message": "that request is gone", "code": 404}}, status_code=404)
+        details = {key: row[key] for key in REQUEST_DETAILS}
+        details["client_headers"] = _from_json(row["client_headers"])
+        may_read = session.user.can("admin") and session.user.can_view_content  # as the content page requires
+        has_content = may_read and request_id in await asyncio.to_thread(store.content_ids, [request_id])
+        return JSONResponse({**details, "has_content": has_content})
+
+    MODEL_RANGES = (1, 7, 30)  # days the Usage page's table of models can show
+
+    async def usage_summary(request: Request) -> dict:
         days = _clamp_int(request.query_params.get("days"), 30, 1, 366)
         by_model = request.query_params.get("by") == "model"
-        rows = await asyncio.to_thread(store.usage, days)
-        overrides = await asyncio.to_thread(store.list_model_prices)
-        plan_per_month = sum(p.monthly_price or 0 for p in store.list_pools())
-        rows, totals, _ = summarize_usage(rows, overrides, ctx.prices, by_model, plan_per_month, days)
-        return days, by_model, rows, totals, plan_per_month
+        model_days = _clamp_int(request.query_params.get("model_days"), 30, 1, 30)
+        model_days = model_days if model_days in MODEL_RANGES else 30
+
+        def load() -> dict:
+            stored = store.usage(max(days, model_days))
+            overrides = store.list_model_prices()
+            plan_per_month = sum(p.monthly_price or 0 for p in store.list_pools())
+            shown = [r for r in stored if r["day"] >= day_range(days)[0]]
+            rows, totals, _ = summarize_usage(shown, overrides, ctx.prices, by_model, plan_per_month, days)
+            models, model_total = model_costs(
+                [r for r in stored if r["day"] >= day_range(model_days)[0]], overrides, ctx.prices
+            )
+            return {
+                "days": days,
+                "by_model": by_model,
+                "rows": rows,
+                "totals": totals,
+                "plan_per_month": plan_per_month,
+                "models": models,
+                "model_total": model_total,
+                "model_days": model_days,
+                "model_ranges": MODEL_RANGES,
+                "catalog_loaded": bool(ctx.prices.prices),
+                "charts": usage_charts(rows, days),
+            }
+
+        return await asyncio.to_thread(load)
 
     @app.get("/admin/usage")
     async def usage(request: Request):
         session = require(request, "viewer")
-        days, by_model, rows, totals, plan_per_month = await usage_summary(request)
-        return page(
-            request,
-            "usage.html",
-            session,
-            rows=rows,
-            days=days,
-            by_model=by_model,
-            totals=totals,
-            plan_per_month=plan_per_month,
-            catalog_loaded=bool(ctx.prices.prices),
-            charts=usage_charts(rows, days),
-        )
+        return page(request, "usage.html", session, **await usage_summary(request))
+
+    @app.get("/admin/usage/body")
+    async def usage_body(request: Request):
+        """The Usage page's numbers alone, for the open page to bring up to date."""
+        require(request, "viewer")
+        return templates.TemplateResponse(request, "usage_body.html", await usage_summary(request))
 
     @app.get("/admin/response-times")
     async def response_times(request: Request):
@@ -1445,7 +1509,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     @app.get("/admin/usage.csv")
     async def usage_csv(request: Request):
         require(request, "viewer")
-        days, by_model, rows, _, _ = await usage_summary(request)
+        summary = await usage_summary(request)
+        days, by_model = summary["days"], summary["by_model"]
         out = io.StringIO()
         writer = csv.writer(out)
         columns = [
@@ -1460,7 +1525,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "cost_usd",
         ]
         writer.writerow(columns)
-        for r in rows:
+        for r in summary["rows"]:
             values = {**r, "cost_usd": f"{r['cost']:.4f}" if r["priced"] else ""}
             writer.writerow([_csv_cell(values[c]) for c in columns])
         return Response(

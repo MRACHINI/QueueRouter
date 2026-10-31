@@ -105,8 +105,12 @@ from a **web admin UI**.
   automatic copies in `/data/backups`, and restore from an upload or a listed copy — checked first,
   then QueueRouter restarts itself to load it (the previous data is kept).
 - **Real-time admin**: the dashboard is pushed live (server-sent events) with a **Now** panel of
-  requests in flight (queued/running, elapsed, time to first byte) and a 1-second chart; the Usage
-  page refreshes itself as requests finish. Time to first byte is recorded per request.
+  requests in flight (queued/running, elapsed, time to first byte) and a 1-second chart. The Requests and
+  Usage pages update themselves as requests finish, and reconnect and catch up by themselves after a
+  restart or when the computer wakes. Time to first byte is recorded per request.
+- **Costs**: at official prices, split into normal input, cached input and output, for each request (Requests
+  page), per client and day, and per model over 1 day, 1 week or 30 days (Usage page). A council's cost adds up
+  its members and judge. Click a row on the Requests page for its identifiers, User-Agents and timings.
 - **Charts**: live running/queued chart on the dashboard (last 30 minutes); tokens, requests and
   cost per day on the Usage page (server-rendered SVG, no scripts from elsewhere).
 - **Response times** per model and upstream: the provider's own timings for streamed requests (its queue,

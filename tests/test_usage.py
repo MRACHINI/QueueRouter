@@ -42,10 +42,11 @@ async def test_request_log_and_usage_pages(make_stack):
         await c.post("/v1/chat/completions", headers=stack.headers, json=chat("c", mock_status=400))
         await flushed(stack, 3)
 
-        page = await c.get("/admin/requests")
-        assert page.status_code == 200 and "length" in page.text and "mock-model" in page.text
-        errors_only = await c.get("/admin/requests?outcome=error")
-        assert errors_only.text.count("<time data-ts") == 1
+        assert (await c.get("/admin/requests")).status_code == 200
+        rows = (await c.get("/admin/api/requests")).json()["rows"]
+        assert [r["finish_reason"] for r in rows if r["finish_reason"] == "length"] == ["length"]
+        assert {r["model"] for r in rows} == {"mock-model"}
+        assert len((await c.get("/admin/api/requests?outcome=error")).json()["rows"]) == 1
 
         usage = await c.get("/admin/usage")
         assert usage.status_code == 200 and ">3<" in usage.text  # 3 requests
@@ -65,21 +66,24 @@ async def test_requests_page_fetches_only_new_rows(make_stack):
         await flushed(stack, 2)
         error_row, old = await asyncio.to_thread(store.list_requests, 10)
         page = (await c.get("/admin/requests")).text
-        assert f'<tr data-id="{old["id"]}">' in page and 'data-rows="/admin/requests/rows"' in page
+        assert old["id"] not in page and 'data-rows="/admin/api/requests"' in page  # opens without its rows
 
         await c.post("/v1/chat/completions", headers=stack.headers, json=chat("new"))
         await flushed(stack, 3)
         new = (await asyncio.to_thread(store.list_requests, 1))[0]
-        rows = await c.get(f"/admin/requests/rows?after={error_row['ts']}")
-        assert rows.status_code == 200 and "<html" not in rows.text  # just the rows, not a page
-        assert rows.text.count("<tr data-id=") == 2  # the newest shown (same time counts) and the new one
-        assert new["id"] in rows.text and error_row["id"] in rows.text and old["id"] not in rows.text
-        assert (await c.get(f"/admin/requests/rows?after={new['ts'] + 1}")).text.strip() == ""
-        filtered = (await c.get("/admin/requests/rows?after=0&outcome=error")).text
-        assert filtered.count("<tr data-id=") == 1 and error_row["id"] in filtered
-        assert (await c.get("/admin/requests/rows?after=soon")).status_code == 400
+
+        async def ids(query):
+            return [r["id"] for r in (await c.get(f"/admin/api/requests?{query}")).json()["rows"]]
+
+        assert await ids(f"after={error_row['ts']}") == [new["id"], error_row["id"]]  # the newest shown counts too
+        assert await ids(f"after={new['ts'] + 1}") == []
+        assert await ids("after=0&outcome=error") == [error_row["id"]]
+        assert await ids(f"before={error_row['ts']}&before_id={error_row['id']}") == [old["id"]]
+        assert (await c.get("/admin/api/requests?after=soon")).status_code == 400
+        assert (await c.get("/admin/api/requests?before=soon")).status_code == 400
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as anonymous:
-        assert (await anonymous.get("/admin/requests/rows?after=0")).status_code in (303, 401)
+        for path in ("/admin/api/requests", "/admin/api/requests/filters", f"/admin/api/requests/{new['id']}"):
+            assert (await anonymous.get(path)).status_code in (303, 401)
 
 
 async def test_no_content_is_stored(make_stack):

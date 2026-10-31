@@ -99,7 +99,8 @@ async def test_alias_compacts_before_sending(make_stack):
     assert any((r["compaction"] or "").startswith("trim ") for r in rows)
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
-        assert "compacted: trim" in (await c.get("/admin/requests")).text
+        listed = (await c.get("/admin/api/requests")).json()["rows"]
+        assert any((r["compaction"] or "").startswith("trim ") for r in listed)
 
 
 async def test_request_lists_split_tokens(make_stack):
@@ -109,16 +110,12 @@ async def test_request_lists_split_tokens(make_stack):
         assert (await c.post("/v1/chat/completions", headers=stack.headers, json=chat)).status_code == 200
         await login(c, stack.url)
         for _ in range(50):
-            page = (await c.get("/admin/requests")).text
-            if 'data-label="In tokens"' in page:
+            rows = (await c.get("/admin/api/requests")).json()["rows"]
+            if rows:
                 break
             await asyncio.sleep(0.1)
-    assert "<th>In tokens</th><th>Out tokens</th>" in page
-    assert (
-        '<td data-label="In tokens" title="4 of them cached">10 <span class="muted small">(4 cached)</span></td>'
-        in page
-    )
-    assert '<td data-label="Out tokens">5</td>' in page
+    row = rows[0]
+    assert (row["tokens_in"], row["tokens_cached"], row["tokens_out"]) == (6, 4, 5)  # 10 in, 4 of them cached
 
 
 def agent_turn(rounds: int, chars: int = 4_000) -> list[dict]:
@@ -166,7 +163,8 @@ async def test_requests_page_lists_queued_and_running(make_stack):
         await asyncio.sleep(0.5)
         await login(c, stack.url)
         page = (await c.get("/admin/requests")).text
-        assert 'id="requests-live" data-stream="/admin/api/live"' in page and 'id="finished-requests"' in page
+        assert 'id="requests-live" data-stream="/admin/api/live?view=brief"' in page
+        assert 'id="finished-requests"' in page
         live = (await c.get("/admin/api/stats")).json()["inflight"]
         assert sorted(r["stage"] for r in live) == ["queued", "running"]
         row = live[0]

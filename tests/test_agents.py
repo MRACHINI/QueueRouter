@@ -98,7 +98,11 @@ async def test_tags_recorded_and_filterable(make_stack):
         rows = await asyncio.to_thread(store.list_requests, 10, tag="project-x")
         assert [r["tags"] for r in rows] == ["team-a,project-x,nightly"]
         page = (await c.get("/admin/requests?tag=nightly")).text
-        assert "#project-x" in page and page.count("<time data-ts") == 1
+        assert 'value="nightly" selected' in page
+        listed = (await c.get("/admin/api/requests?tag=nightly")).json()["rows"]
+        assert len(listed) == 1
+        assert "project-x" in (await c.get("/admin/api/requests/filters")).json()["tag"]
+        assert (await c.get(f"/admin/api/requests/{listed[0]['id']}")).json()["tags"] == "team-a,project-x,nightly"
         csrf = csrf_of(page)
         assert csrf
     assert "x-queuerouter-tags" not in stack.mock["last_headers"]

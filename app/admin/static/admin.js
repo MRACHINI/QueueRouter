@@ -478,37 +478,190 @@ function liveDashboard(root) {
   setInterval(tick, 250);
 }
 
-// Usage page: when the live stream says new usage was written, reload this page's numbers,
-// charts and table in place (same filters), without a full page reload.
+// The live connection of the Requests and Usage pages. A browser's EventSource only retries by itself after a
+// network error: an error page (a 502 while QueueRouter restarts) ends it for good, and a connection that died while
+// the computer slept may never say so. So the server sends something every few seconds and silence reconnects,
+// waiting longer each time; a hidden tab holds no connection; and every (re)connection calls resync() to fetch what
+// was missed.
+function liveStream(url, status, { message, resync }) {
+  const SILENCE_MS = 15000;
+  const FIRST_WAIT_MS = 1000;
+  const MAX_WAIT_MS = 30000;
+  let source = null;
+  let heard = 0;
+  let wait = FIRST_WAIT_MS;
+  let timer = null;
+  let behind = true; // resync on the next message
+  let ended = false;
+  const say = (text, state) => {
+    if (!status || ended) return;
+    status.textContent = text;
+    status.dataset.state = state;
+  };
+  const close = () => {
+    clearTimeout(timer);
+    if (source) source.close();
+    source = null;
+  };
+  const retry = () => {
+    close();
+    behind = true;
+    say("Reconnecting…", "down");
+    resync(); // also how a page finds out that the session has ended
+    timer = setTimeout(open, wait);
+    wait = Math.min(wait * 2, MAX_WAIT_MS);
+  };
+  function open() {
+    close();
+    if (ended || document.hidden) return;
+    heard = Date.now();
+    const stream = new EventSource(url);
+    source = stream;
+    stream.onmessage = (event) => {
+      heard = Date.now();
+      wait = FIRST_WAIT_MS;
+      if (behind) {
+        behind = false;
+        say("Live", "live");
+        resync();
+      }
+      message(JSON.parse(event.data));
+    };
+    stream.onerror = () => {
+      if (stream !== source) return;
+      if (stream.readyState === EventSource.CLOSED) {
+        retry();
+      } else { // the browser is already trying again
+        behind = true;
+        say("Reconnecting…", "down");
+      }
+    };
+  }
+  setInterval(() => {
+    if (source && !document.hidden && Date.now() - heard > SILENCE_MS) retry();
+  }, 3000);
+  const back = () => {
+    behind = true;
+    wait = FIRST_WAIT_MS;
+    open();
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) close();
+    else back();
+  });
+  window.addEventListener("online", back);
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) back();
+  });
+  open();
+  return {
+    say,
+    signedOut() {
+      if (ended) return;
+      ended = true;
+      close();
+      const link = document.createElement("a");
+      link.href = `/admin/login?next=${encodeURIComponent(window.location.pathname)}`;
+      link.textContent = "Signed out: sign in again";
+      if (status) {
+        status.dataset.state = "down";
+        status.replaceChildren(link);
+      }
+    },
+  };
+}
+
+// A GET for those pages: the response, or null if it failed (the next update tries again).
+async function liveGet(url, stream, options) {
+  const response = await fetch(url, { credentials: "same-origin", ...options });
+  if (response.redirected || response.status === 401) {
+    stream.signedOut();
+    return null;
+  }
+  return response.ok ? response : null;
+}
+
+// Makes ``node`` look like ``fresh`` by changing only what differs: nothing jumps, and hover and selection stay.
+function morph(node, fresh) {
+  if (node.nodeType !== fresh.nodeType || node.nodeName !== fresh.nodeName) {
+    node.replaceWith(fresh);
+  } else if (node.nodeType !== Node.ELEMENT_NODE) {
+    if (node.nodeValue !== fresh.nodeValue) node.nodeValue = fresh.nodeValue;
+  } else {
+    for (const { name, value } of [...fresh.attributes]) {
+      if (node.getAttribute(name) !== value) node.setAttribute(name, value);
+    }
+    for (const { name } of [...node.attributes]) {
+      if (!fresh.hasAttribute(name)) node.removeAttribute(name);
+    }
+    morphChildren(node, fresh);
+  }
+}
+
+function morphChildren(node, fresh) {
+  const before = [...node.childNodes];
+  const after = [...fresh.childNodes];
+  after.forEach((child, i) => (before[i] ? morph(before[i], child) : node.append(child)));
+  before.slice(after.length).forEach((child) => child.remove());
+}
+
+// Usage page: when new usage is written its numbers are fetched and only what changed is touched; the period and
+// range controls work the same way, without a page load.
 function liveUsage(root) {
-  const status = document.getElementById("usage-status");
-  if (!window.EventSource || !root.dataset.stream) return;
+  const form = document.getElementById("usage-filters");
+  const csv = document.getElementById("usage-csv");
+  const query = new URLSearchParams(window.location.search);
   let version = null;
   let timer = null;
-  const reload = async () => {
+  let loading = false;
+  let again = false;
+  const refresh = async () => {
+    clearTimeout(timer);
     timer = null;
+    if (loading) {
+      again = true;
+      return;
+    }
+    loading = true;
     try {
-      const response = await fetch(window.location.href, { credentials: "same-origin" });
-      if (!response.ok || response.redirected) return;
-      const page = new DOMParser().parseFromString(await response.text(), "text/html");
-      const fresh = page.getElementById("usage-live");
-      if (fresh) {
-        root.replaceChildren(...fresh.childNodes);
-        if (status) status.textContent = "Updated " + new Date().toLocaleTimeString() + " · updates live as requests finish.";
+      const response = await liveGet(`${root.dataset.body}?${query}`, stream);
+      if (response) {
+        const fresh = document.createElement("template");
+        fresh.innerHTML = await response.text();
+        morphChildren(root, fresh.content);
+        stream.say(`Live · updated ${new Date().toLocaleTimeString()}`, "live");
       }
     } catch (_) {
-      /* next update tries again */
+      /* the next update tries again */
+    }
+    loading = false;
+    if (again) {
+      again = false;
+      refresh();
     }
   };
-  const source = new EventSource(root.dataset.stream);
-  source.onmessage = (event) => {
-    const next = JSON.parse(event.data).usage_version;
-    if (version !== null && next !== version && !timer) timer = setTimeout(reload, 1000); // batch bursts
-    version = next;
+  const stream = liveStream(root.dataset.stream, document.getElementById("usage-status"), {
+    message(state) {
+      if (version !== null && state.usage_version !== version && !timer) timer = setTimeout(refresh, 300); // batch bursts
+      version = state.usage_version;
+    },
+    resync: refresh,
+  });
+  const choose = (name, value) => {
+    if (value) query.set(name, value);
+    else query.delete(name);
+    window.history.replaceState(null, "", `${window.location.pathname}?${query}`);
+    if (csv) csv.href = `/admin/usage.csv?${query}`;
+    refresh();
   };
-  source.onerror = () => {
-    if (status) status.textContent = "Live updates paused — reconnecting…";
-  };
+  form.addEventListener("change", (event) => choose(event.target.name, event.target.value));
+  form.addEventListener("submit", (event) => event.preventDefault());
+  root.addEventListener("click", (event) => {
+    const link = event.target.closest("[data-model-days]");
+    if (!link) return;
+    event.preventDefault();
+    choose("model_days", link.dataset.modelDays);
+  });
 }
 
 // Local times for <time data-ts="unix seconds">.
@@ -520,184 +673,526 @@ function localTimes(scope) {
   });
 }
 
-// Requests page: a live "Now" table (queued and running requests, same columns as the list below,
-// filtered the same way), and the finished list refreshed in place as requests finish.
+// Requests page. The page itself is empty: the newest rows are fetched, older ones as you scroll to them, and a row's
+// details when you open it. Queued and running requests come from the live stream, and only the rows that changed
+// are redrawn; finished ones are fetched as they're written, and wait behind a button while you're scrolled down.
 function liveRequests(root) {
-  if (!window.EventSource || !root.dataset.stream) return;
-  const body = document.getElementById("now-requests");
-  const count = document.getElementById("now-count");
-  const filters = new URLSearchParams(window.location.search);
-  const want = (key) => filters.get(key) || "";
-  const matches = (r) =>
-    !want("outcome") &&
-    (!want("client") || r.client === want("client")) &&
-    (!want("model") || r.requested_model === want("model") || r.target_model === want("model")) &&
-    (!want("upstream") || r.upstream === want("upstream")) &&
-    (!want("tag") || (r.tags || "").split(",").includes(want("tag")));
+  const COLUMNS = 13;
+  const AT_TOP_PX = 150;
+  const nowBody = document.getElementById("now-requests");
+  const nowCount = document.getElementById("now-count");
+  const list = document.getElementById("finished-requests");
+  const placeholder = list.querySelector(".placeholder");
+  const note = document.getElementById("requests-more");
+  const newRows = document.getElementById("new-rows");
+  const form = document.getElementById("request-filters");
+  const catchUp = Number(root.dataset.catchUp) || 300;
+  const query = new URLSearchParams(window.location.search);
+  const want = (key) => query.get(key) || "";
+  const opened = new Set(); // ids of open rows, kept open as they're redrawn and when they finish
+  const topbar = document.querySelector(".topbar");
+  const sticky = () => root.style.setProperty("--topbar", `${topbar.offsetHeight}px`); // the table's header stays under it
+  sticky();
+  new ResizeObserver(sticky).observe(topbar);
+
   const el = (tag, className, text) => {
     const node = document.createElement(tag);
     if (className) node.className = className;
     if (text !== undefined) node.textContent = text;
     return node;
   };
-  const td = (label, ...children) => {
-    const cell = el("td");
+  const td = (label, className, ...children) => {
+    const cell = el("td", className);
     cell.dataset.label = label;
     cell.append(...children);
     return cell;
   };
-  const copyLine = (text, prefix, title) => {
-    const line = el("div", "small muted mono");
-    const button = el("button", "copy-text", prefix + text);
-    button.type = "button";
-    button.dataset.copyText = text;
-    button.title = title;
-    line.append(button);
-    return line;
+  const text = (label, value) => {
+    const cell = td(label, "", value || "—");
+    if (value) cell.title = value;
+    return cell;
   };
-  const seconds = (ms) => (ms === null || ms === undefined ? "—" : String(Math.round(ms)));
-  let started = 0; // performance.now() when the last update arrived
-  const openIds = new Set();
-  let rows = [];
+  const milliseconds = (ms) => (ms === null || ms === undefined ? "—" : String(Math.round(ms)));
+  const money = (v) => {
+    if (v >= 100) return `$${Math.round(v).toLocaleString("en-US")}`;
+    if (v >= 1) return `$${v.toFixed(2)}`;
+    return v > 0 && v < 0.00005 ? "<$0.0001" : `$${v.toFixed(4)}`;
+  };
+  const spend = (label, tokens, cost) => {
+    if (tokens === null || tokens === undefined) return td(label, "num", "—");
+    const value = el("span", "", Number(tokens).toLocaleString("en-US"));
+    value.append(el("span", "price", tokens && cost ? money(cost) : ""));
+    return td(label, "num", value);
+  };
+  const clock = (ts) => {
+    const date = new Date(ts * 1000);
+    const two = (n) => String(n).padStart(2, "0");
+    const time = `${two(date.getHours())}:${two(date.getMinutes())}`;
+    if (date.toDateString() === new Date().toDateString()) return `${time}:${two(date.getSeconds())}`;
+    return `${two(date.getMonth() + 1)}-${two(date.getDate())} ${time}`;
+  };
+  const timeCell = (r) => {
+    const button = el("button", "row-toggle", "▸");
+    button.type = "button";
+    button.setAttribute("aria-label", "Details");
+    button.setAttribute("aria-expanded", "false");
+    const time = el("time", "", clock(r.ts));
+    time.title = new Date(r.ts * 1000).toLocaleString();
+    const value = el("span");
+    value.append(button, time);
+    return td("Time", "", value);
+  };
+  const clientCell = (r) => {
+    const cell = text("Client", r.client);
+    if (r.priority && r.priority !== "normal") cell.append(" ", el("span", `badge ${r.priority}`, r.priority));
+    return cell;
+  };
+  const modelCell = (r, name) => {
+    const marks = [];
+    if (r.council) marks.push("council");
+    if (r.compaction) marks.push("compacted");
+    if (r.role) marks.push(r.role);
+    const shown = r.target_model && r.target_model !== name ? `${name || "—"} → ${r.target_model}` : name || "—";
+    const cell = td("Model", "");
+    cell.title = [shown, ...marks].join(" · ");
+    for (const mark of marks) cell.append(el("span", "badge", mark), " ");
+    cell.append(shown);
+    return cell;
+  };
 
-  function render() {
-    const now = performance.now();
-    const shown = rows.filter(matches);
-    if (count) count.textContent = String(shown.length);
-    if (!shown.length) {
-      const empty = el("tr");
-      const cell = el("td", "muted", "Nothing queued or running.");
-      cell.colSpan = 11;
-      empty.append(cell);
-      body.replaceChildren(empty);
-      return;
+  // What opens under a row: for a finished request fetched then, for a running one what the stream sent.
+  const describe = (box, d) => {
+    const line = (name, ...value) => {
+      const row = el("div");
+      row.append(el("span", "muted", `${name}: `), ...value);
+      box.append(row);
+    };
+    const copy = (value) => {
+      const button = el("button", "copy-text inline mono", value);
+      button.type = "button";
+      button.dataset.copyText = value;
+      button.title = "Click to copy";
+      return button;
+    };
+    box.replaceChildren();
+    line("Id", copy(d.id));
+    if (d.priority) line("Priority", d.priority);
+    if (d.user_agent) line("App", copy(d.user_agent));
+    if (d.sent_user_agent) line("Sent as", copy(d.sent_user_agent));
+    if (d.tags) line("Tags", d.tags.split(",").map((t) => `#${t}`).join(" "));
+    if (d.council) line("Council", d.council);
+    if (d.compaction) line("Compacted", d.compaction);
+    if (d.role) line("Made by QueueRouter", d.role);
+    if (d.parent) {
+      const link = el("a", "mono", d.parent);
+      link.href = `/admin/requests/${d.parent}/trace`;
+      line("For", link);
     }
-    body.replaceChildren(...shown.map((r) => {
-      const tr = el("tr");
-      const time = el("time");
-      time.dataset.ts = String(r.ts);
-      const client = td("Client", r.client || "—", " ", el("span", `badge ${r.priority || ""}`, r.priority || ""));
-      if (r.user_agent) client.append(copyLine(r.user_agent, "", "App's User-Agent — click to copy"));
-      if (r.sent_user_agent) client.append(copyLine(r.sent_user_agent, "→ sent: ", "User-Agent sent to the provider — click to copy"));
-      if (r.tags) client.append(el("div", "small muted", r.tags.split(",").map((t) => `#${t}`).join(" ")));
-      let ids = {};
+    if (d.retries) line("Retries", String(d.retries));
+    if (d.backoff_ms) line("Retry wait", `${d.backoff_ms} ms`);
+    if (d.total_ms !== null && d.total_ms !== undefined) line("Total time", `${d.total_ms} ms`);
+    if (d.first_token_ms !== null && d.first_token_ms !== undefined) {
+      const parts = [`queue ${d.headers_ms}`, `token ${d.first_token_ms}`];
+      if (d.answer_ms !== null && d.answer_ms > d.first_token_ms) parts.push(`answer ${d.answer_ms}`);
+      if (d.tokens_per_s !== null) parts.push(`${Math.round(d.tokens_per_s)} tok/s`);
+      if (d.stall_ms) parts.push(`longest pause ${d.stall_ms}`);
+      line("Provider's own times (ms)", parts.join(" · "));
+    }
+    if (d.error) line("Error", d.error);
+    let ids = d.client_headers || {};
+    if (typeof ids === "string") { // running requests: as stored
       try {
-        ids = JSON.parse(r.client_headers || "{}");
+        ids = JSON.parse(ids);
       } catch (_) {
         ids = {};
       }
-      const names = Object.keys(ids);
-      if (names.length) {
-        const details = el("details", "small ids");
-        details.open = openIds.has(r.id); // stays open across live updates
-        details.addEventListener("toggle", () => (details.open ? openIds.add(r.id) : openIds.delete(r.id)));
-        details.append(el("summary", "muted", `${names.length} identifiers`));
-        for (const name of names) {
-          const line = el("div", "mono");
-          const button = el("button", "copy-text inline", ids[name]);
-          button.type = "button";
-          button.dataset.copyText = ids[name];
-          line.append(el("span", "muted", `${name}: `), button);
-          details.append(line);
-        }
-        client.append(details);
+    }
+    for (const [name, value] of Object.entries(ids)) line(name, copy(String(value)));
+    const links = [];
+    if (d.has_content) links.push(["Content", `/admin/requests/${d.id}/content`]);
+    if (d.council) links.push(["Trace", `/admin/requests/${d.id}/trace`]);
+    if (links.length) {
+      const row = el("div", "links");
+      for (const [name, href] of links) {
+        const link = el("a", "", name);
+        link.href = href;
+        row.append(link, " ");
       }
-      const model = td("Model", r.requested_model || r.model || "—");
-      model.classList.add("wrap-any");
-      if (r.target_model) model.append(" ", el("span", "muted small", `→ ${r.target_model}`));
-      for (const [key, label] of [["compaction", "compacted"], ["council", "council"]]) {
-        if (!r[key]) continue;
-        const line = el("div", "small");
-        line.append(el("span", "badge", `${label}: ${r[key]}`));
-        model.append(line);
-      }
-      if (r.role) { // made by QueueRouter for another request (council member or judge, summary)
-        const line = el("div", "small");
-        line.append(el("span", "badge", r.role));
-        if (r.parent) line.append(" ", el("span", "muted mono", `for ${r.parent}`));
-        model.append(line);
-      }
-      // waiting for its conversation's summary, or for its council's members and judge
-      const waiting = r.stage === "compacting" || r.stage === "council";
-      const queued = r.stage === "queued" || waiting;
-      const status = waiting ? `${r.stage}…` : queued ? `queued${r.position ? ` #${r.position}` : ""}` : "running";
-      const outcome = td("Outcome", el("strong", queued ? "muted" : "", status));
-      if (r.retries) outcome.append(el("span", "muted small", ` · ${r.retries} retries`));
-      if (r.error) {
-        outcome.title = r.error;
-        outcome.append(el("div", "small muted wrap-any", r.error));
-      }
-      const elapsed = r.elapsed_ms + (now - started);
-      const queueMs = td("Queue ms", seconds(queued ? elapsed : r.queue_ms));
-      const upstreamMs = td("Upstream ms", queued ? "—" : seconds(elapsed - (r.queue_ms || 0)));
-      if (queued) queueMs.dataset.tick = String(r.elapsed_ms);
-      else upstreamMs.dataset.tick = String(r.elapsed_ms - (r.queue_ms || 0));
-      const ttft = td("First byte ms", r.ttft_ms !== null && r.ttft_ms !== undefined ? seconds(r.ttft_ms) : queued ? "—" : "waiting…");
-      const input = td("In tokens", r.estimate ? `~${Number(r.estimate).toLocaleString()}` : "—");
-      if (r.estimate) input.title = "QueueRouter's estimate; the provider's count arrives when it finishes";
-      tr.append(
-        td("Time", time, el("div", "small muted mono", r.id || "")), client, model, td("Upstream", r.upstream || "—"), outcome, queueMs, ttft, upstreamMs,
-        input, td("Out tokens", "—"), td("Finish", r.stream ? "streaming…" : "—"),
-      );
-      return tr;
-    }));
-    localTimes(body);
-  }
+      box.append(row);
+    }
+  };
+  const openRow = (tr, fill) => {
+    const more = el("tr", "req-more");
+    const cell = el("td");
+    const box = el("div", "req-details", "Loading…");
+    cell.colSpan = COLUMNS;
+    cell.append(box);
+    more.append(cell);
+    tr.after(more);
+    tr.more = more;
+    tr.classList.add("open");
+    tr.querySelector(".row-toggle").setAttribute("aria-expanded", "true");
+    fill(box);
+  };
+  const closeRow = (tr) => {
+    tr.more.remove();
+    tr.more = null;
+    tr.classList.remove("open");
+    tr.querySelector(".row-toggle").setAttribute("aria-expanded", "false");
+  };
+  const fetched = (id) => async (box) => {
+    try {
+      const response = await liveGet(`${root.dataset.rows}/${encodeURIComponent(id)}`, stream);
+      if (response) describe(box, await response.json());
+      else box.textContent = "Couldn't load its details.";
+    } catch (_) {
+      box.textContent = "Couldn't load its details.";
+    }
+  };
+  const toggle = (fill) => (event) => {
+    const tr = event.target.closest("tr.req");
+    if (!tr || event.target.closest("a, .copy-text")) return;
+    if (!event.target.closest(".row-toggle") && String(window.getSelection())) return; // selecting text to copy
+    if (tr.more) {
+      opened.delete(tr.dataset.id);
+      closeRow(tr);
+    } else {
+      opened.add(tr.dataset.id);
+      openRow(tr, fill(tr.dataset.id));
+    }
+  };
 
-  // Elapsed times tick between updates.
-  setInterval(() => {
+  // -- queued and running ----------------------------------------------------------------------------------------
+  const matches = (r) =>
+    !want("outcome") &&
+    (!want("client") || r.client === want("client")) &&
+    (!want("model") || r.requested_model === want("model") || r.target_model === want("model")) &&
+    (!want("upstream") || r.upstream === want("upstream")) &&
+    (!want("tag") || (r.tags || "").split(",").includes(want("tag")));
+  const running = new Map(); // id -> { tr, signature, r, tick: the cell that counts up }
+  let inflight = [];
+  let frame = null;
+  let started = 0; // performance.now() when the last update arrived
+  const runningRow = (r) => {
+    // waiting for its conversation's summary, or for its council's members and judge
+    const waiting = r.stage === "compacting" || r.stage === "council";
+    const queued = r.stage === "queued" || waiting;
+    const status = waiting ? `${r.stage}…` : queued ? `queued${r.position ? ` #${r.position}` : ""}` : "running";
+    const outcome = text("Outcome", status);
+    if (r.retries) outcome.append(el("span", "muted", ` ↻${r.retries}`));
+    const queue = td("Queue ms", "num", milliseconds(queued ? r.elapsed_ms : r.queue_ms));
+    const took = td("Upstream ms", "num", "—");
+    const first = r.ttft_ms !== null && r.ttft_ms !== undefined ? milliseconds(r.ttft_ms) : queued ? "—" : "waiting…";
+    const input = td("In", "num", r.estimate ? `~${Number(r.estimate).toLocaleString("en-US")}` : "—");
+    if (r.estimate) input.title = "QueueRouter's estimate; the provider's count arrives when it finishes";
+    const tr = el("tr", "req live");
+    tr.dataset.id = r.id;
+    tr.append(
+      timeCell(r), clientCell(r), modelCell(r, r.requested_model || r.model), text("Upstream", r.upstream), outcome,
+      queue, td("First byte ms", "num", first), took, input, td("Cached", "num", "—"), td("Out", "num", "—"),
+      td("Total", "num", "—"), text("Finish", r.stream ? "streaming" : ""),
+    );
+    return { tr, tick: queued ? queue : took };
+  };
+  const renderRunning = () => {
+    frame = null;
+    const shown = inflight.filter(matches);
+    nowCount.textContent = String(shown.length);
+    let cursor = nowBody.firstElementChild;
+    const place = (node) => {
+      if (node === cursor) cursor = cursor.nextElementSibling;
+      else nowBody.insertBefore(node, cursor);
+    };
+    for (const r of shown) {
+      const signature = JSON.stringify({ ...r, elapsed_ms: 0, ts: 0 });
+      let entry = running.get(r.id);
+      if (!entry || entry.signature !== signature) {
+        const built = runningRow(r);
+        if (entry) {
+          if (cursor === entry.tr) cursor = built.tr;
+          entry.tr.replaceWith(built.tr);
+          if (entry.tr.more) { // stays open, with what's new in it
+            built.tr.more = entry.tr.more;
+            built.tr.classList.add("open");
+            built.tr.querySelector(".row-toggle").setAttribute("aria-expanded", "true");
+            describe(built.tr.more.querySelector(".req-details"), r);
+          }
+        }
+        entry = { ...built, signature };
+        running.set(r.id, entry);
+      }
+      entry.r = r;
+      entry.tick.dataset.tick = String(entry.tick.dataset.label === "Queue ms" ? r.elapsed_ms : r.elapsed_ms - (r.queue_ms || 0));
+      place(entry.tr);
+      if (opened.has(r.id) && !entry.tr.more) openRow(entry.tr, (box) => describe(box, r));
+      if (entry.tr.more) place(entry.tr.more);
+    }
+    while (cursor) {
+      const next = cursor.nextElementSibling;
+      cursor.remove();
+      cursor = next;
+    }
+    const ids = new Set(shown.map((r) => r.id));
+    for (const id of running.keys()) if (!ids.has(id)) running.delete(id);
+  };
+  setInterval(() => { // elapsed times count up between updates
+    if (document.hidden) return;
     const extra = performance.now() - started;
-    body.querySelectorAll("[data-tick]").forEach((cell) => {
+    nowBody.querySelectorAll("[data-tick]").forEach((cell) => {
       cell.textContent = String(Math.round(Number(cell.dataset.tick) + extra));
     });
   }, 500);
 
-  // The finished list: when new requests have been written, only the rows since the newest shown are
-  // fetched (same filters) and added on top; the whole page was ~1 MB per finished request on a busy day.
-  // A hidden tab fetches nothing and catches up once it is shown again.
-  const finished = document.getElementById("finished-requests");
-  const limit = Number(finished?.dataset.limit) || 300;
-  let version = null;
-  let timer = null;
-  let missed = false;
-  const reload = async () => {
-    timer = null;
-    if (!finished) return;
-    if (document.hidden) {
-      missed = true;
+  // -- finished --------------------------------------------------------------------------------------------------
+  const finishedRow = (r) => {
+    const outcome = text("Outcome", `${r.outcome || "—"}${r.status ? ` ${r.status}` : ""}`);
+    if (r.retries) outcome.append(el("span", "muted", ` ↻${r.retries}`));
+    if (r.outcome && r.outcome !== "done") outcome.classList.add("bad");
+    const total = td("Total", "num", r.cost ? money(r.cost) : "—");
+    if (r.calls) total.title = `Adds up its ${r.calls} calls`;
+    if (r.cost !== null && !r.priced) {
+      total.append(el("span", "muted", "*"));
+      total.title = "Some tokens have no price";
+    }
+    const tr = el("tr", "req");
+    tr.dataset.id = r.id;
+    tr.append(
+      timeCell(r), clientCell(r), modelCell(r, r.model), text("Upstream", r.upstream), outcome,
+      td("Queue ms", "num", milliseconds(r.queue_ms)), td("First byte ms", "num", milliseconds(r.ttft_ms)),
+      td("Upstream ms", "num", milliseconds(r.upstream_ms)), spend("In", r.tokens_in, r.cost_in),
+      spend("Cached", r.tokens_cached, r.cost_cached), spend("Out", r.tokens_out, r.cost_out), total,
+      text("Finish", r.finish_reason),
+    );
+    return tr;
+  };
+  let rows = []; // shown, newest first: { r, tr }
+  const known = new Set(); // ids shown or waiting
+  let waiting = []; // fetched while scrolled down
+  let gap = false; // there are rows between the ones waiting and the ones shown
+  let hasOlder = false;
+  let loadingOlder = false;
+  let latest = null; // the newest row's time
+  let loaded = false;
+  let loadingFirst = false;
+  let controller = null;
+  let generation = 0; // goes up when the filters change: what was being fetched no longer counts
+
+  const updateNote = () => {
+    if (loaded && !rows.length) {
+      placeholder.firstElementChild.textContent = [...query.keys()].length ? "No requests match these filters." : "No requests logged yet.";
+      list.replaceChildren(placeholder);
+    }
+    note.textContent = loadingOlder ? "Loading…" : rows.length && !hasOlder ? "That's the end of the log." : "";
+  };
+  const addRows = (fresh, append) => {
+    const built = fresh.map((r) => ({ r, tr: finishedRow(r) }));
+    if (!built.length) return;
+    placeholder.remove();
+    if (append) {
+      list.append(...built.map((row) => row.tr));
+      rows = [...rows, ...built];
+    } else {
+      list.prepend(...built.map((row) => row.tr));
+      built.forEach((row) => row.tr.classList.add("fresh"));
+      rows = [...built, ...rows];
+    }
+    for (const { r, tr } of built) if (opened.has(r.id)) openRow(tr, fetched(r.id));
+  };
+  const clearRows = () => {
+    list.replaceChildren();
+    known.clear();
+    for (const row of waiting) known.add(row.id);
+    rows = [];
+  };
+  const settle = () => {
+    if (waiting.length && window.scrollY > AT_TOP_PX) {
+      newRows.textContent = `${waiting.length}${gap ? "+" : ""} new`;
+      newRows.hidden = false;
       return;
     }
-    missed = false;
-    const query = new URLSearchParams(window.location.search);
-    query.set("after", finished.querySelector("tr[data-id] time[data-ts]")?.dataset.ts || "0");
+    newRows.hidden = true;
+    if (!waiting.length) return;
+    if (gap) {
+      clearRows();
+      hasOlder = true;
+    }
+    addRows(waiting, false);
+    waiting = [];
+    gap = false;
+    while (rows.length > catchUp) { // what you've scrolled through can go once you're back at the top
+      const { r, tr } = rows.pop();
+      if (tr.more) tr.more.remove();
+      tr.remove();
+      known.delete(r.id);
+      hasOlder = true;
+    }
+    updateNote();
+  };
+  const load = async () => {
+    if (controller) controller.abort();
+    controller = new AbortController();
+    const mine = ++generation;
+    loadingFirst = true;
     try {
-      const response = await fetch(`${finished.dataset.rows}?${query}`, { credentials: "same-origin" });
-      if (!response.ok || response.redirected) return;
-      const parsed = new DOMParser().parseFromString(`<table><tbody>${await response.text()}</tbody></table>`, "text/html");
-      const shown = new Set([...finished.querySelectorAll("tr[data-id]")].map((tr) => tr.dataset.id));
-      const fresh = [...parsed.querySelectorAll("tr[data-id]")].filter((tr) => !shown.has(tr.dataset.id));
-      if (!fresh.length) return;
-      finished.querySelectorAll("tr:not([data-id])").forEach((tr) => tr.remove()); // "No requests logged yet."
-      finished.prepend(...fresh);
-      fresh.forEach(localTimes);
-      [...finished.querySelectorAll("tr[data-id]")].slice(limit).forEach((tr) => tr.remove());
+      const response = await liveGet(`${root.dataset.rows}?${query}`, stream, { signal: controller.signal });
+      if (response) {
+        const data = await response.json();
+        if (mine !== generation) return;
+        waiting = [];
+        gap = false;
+        clearRows();
+        data.rows.forEach((r) => known.add(r.id));
+        addRows(data.rows, true);
+        latest = data.rows.length ? data.rows[0].ts : null;
+        hasOlder = data.more;
+        loaded = true;
+        updateNote();
+        settle();
+      }
     } catch (_) {
-      /* next update tries again */
+      /* changed filters, or the next update tries again */
+    }
+    if (mine === generation) loadingFirst = false;
+  };
+  let fetching = false;
+  let again = false;
+  let timer = null;
+  const fetchNew = async () => {
+    clearTimeout(timer);
+    timer = null;
+    if (!loaded) {
+      if (!loadingFirst) load();
+      return;
+    }
+    if (fetching) {
+      again = true;
+      return;
+    }
+    fetching = true;
+    const mine = generation;
+    try {
+      const params = new URLSearchParams(query);
+      params.set("after", String(latest ?? 0));
+      const response = await liveGet(`${root.dataset.rows}?${params}`, stream);
+      if (response) {
+        const data = await response.json();
+        const fresh = data.rows.filter((r) => !known.has(r.id));
+        if (mine === generation && fresh.length) {
+          fresh.forEach((r) => known.add(r.id));
+          latest = Math.max(latest ?? 0, fresh[0].ts);
+          waiting = [...fresh, ...waiting].slice(0, catchUp);
+          gap = gap || data.more;
+          settle();
+        }
+      }
+    } catch (_) {
+      /* the next update tries again */
+    }
+    fetching = false;
+    if (again) {
+      again = false;
+      fetchNew();
     }
   };
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && missed && !timer) timer = setTimeout(reload, 0);
+  const nearBottom = () => note.getBoundingClientRect().top < window.innerHeight + 400;
+  const loadOlder = async () => {
+    if (!hasOlder || loadingOlder || !rows.length) return;
+    loadingOlder = true;
+    updateNote();
+    const mine = generation;
+    const last = rows[rows.length - 1].r;
+    const params = new URLSearchParams(query);
+    params.set("before", String(last.ts));
+    params.set("before_id", last.id);
+    let more = false;
+    try {
+      const response = await liveGet(`${root.dataset.rows}?${params}`, stream);
+      if (response) {
+        const data = await response.json();
+        if (mine === generation) {
+          const older = data.rows.filter((r) => !known.has(r.id));
+          older.forEach((r) => known.add(r.id));
+          addRows(older, true);
+          hasOlder = data.more;
+          more = true;
+        }
+      }
+    } catch (_) {
+      /* tried again the next time the end of the list comes into view */
+    }
+    loadingOlder = false;
+    updateNote();
+    if (more && nearBottom()) loadOlder();
+  };
+  new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting) loadOlder();
+  }, { rootMargin: "400px" }).observe(note);
+  window.addEventListener("scroll", () => {
+    if (waiting.length && window.scrollY <= AT_TOP_PX) settle();
+  }, { passive: true });
+  newRows.addEventListener("click", () => {
+    window.scrollTo(0, 0);
+    settle();
   });
 
-  const source = new EventSource(root.dataset.stream);
-  source.onmessage = (event) => {
-    const state = JSON.parse(event.data);
-    rows = state.inflight || [];
-    started = performance.now();
-    render();
-    if (version !== null && state.usage_version !== version && !timer) timer = setTimeout(reload, 1000);
-    version = state.usage_version;
+  nowBody.addEventListener("click", toggle((id) => (box) => {
+    const entry = running.get(id);
+    if (entry) describe(box, entry.r);
+  }));
+  list.addEventListener("click", toggle(fetched));
+
+  // -- filters: applied at once, without a page load ---------------------------------------------------------------
+  const applied = () => {
+    window.history.replaceState(null, "", `${window.location.pathname}?${query}`);
+    renderRunning();
+    load();
   };
+  form.addEventListener("change", (event) => {
+    if (event.target.value) query.set(event.target.name, event.target.value);
+    else query.delete(event.target.name);
+    applied();
+  });
+  form.addEventListener("submit", (event) => event.preventDefault());
+  document.getElementById("filters-reset").addEventListener("click", (event) => {
+    event.preventDefault();
+    form.querySelectorAll("select").forEach((select) => {
+      select.value = "";
+      query.delete(select.name);
+    });
+    applied();
+  });
+  const fillFilters = async () => {
+    try {
+      const response = await liveGet(root.dataset.filters, stream);
+      if (!response) return;
+      const choices = await response.json();
+      form.querySelectorAll("select").forEach((select) => {
+        const have = new Set([...select.options].map((option) => option.value));
+        for (const value of choices[select.name] || []) {
+          if (have.has(value)) continue;
+          const option = el("option", "", value);
+          option.value = value;
+          select.append(option);
+        }
+      });
+    } catch (_) {
+      /* the filters still work for what the address says */
+    }
+  };
+
+  let version = null;
+  const stream = liveStream(root.dataset.stream, document.getElementById("requests-status"), {
+    message(state) {
+      inflight = state.inflight || [];
+      started = performance.now();
+      if (!frame) frame = requestAnimationFrame(renderRunning);
+      if (version !== null && state.usage_version !== version && !timer) timer = setTimeout(fetchNew, 300);
+      version = state.usage_version;
+    },
+    resync: fetchNew,
+  });
+  load();
+  fillFilters();
 }
 
 // Upstream > choose models: filter the list, tick / untick what's shown, count what's offered.
