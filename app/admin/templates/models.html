@@ -194,7 +194,7 @@ before answering. They come from the upstream's own model list (OpenRouter state
 list by name. QueueRouter asks each upstream its own way: OpenRouter <span class="mono">reasoning.effort</span>,
 self-hosted vLLM servers the chat template's thinking switch (and low/medium/high), OpenAI-style APIs
 <span class="mono">reasoning_effort</span>. None are offered for ArliAI (its models think whatever is sent; tested) or
-Claude's OpenAI-compatible endpoint (it ignores levels). Set your own list to correct a model (e.g. <span class="mono">none, low,
+Claude (each model thinks as it does by default). Set your own list to correct a model (e.g. <span class="mono">none, low,
 high</span>), or <span class="mono">-</span> for no selector; blank goes back to what's detected. opencode shows them
 through the QueueRouter plugin (opencode 2.x; re-install the plugin once to get this).</p>
 <details class="card" {% if thinking.rows | selectattr("yours") | list %}open{% endif %}>

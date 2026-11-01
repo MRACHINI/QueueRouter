@@ -437,7 +437,10 @@ function liveDashboard(root) {
       const tr = document.createElement("tr");
       const count = (n) => (n === null || n === undefined ? null : Number(n).toLocaleString());
       const input = cell(count(r.prompt_tokens), "In tokens");
-      if (r.cached_tokens) input.title = `${count(r.cached_tokens)} of them cached`;
+      const parts = [];
+      if (r.cached_tokens) parts.push(`${count(r.cached_tokens)} of them cached`);
+      if (r.cache_write_tokens) parts.push(`${count(r.cache_write_tokens)} written to the cache`);
+      if (parts.length) input.title = parts.join(", ");
       tr.append(
         cell(new Date(r.ts * 1000).toLocaleTimeString(), "Time"), withTitle(cell(r.client, "Client"), uaTitle(r)),
         cell(r.priority, "Prio"), cell(r.label, "Model"), cell(r.outcome, "Outcome"),
@@ -959,12 +962,14 @@ function liveRequests(root) {
       total.append(el("span", "muted", "*"));
       total.title = "Some tokens have no price";
     }
+    const input = spend("In", r.tokens_in, r.cost_in);
+    if (r.tokens_written) input.title = `${Number(r.tokens_written).toLocaleString("en-US")} of them written to the cache`;
     const tr = el("tr", "req");
     tr.dataset.id = r.id;
     tr.append(
       timeCell(r), clientCell(r), modelCell(r), outcome,
       td("Queue ms", "num", milliseconds(r.queue_ms)), td("First byte ms", "num", milliseconds(r.ttft_ms)),
-      td("Upstream ms", "num", milliseconds(r.upstream_ms)), spend("In", r.tokens_in, r.cost_in),
+      td("Upstream ms", "num", milliseconds(r.upstream_ms)), input,
       spend("Cached", r.tokens_cached, r.cost_cached), spend("Out", r.tokens_out, r.cost_out), total,
       text("Finish", r.finish_reason),
     );

@@ -11,6 +11,7 @@ from collections.abc import Mapping
 
 import httpx
 
+ANTHROPIC_VERSION = "2023-06-01"  # the Claude API version asked for: newer ones refuse temperature on every model
 BUSY_STATUS = 429  # upstream full: keep the slot, back off, retry the same upstream
 # upstream broken: retried / failed over, and counts toward its circuit breaker. 520-524: Cloudflare in front of a
 # provider that didn't answer; 529: Anthropic "overloaded"
@@ -68,6 +69,16 @@ def upstream_headers(incoming: Mapping[str, str], api_key: str) -> dict[str, str
     return headers
 
 
+def claude_headers(headers: Mapping[str, str], api_key: str) -> dict[str, str]:
+    """``upstream_headers`` for Claude's own API: the key goes in ``x-api-key``, the version is ours to choose."""
+    own = ("authorization", "content-type")
+    kept = {k: v for k, v in headers.items() if k.lower() not in own and not k.lower().startswith("anthropic-")}
+    kept.update({"content-type": "application/json", "anthropic-version": ANTHROPIC_VERSION})
+    if api_key:
+        kept["x-api-key"] = api_key
+    return kept
+
+
 def response_headers(upstream: Mapping[str, str]) -> dict[str, str]:
     return {k: v for k, v in upstream.items() if k.lower() in _KEEP_RESPONSE_HEADERS}
 
@@ -91,19 +102,27 @@ def retry_delay(attempt: int, headers: Mapping[str, str] | None, base: float, ca
 _FINISH_REASON = re.compile(rb'"finish_reason"\s*:\s*"([A-Za-z_]+)"')
 
 
-def usage_from_body(body: bytes) -> tuple[int | None, int | None, int | None]:
-    """(prompt, completion, cached prompt) tokens from an OpenAI-style ``usage`` object."""
+def usage_from_body(body: bytes) -> tuple[int | None, int | None, int | None, int | None]:
+    """(prompt, completion, cached prompt, prompt written to the cache) tokens from an OpenAI-style ``usage``
+    object; the prompt tokens include the last two."""
     try:
         usage = json.loads(body).get("usage") or {}
     except (ValueError, AttributeError):
-        return None, None, None
+        return None, None, None, None
     if not isinstance(usage, dict):
-        return None, None, None
-    details = usage.get("prompt_tokens_details") or {}
-    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+        return None, None, None, None
+    details = usage.get("prompt_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    cached = details.get("cached_tokens")
     if cached is None:
         cached = usage.get("prompt_cache_hit_tokens")  # DeepSeek's naming
-    return usage.get("prompt_tokens"), usage.get("completion_tokens"), cached if isinstance(cached, int) else None
+    written = details.get("cache_write_tokens")  # Claude (app/claude.py), OpenRouter
+    return (
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        cached if isinstance(cached, int) else None,
+        written if isinstance(written, int) else None,
+    )
 
 
 def finish_reason_from_body(body: bytes) -> str | None:
@@ -132,6 +151,7 @@ class UsageSniffer:
         self.prompt_tokens: int | None = None
         self.completion_tokens: int | None = None
         self.cached_tokens: int | None = None
+        self.cache_write_tokens: int | None = None
         self.finish_reason: str | None = None
         self.first_token_at: float | None = None
         self.answer_at: float | None = None
@@ -152,9 +172,10 @@ class UsageSniffer:
                 self.finish_reason = reason
             if b'"usage"' in line:
                 payload = line[5:].strip()
-                prompt, completion, cached = usage_from_body(payload)
+                prompt, completion, cached, written = usage_from_body(payload)
                 if prompt is not None or completion is not None:
-                    self.prompt_tokens, self.completion_tokens, self.cached_tokens = prompt, completion, cached
+                    self.prompt_tokens, self.completion_tokens = prompt, completion
+                    self.cached_tokens, self.cache_write_tokens = cached, written
 
     def _time(self, line: bytes, now: float) -> None:
         thinking = _RESPONSES_REASONING.search(line) is not None  # its reasoning comes as a "delta" too

@@ -2,8 +2,8 @@
 {% macro usd(v) -%}
 {%- if v >= 100 -%}${{ "{:,.0f}".format(v) }}{%- elif v >= 1 -%}${{ "%.2f" | format(v) }}{%- else -%}${{ "%.4f" | format(v) }}{%- endif -%}
 {%- endmacro %}
-{% macro spend(label, tokens, cost) -%}
-<td data-label="{{ label }}" class="num"><span>{{ "{:,}".format(tokens) }}<span class="price">{% if tokens and cost %}{{ usd(cost) }}{% endif %}</span></span></td>
+{% macro spend(label, tokens, cost, written=0) -%}
+<td data-label="{{ label }}" class="num"{% if written %} title="{{ "{:,}".format(written) }} of them written to the cache"{% endif %}><span>{{ "{:,}".format(tokens) }}<span class="price">{% if tokens and cost %}{{ usd(cost) }}{% endif %}</span></span></td>
 {%- endmacro %}
 {% macro total(r) -%}
 <td data-label="Total" class="num">{% if r.cost or r.priced %}{{ usd(r.cost) }}{% else %}—{% endif %}{% if not r.priced %}<span class="muted" title="some tokens have no price">*</span>{% endif %}</td>
@@ -42,7 +42,7 @@
 <p class="small muted">{{ "{:,}".format(totals.unpriced_tokens) }} tokens are from models without a price and aren't
 included — <a href="/admin/models#pricing">set a price</a>.</p>
 {% endif %}
-<p class="small muted">Estimates at the official per-token API prices (models.dev), not what you pay ArliAI. In = tokens that weren't cached.</p>
+<p class="small muted">Estimates at the official per-token API prices (models.dev), not what you pay ArliAI. In = tokens that weren't cached.{% if totals.cache_write_tokens %} {{ "{:,}".format(totals.cache_write_tokens) }} of them were written to Claude's prompt cache, at 1.25 × the input price.{% endif %}</p>
 
 <section class="charts">{% for chart in charts %}{{ chart | safe }}{% endfor %}</section>
 
@@ -61,7 +61,7 @@ included — <a href="/admin/models#pricing">set a price</a>.</p>
     <td data-label="Model" class="wrap-any">{{ m.label }}</td>
     <td data-label="Requests" class="num">{{ "{:,}".format(m.requests) }}</td>
     <td data-label="Errors" class="num">{{ "{:,}".format(m.errors) }}</td>
-    {{ spend("In", m.input_tokens, m.cost_in) }}
+    {{ spend("In", m.input_tokens, m.cost_in, m.cache_write_tokens) }}
     {{ spend("Cached", m.cached_tokens, m.cost_cached) }}
     {{ spend("Out", m.completion_tokens, m.cost_out) }}
     {{ total(m) }}
@@ -74,7 +74,7 @@ included — <a href="/admin/models#pricing">set a price</a>.</p>
     <td data-label="Model">Total</td>
     <td data-label="Requests" class="num">{{ "{:,}".format(model_total.requests) }}</td>
     <td data-label="Errors" class="num">{{ "{:,}".format(model_total.errors) }}</td>
-    {{ spend("In", model_total.input_tokens, model_total.cost_in) }}
+    {{ spend("In", model_total.input_tokens, model_total.cost_in, model_total.cache_write_tokens) }}
     {{ spend("Cached", model_total.cached_tokens, model_total.cost_cached) }}
     {{ spend("Out", model_total.completion_tokens, model_total.cost_out) }}
     {{ total(model_total) }}
@@ -96,7 +96,7 @@ included — <a href="/admin/models#pricing">set a price</a>.</p>
     {% if by_model %}<td data-label="Model" class="wrap-any">{{ r.label }}</td>{% endif %}
     <td data-label="Requests" class="num">{{ "{:,}".format(r.requests) }}</td>
     <td data-label="Errors" class="num">{{ "{:,}".format(r.errors) }}</td>
-    {{ spend("In", r.input_tokens, r.cost_in) }}
+    {{ spend("In", r.input_tokens, r.cost_in, r.cache_write_tokens) }}
     {{ spend("Cached", r.cached_tokens, r.cost_cached) }}
     {{ spend("Out", r.completion_tokens, r.cost_out) }}
     {{ total(r) }}

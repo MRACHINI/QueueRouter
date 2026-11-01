@@ -84,6 +84,7 @@ def test_summarize_usage_totals_and_savings(catalog):
             "prompt_tokens": 2_000_000,
             "completion_tokens": 1_000_000,
             "cached_tokens": 0,
+            "cache_write_tokens": 0,
         },
         {
             "day": "2026-10-19",
@@ -95,6 +96,7 @@ def test_summarize_usage_totals_and_savings(catalog):
             "prompt_tokens": 100,
             "completion_tokens": 0,
             "cached_tokens": 0,
+            "cache_write_tokens": 0,
         },
     ]
     out, totals, _ = summarize_usage(rows, {}, catalog, by_model=False, plan_per_month=30.0, days=30)

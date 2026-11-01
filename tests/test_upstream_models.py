@@ -121,8 +121,8 @@ async def test_provider_error_text_recorded(make_stack):
 
 
 async def test_anthropic_model_list(make_stack, monkeypatch):
-    """Claude's model list: its API version header, up to 1,000 models, sizes from max_input_tokens / max_tokens;
-    a refusal shows the provider's reason."""
+    """Claude's model list: its key and API version headers, up to 1,000 models, sizes from max_input_tokens /
+    max_tokens; a refusal shows the provider's reason."""
     import httpx as httpx_mod
 
     from app.catalog import fetch_models
@@ -143,7 +143,8 @@ async def test_anthropic_model_list(make_stack, monkeypatch):
 
     async with httpx_mod.AsyncClient(transport=httpx_mod.MockTransport(handler)) as client:
         models = await fetch_models(client, "https://api.anthropic.com/v1", "sk-ant-test")
-        assert seen["params"] == {"limit": "1000"} and seen["headers"]["authorization"] == "Bearer sk-ant-test"
+        assert seen["params"] == {"limit": "1000"} and seen["headers"]["x-api-key"] == "sk-ant-test"
+        assert "authorization" not in seen["headers"]
         assert model_limits(models[0], []) == {"context": 1_000_000, "output": 128_000}
         try:
             await fetch_models(client, "https://other.example/v1", "k")  # no Anthropic header: the reason is kept

@@ -52,9 +52,11 @@ async def test_request_log_and_usage_pages(make_stack):
         assert usage.status_code == 200 and ">3<" in usage.text  # 3 requests
         csv_text = (await c.get("/admin/usage.csv?by=model")).text
         header, row = csv_text.strip().splitlines()[:2]
-        columns = "day,client,model,requests,errors,prompt_tokens,completion_tokens,cached_tokens,cost_usd"
+        columns = (
+            "day,client,model,requests,errors,prompt_tokens,completion_tokens,cached_tokens,cache_write_tokens,cost_usd"
+        )
         assert header == f"{columns},upstream,label"
-        assert row.split(",")[1:8] == ["client1", "mock-model", "3", "1", "20", "7", "0"]
+        assert row.split(",")[1:9] == ["client1", "mock-model", "3", "1", "20", "7", "0", "0"]
         assert row.endswith(",upstream,upstream|mock-model")
 
 

@@ -73,4 +73,4 @@ def arguments_text(arguments: object) -> str:
 
 def encode(event: str | None, data: dict) -> bytes:
     head = f"event: {event}\n" if event else ""
-    return f"{head}data: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+    return f"{head}data: {json.dumps(data, ensure_ascii=False)}\n\n".encode(errors="replace")  # half a surrogate pair

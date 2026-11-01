@@ -28,7 +28,18 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from . import __version__, anthropic_api, content_log, metrics, ranking, responses_api, structured, tracing, websearch
+from . import (
+    __version__,
+    anthropic_api,
+    claude,
+    content_log,
+    metrics,
+    ranking,
+    responses_api,
+    structured,
+    tracing,
+    websearch,
+)
 from . import compaction as compaction_mod
 from . import council as council_mod
 from . import cron as cron_mod
@@ -82,6 +93,7 @@ from .upstream import (
     FAILURE_STATUS,
     UsageChunkFilter,
     UsageSniffer,
+    claude_headers,
     client_identity,
     describe_429,
     finish_reason_from_body,
@@ -175,6 +187,7 @@ class RequestLog:
             "prompt_tokens": None,
             "completion_tokens": None,
             "cached_tokens": None,
+            "cache_write_tokens": None,  # of the prompt tokens, written to the provider's cache (Claude: billed extra)
             "finish_reason": None,
             "stopped": None,  # cancelled: how far it had got ("in queue", "mid-answer"...)
             "fallback": None,
@@ -493,7 +506,7 @@ def create_app(
 
     price_overrides: dict = {}
 
-    def price_on(model: str, target: Target, entry: dict | None, overrides: dict) -> Price | None:
+    def listed_price(model: str, target: Target, entry: dict | None, overrides: dict) -> Price | None:
         """What one request to ``model`` costs on ``target``: yours when set; else nothing extra on a monthly plan,
         the upstream's own price where its model list states one (OpenRouter), else QueueRouter's price for the name."""
         found = functools.partial(resolve, model, overrides, prices, target.id)
@@ -515,15 +528,22 @@ def create_app(
                 return Price(*(r * 1e6 for r in rates), source="upstream")
         return found(name)
 
+    def price_on(model: str, target: Target, entry: dict | None, overrides: dict) -> Price | None:
+        price = listed_price(model, target, entry, overrides)
+        return dataclasses.replace(price, writes_cache=True) if price and claude.native(target.upstream) else price
+
     def model_price(model: str, pairs: list, overrides: dict) -> Price | None:
         """The price opencode is told: the highest across the upstreams that may serve it (so it never shows less
         than a request may cost)."""
         known = [p for p in (price_on(model, t, e, overrides) for t, e in pairs) if p is not None]
         return max(known, key=lambda p: (p.input + p.output, p.output)) if known else None
 
-    def cost_of(model: str, prompt: int, completion: int, cached: int, upstream: str | None = None) -> float:
+    def cost_of(
+        model: str, prompt: int, completion: int, cached: int, upstream: str | None = None, written: int = 0
+    ) -> float:
         upstream_id, name = snapshot.names.id_of(upstream), snapshot.names.name(model, upstream)
-        costs = token_cost(resolve(model, price_overrides, prices, upstream_id, name), prompt, completion, cached)
+        price = resolve(model, price_overrides, prices, upstream_id, name)
+        costs = token_cost(price, prompt, completion, cached, written)
         return sum(costs) if costs else 0.0
 
     mix_read: dict = {"at": None, "mix": DEFAULT_MIX}
@@ -1364,25 +1384,37 @@ def create_app(
         finite = [b for b in budgets if b >= 0]  # -1 = keep retrying
         return not finite or retries < min(finite)
 
+    def speaks_claude(adm: Admission, target: Target) -> bool:
+        return adm.path == "chat/completions" and claude.native(target.upstream)
+
     def build_request(adm: Admission, target: Target) -> httpx.Request:
         s = cfg()
-        url = f"{target.upstream.base_url}/{adm.path}" + (f"?{adm.query}" if adm.query else "")
+        native = speaks_claude(adm, target)
+        path = "messages" if native else adm.path
+        url = f"{target.upstream.base_url}/{path}" + (f"?{adm.query}" if adm.query else "")
         body = adm.body
         thinking = bool(body) and b'"reasoning_effort"' in body  # asked the way this provider understands
-        if body and (target.upstream.params or thinking):  # this provider's own rules (e.g. fields it rejects)
+        if body and (
+            native or target.upstream.params or thinking
+        ):  # this provider's own rules (e.g. fields it rejects)
             try:
                 payload = json.loads(body)
             except ValueError:
                 payload = None
             if isinstance(payload, dict):
                 apply_rules(payload, rules_of(target.upstream.params), {})
-                if thinking:
+                if native or thinking:
                     entry = next(
                         (m for m in catalogs.models(target.id, raw=True) if m.get("id") == payload.get("model")), None
                     )
-                    thinking_mod.translate(payload, thinking_mod.style_of(target.upstream.base_url, entry))
+                    if native:
+                        payload = claude.request(payload, entry)
+                    else:
+                        thinking_mod.translate(payload, thinking_mod.style_of(target.upstream.base_url, entry))
                 body = json.dumps(payload).encode()
         headers = upstream_headers(adm.headers, target.api_key)
+        if native:
+            headers = claude_headers(headers, target.api_key)
         original_ua = next((v for k, v in headers.items() if k.lower() == "user-agent"), "")
         user_agent = outgoing_user_agent(
             (adm.policy.ua_mode, adm.policy.ua_template),
@@ -1500,10 +1532,15 @@ def create_app(
                         if adm.deadline is not None:  # the key's total time limit holds before the first byte too
                             sending = asyncio.wait_for(sending, max(0.0, adm.deadline - time.monotonic()))
                         response = await sending
+                        if speaks_claude(adm, target):
+                            response = claude.answer(response)
                         if adm.rlog.fields["stream"]:  # a non-streamed answer's headers come with all of it
                             adm.rlog.fields["headers_ms"] = round((time.monotonic() - adm.rlog.sent_at) * 1000)
                     except TimeoutError:
                         yield Failed(504, "request exceeded this key's total time limit", "request_timeout")
+                        return
+                    except anthropic_api.Unsupported as exc:
+                        yield Failed(400, str(exc), "invalid_request")
                         return
                     except (
                         httpx.TransportError,  # any network failure (write errors too), not only the usual ones
@@ -3543,7 +3580,7 @@ def create_app(
         strip_usage = False  # usage asked for here, not by the app: its chunk is left out of the app's stream
         if isinstance(payload, dict):
             options = payload.get("stream_options")
-            wants = isinstance(options, dict) and "include_usage" in options
+            wants = isinstance(options, dict) and options.get("include_usage") is True
             if payload.get("stream") is True and path in ("chat/completions", "completions") and not wants:
                 payload["stream_options"] = {**(options if isinstance(options, dict) else {}), "include_usage": True}
                 strip_usage = True  # without it most providers send no token counts for a stream
@@ -3794,11 +3831,12 @@ def create_app(
                         if status < 400 and cfg().structured_repair:
                             content, verdict = repair_structured(adm, content)
                         if status < 400:
-                            prompt, completion, cached = usage_from_body(content)
+                            prompt, completion, cached, written = usage_from_body(content)
                             rlog.fields.update(
                                 prompt_tokens=prompt,
                                 completion_tokens=completion,
                                 cached_tokens=cached,
+                                cache_write_tokens=written,
                                 finish_reason=finish_reason_from_body(content),
                             )
                         headers = response_headers(response.headers)
@@ -3938,6 +3976,7 @@ def create_app(
                 prompt_tokens=sniffer.prompt_tokens,
                 completion_tokens=sniffer.completion_tokens,
                 cached_tokens=sniffer.cached_tokens,
+                cache_write_tokens=sniffer.cache_write_tokens,
                 finish_reason=sniffer.finish_reason,
                 **(sniffer.timings(rlog.sent_at) if response is not None and status == 200 else {}),
             )

@@ -500,6 +500,11 @@ MIGRATIONS: list[str] = [
     ALTER TABLE model_thinking_new RENAME TO model_thinking;
     ALTER TABLE requests ADD COLUMN stopped TEXT;
     """,
+    # 37: prompt tokens written to the provider's cache (Claude bills them above the input price)
+    """
+    ALTER TABLE requests ADD COLUMN cache_write_tokens INTEGER;
+    ALTER TABLE usage_daily ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -536,6 +541,7 @@ REQUEST_COLUMNS = (
     "prompt_tokens",
     "completion_tokens",
     "cached_tokens",
+    "cache_write_tokens",
     "stopped",
     "tags",
     "finish_reason",
@@ -1248,11 +1254,12 @@ class Store:
                 day = time.strftime("%Y-%m-%d", time.gmtime(row["ts"]))
                 db.execute(
                     "INSERT INTO usage_daily (day, client, model, upstream, requests, errors, prompt_tokens, "
-                    "completion_tokens, cached_tokens) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?) "
+                    "completion_tokens, cached_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(day, client, model, upstream) DO UPDATE SET requests = requests + 1, "
                     "errors = errors + excluded.errors, prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
                     "completion_tokens = completion_tokens + excluded.completion_tokens, "
-                    "cached_tokens = cached_tokens + excluded.cached_tokens",
+                    "cached_tokens = cached_tokens + excluded.cached_tokens, "
+                    "cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens",
                     (
                         day,
                         row.get("client") or "-",
@@ -1262,6 +1269,7 @@ class Store:
                         row.get("prompt_tokens") or 0,
                         row.get("completion_tokens") or 0,
                         row.get("cached_tokens") or 0,
+                        row.get("cache_write_tokens") or 0,
                     ),
                 )
 
@@ -1310,8 +1318,8 @@ class Store:
         marks = ",".join("?" for _ in parents)
         times = [r["ts"] for r in parents]
         return self.read(
-            "SELECT parent, model, target_model, upstream, prompt_tokens, completion_tokens, cached_tokens "
-            "FROM requests "
+            "SELECT parent, model, target_model, upstream, prompt_tokens, completion_tokens, cached_tokens, "
+            "cache_write_tokens FROM requests "
             f"WHERE ts BETWEEN ? AND ? AND parent IN ({marks})",  # noqa: S608
             (min(times) - CALLS_WITHIN_S, max(times) + CALLS_WITHIN_S, *(r["id"] for r in parents)),
         )
@@ -1346,7 +1354,8 @@ class Store:
         """This month's usage per client, model and upstream (``month`` = YYYY-MM)."""
         return self.query(
             "SELECT client, model, upstream, SUM(requests) AS requests, SUM(prompt_tokens) AS prompt_tokens, "
-            "SUM(completion_tokens) AS completion_tokens, SUM(cached_tokens) AS cached_tokens "
+            "SUM(completion_tokens) AS completion_tokens, SUM(cached_tokens) AS cached_tokens, "
+            "SUM(cache_write_tokens) AS cache_write_tokens "
             "FROM usage_daily WHERE day >= ? AND day < ? GROUP BY client, model, upstream",
             (f"{month}-01", f"{month}-32"),
         )
@@ -1358,7 +1367,8 @@ class Store:
         return self.read(
             "SELECT day, client, model, upstream, SUM(requests) AS requests, SUM(errors) AS errors, "
             "SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, "
-            "SUM(cached_tokens) AS cached_tokens FROM usage_daily WHERE day >= ? "
+            "SUM(cached_tokens) AS cached_tokens, SUM(cache_write_tokens) AS cache_write_tokens "
+            "FROM usage_daily WHERE day >= ? "
             "GROUP BY day, client, model, upstream ORDER BY day DESC, client, model, upstream",
             (since,),
         )

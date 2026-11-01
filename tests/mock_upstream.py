@@ -10,15 +10,45 @@ Request body extras (all optional) steer its behaviour:
   state["models_status"]: answer GET /v1/models with this status (no usable model list)
   state["missing_models"]: answer requests for these models with a 404
   state["text_only_models"]: refuse requests with images for these models (400); state["saw_images"]: who got some
+
+POST /v1/messages is Claude's own API (see claude_messages), steered by state:
+  state["claude_status"]: answer with this status; state["claude_busy"]: this many 429s first;
+  state["claude_tools"], state["claude_tool_input"]: which tools to call, the first offered (default: the very
+  first one), and with what;
+  state["claude_stream_error"]: an error event after the first text;
+  state["claude_refuses"]: stop with a refusal; state["claude_delay"]: seconds between streamed pieces
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+
+CLAUDE_FIELDS = {
+    "model",
+    "max_tokens",
+    "messages",
+    "system",
+    "tools",
+    "tool_choice",
+    "stop_sequences",
+    "temperature",
+    "top_p",
+    "top_k",
+    "stream",
+    "cache_control",
+    "output_config",
+}
+CLAUDE_ERRORS = {
+    401: "authentication_error",
+    429: "rate_limit_error",
+    500: "api_error",
+    529: "overloaded_error",
+}
 
 
 def create_mock(limit: int = 2) -> FastAPI:
@@ -97,6 +127,98 @@ def create_mock(limit: int = 2) -> FastAPI:
             "model": body.get("model"),
             "usage": {"prompt_tokens": 3, "total_tokens": 3},
         }
+
+    @app.post("/v1/messages")
+    async def claude_messages(request: Request):
+        """Claude's own API, as strict about its format as the real one (_claude_refusal), with the answers and the
+        stream events it sends: thinking blocks without text first, then the text or a tool call."""
+        body = json.loads(await request.body())
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        state.setdefault("claude_requests", []).append(body)
+        state["last_headers"] = headers
+        if not headers.get("x-api-key"):
+            return _claude_error(401, "x-api-key header is required")
+        if headers.get("anthropic-version") != "2023-06-01":
+            return _claude_error(400, "anthropic-version: header is required")
+        if refusal := _claude_refusal(body):
+            return _claude_error(400, refusal)
+        if state.get("claude_status"):
+            return _claude_error(state["claude_status"], "forced")
+        if state.get("claude_busy"):
+            state["claude_busy"] -= 1
+            return _claude_error(429, "busy", {"retry-after": "0"})
+        model = body["model"]
+        limit, _ = (state.get("context_limits") or {}).get(model, (None, None))
+        if limit and len(json.dumps(body["messages"])) / 4 > limit:
+            state.setdefault("overflowed", []).append(model)
+            return _claude_error(400, f"prompt is too long: 9999999 tokens > {limit} maximum")
+        state.setdefault("models", []).append(model)
+        usage = _claude_usage(state, body)
+        last = body["messages"][-1]["content"]
+        answered = isinstance(last, list) and any(block["type"] == "tool_result" for block in last)
+        calls = body.get("tools") and not answered and (body.get("tool_choice") or {}).get("type") != "none"
+        offered = [t["name"] for t in body.get("tools") or []]
+        wanted = [name for name in state.get("claude_tools", []) if name in offered]
+        tool = (wanted or offered)[0] if calls else None
+        arguments = state.get("claude_tool_input", {"q": "x"})
+        tool_id = f"toolu_{len(body['messages'])}"
+        stop = "refusal" if state.get("claude_refuses") else "tool_use" if tool else "end_turn"
+        words = ["I can't ", "help with ", "that."] if stop == "refusal" else ["hi ", "from ", "claude"]
+        if not body.get("stream"):
+            content = [{"type": "thinking", "thinking": "", "signature": "EqQBCg"}]
+            content.append({"type": "text", "text": "Let me check." if tool else "".join(words)})
+            if tool:
+                content.append({"type": "tool_use", "id": tool_id, "name": tool, "input": arguments})
+            return {
+                "id": "msg_01",
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": content,
+                "stop_reason": stop,
+                "stop_sequence": None,
+                "usage": {**usage, "output_tokens": 7},
+            }
+
+        def event(kind: str, **fields) -> str:
+            return f"event: {kind}\ndata: {json.dumps({'type': kind, **fields})}\n\n"
+
+        async def gen():
+            delay = state.get("claude_delay", 0)
+            message = {"id": "msg_01", "type": "message", "role": "assistant", "model": model, "content": []}
+            message |= {"stop_reason": None, "stop_sequence": None, "usage": {**usage, "output_tokens": 1}}
+            state["claude_active"] = state.get("claude_active", 0) + 1
+            try:
+                yield event("message_start", message=message)
+                yield event("ping")
+                yield event("content_block_start", index=0, content_block={"type": "thinking", "thinking": ""})
+                yield event("content_block_delta", index=0, delta={"type": "thinking_delta", "thinking": ""})
+                yield event("content_block_delta", index=0, delta={"type": "signature_delta", "signature": "EqQBCg"})
+                yield event("content_block_stop", index=0)
+                yield event("content_block_start", index=1, content_block={"type": "text", "text": ""})
+                for word in ["Let me check."] if tool else words:
+                    await asyncio.sleep(delay)
+                    yield event("content_block_delta", index=1, delta={"type": "text_delta", "text": word})
+                    if state.get("claude_stream_error"):
+                        yield event("error", error={"type": "overloaded_error", "message": "Overloaded"})
+                        return
+                yield event("content_block_stop", index=1)
+                if tool:
+                    block = {"type": "tool_use", "id": tool_id, "name": tool, "input": {}}
+                    yield event("content_block_start", index=2, content_block=block)
+                    text = json.dumps(arguments)
+                    for piece in ("", text[:6], text[6:]):
+                        delta = {"type": "input_json_delta", "partial_json": piece}
+                        yield event("content_block_delta", index=2, delta=delta)
+                    yield event("content_block_stop", index=2)
+                yield event("a_new_event_kind", something=1)  # "handle unknown event types gracefully"
+                delta = {"stop_reason": stop, "stop_sequence": None}
+                yield event("message_delta", delta=delta, usage={"output_tokens": 7})
+                yield event("message_stop")
+            finally:
+                state["claude_active"] -= 1
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
 
     @app.post("/v1/chat/completions")
     async def chat(request: Request):
@@ -321,6 +443,70 @@ def create_mock(limit: int = 2) -> FastAPI:
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     return app
+
+
+def _claude_error(status: int, message: str, headers: dict | None = None) -> JSONResponse:
+    kind = CLAUDE_ERRORS.get(status, "invalid_request_error")
+    body = {"type": "error", "error": {"type": kind, "message": message}, "request_id": "req_mock"}
+    return JSONResponse(body, status_code=status, headers=headers)
+
+
+def _claude_refusal(body: dict) -> str | None:
+    """What the real API answers 400 to, for a request's format."""
+    extra = set(body) - CLAUDE_FIELDS
+    if extra:
+        return f"{sorted(extra)[0]}: Extra inputs are not permitted"
+    if not isinstance(body.get("max_tokens"), int):
+        return "max_tokens: Field required"
+    if "temperature" in body and body["temperature"] > 1:
+        return "temperature: Input should be less than or equal to 1"
+    for tool in body.get("tools") or []:
+        if set(tool) - {"name", "description", "input_schema"} or tool["input_schema"].get("type") != "object":
+            return "tools.0: a tool is a name, a description and an object input_schema"
+    messages = body.get("messages") or []
+    if not messages:
+        return "messages: at least one message is required"
+    if messages[-1]["role"] != "user":
+        return "This model does not support assistant message prefill. The conversation must end with a user message."
+    waiting: set[str] = set()  # tool calls of the last assistant turn
+    for i, message in enumerate(messages):
+        if message["role"] not in ("user", "assistant"):
+            return f"messages.{i}.role: Input should be 'user' or 'assistant'"
+        blocks = message["content"]
+        if not blocks:
+            return f"messages.{i}: all messages must have non-empty content"
+        results = [block.get("tool_use_id") for block in blocks if block["type"] == "tool_result"]
+        if message["role"] == "user":
+            if set(results) != waiting:
+                return f"messages.{i}: tool_use ids were found without tool_result blocks immediately after"
+            if any(block["type"] == "tool_result" for block in blocks[len(results) :]):
+                return f"messages.{i}: tool_result blocks must come first"
+            waiting = set()
+        for block in blocks:
+            if block["type"] == "text" and not block["text"].strip():
+                return f"messages.{i}: text content blocks must be non-empty"
+            if block["type"] == "tool_use":
+                if not re.fullmatch(r"[a-zA-Z0-9_-]+", block["id"]):
+                    return f"messages.{i}.content.id: String should match pattern '^[a-zA-Z0-9_-]+$'"
+                if not isinstance(block["input"], dict):
+                    return f"messages.{i}.content.input: Input should be a valid dictionary"
+                waiting.add(block["id"])
+    return None
+
+
+def _claude_usage(state: dict, body: dict) -> dict:
+    """Tokens, at about 4 characters each. With ``cache_control`` it's what automatic caching does: the longest earlier
+    prompt this one starts with is read, the rest written (only an unchanged start can be read)."""
+    parts = [body.get("tools"), body.get("system"), *body["messages"]]
+    prompt = "".join(json.dumps(part) for part in parts)
+    if "cache_control" not in body:
+        fresh = {"input_tokens": len(prompt) // 4}
+        return {**fresh, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+    saved = state.setdefault("claude_cache", [])
+    read = max((len(earlier) for earlier in saved if prompt.startswith(earlier)), default=0)
+    saved.append(prompt)
+    written = (len(prompt) - read) // 4
+    return {"input_tokens": 3, "cache_creation_input_tokens": written, "cache_read_input_tokens": read // 4}
 
 
 def _tool_call(body: dict):

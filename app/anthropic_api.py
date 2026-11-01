@@ -193,22 +193,27 @@ def to_chat(payload: dict) -> dict:
 
 def _usage(usage: dict | None) -> dict:
     usage = usage or {}
-    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+    details = usage.get("prompt_tokens_details") or {}
+    cached = details.get("cached_tokens") or 0
+    written = details.get("cache_write_tokens") or 0
     result = {
-        "input_tokens": max(0, (usage.get("prompt_tokens") or 0) - cached),
+        "input_tokens": max(0, (usage.get("prompt_tokens") or 0) - cached - written),
         "output_tokens": usage.get("completion_tokens") or 0,
     }
     if cached:
         result["cache_read_input_tokens"] = cached
+    if written:
+        result["cache_creation_input_tokens"] = written
     return result
 
 
-def _arguments(raw) -> dict:
+def tool_input(raw) -> dict:
+    """A tool call's arguments (JSON text in chat completions) as the object the Messages format has."""
     if isinstance(raw, dict):
         return raw
     try:
         value = json.loads(raw or "{}")
-    except ValueError:
+    except (TypeError, ValueError):
         return {"_raw": raw}
     return value if isinstance(value, dict) else {"value": value}
 
@@ -230,7 +235,7 @@ def from_chat(body: dict, model: str) -> dict:
                 "type": "tool_use",
                 "id": call.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
                 "name": function.get("name", ""),
-                "input": _arguments(function.get("arguments")),
+                "input": tool_input(function.get("arguments")),
             }
         )
     return {

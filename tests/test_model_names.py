@@ -88,6 +88,7 @@ def usage_row(model, upstream, prompt=1_000_000, day="2026-10-31", client="ali")
         "prompt_tokens": prompt,
         "completion_tokens": 0,
         "cached_tokens": 0,
+        "cache_write_tokens": 0,
     }
 
 
@@ -114,6 +115,7 @@ def test_request_rows_have_their_label_and_price(catalog):
         "upstream": "Synthetic",
         "prompt_tokens": 1_000_000,
         "cached_tokens": 0,
+        "cache_write_tokens": 0,
         "completion_tokens": 0,
     }
     costed = request_costs([row], [], {}, catalog, NAMES)[0]

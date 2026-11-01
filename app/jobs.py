@@ -467,7 +467,7 @@ class JobRunner:
                 return
             finishing = True
             if status < 400:
-                prompt, completion, _ = self._usage_of(body)
+                prompt, completion, *_ = self._usage_of(body)
                 fields.update(prompt_tokens=prompt, completion_tokens=completion)
                 await asyncio.to_thread(self.store.finish_job, job_id, "succeeded", **fields)
             else:

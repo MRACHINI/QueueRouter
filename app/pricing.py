@@ -65,6 +65,7 @@ class Price:
     cached_input: float
     source: str  # human-readable: "manual", "official (deepseek)", "median of 7 providers", ...
     reference: str | None = None  # models.dev "provider/model" when it came from there
+    writes_cache: bool = False  # on an upstream that bills cache writes (Claude): what's new in a prompt costs more
 
 
 def _norm(model_id: str) -> str:
@@ -232,24 +233,33 @@ class _PriceBook:
         """What a usage or request row cost: the model that answered, on the upstream that served it."""
         target = row["target_model"] if "target_model" in row.keys() else None
         price = self.of(self.names.unpin(target or row["model"])[0], row["upstream"])
-        return token_costs(price, row["prompt_tokens"], row["completion_tokens"], row["cached_tokens"])
+        return token_costs(
+            price, row["prompt_tokens"], row["completion_tokens"], row["cached_tokens"], row["cache_write_tokens"]
+        )
 
 
-def token_costs(price: Price | None, prompt: int, completion: int, cached: int) -> tuple[float, float, float] | None:
-    """(normal input, cached input, output) in USD; cached prompt tokens at the cheaper cached rate."""
+def token_costs(
+    price: Price | None, prompt: int, completion: int, cached: int, written: int = 0
+) -> tuple[float, float, float] | None:
+    """(normal input, cached input, output) in USD; cached prompt tokens at the cheaper cached rate. Tokens written
+    to the cache are normal input at a higher rate (providers report them where writes cost extra)."""
     if price is None:
         return None
     cached = min(cached or 0, prompt or 0)
-    normal = ((prompt or 0) - cached) * price.input / 1e6
+    written = min(written or 0, (prompt or 0) - cached)
+    normal = ((prompt or 0) - cached + written * (CACHE_WRITE_RATE - 1)) * price.input / 1e6
     return normal, cached * price.cached_input / 1e6, (completion or 0) * price.output / 1e6
 
 
-def token_cost(price: Price | None, prompt: int, completion: int, cached: int) -> tuple[float, float] | None:
+def token_cost(
+    price: Price | None, prompt: int, completion: int, cached: int, written: int = 0
+) -> tuple[float, float] | None:
     """(input cost, output cost) in USD."""
-    costs = token_costs(price, prompt, completion, cached)
+    costs = token_costs(price, prompt, completion, cached, written)
     return None if costs is None else (costs[0] + costs[1], costs[2])
 
 
+CACHE_WRITE_RATE = 1.25  # Claude: what a write to its 5-minute prompt cache costs, in input prices
 PRICE_PER_MONTH_DAYS = 30.4375
 MIX_DAYS = 30  # usage that decides the token mix below
 MIN_MIX_TOKENS = 1_000_000  # less says little: DEFAULT_MIX is used
@@ -267,8 +277,10 @@ def token_mix(prompt: int, cached: int, completion: int) -> tuple[float, float, 
 
 def blended_price(price: Price, mix: tuple[float, float, float]) -> float:
     """USD per million tokens of that mix: one figure that compares models for the work actually done. An agent's
-    tokens are mostly cached input, so input and output prices alone would mislead."""
-    return mix[0] * price.input + mix[1] * price.cached_input + mix[2] * price.output
+    tokens are mostly cached input, so input and output prices alone would mislead. Where cache writes are billed,
+    nearly all normal input is a write: it's what the next request will read."""
+    normal = price.input * (CACHE_WRITE_RATE if price.writes_cache else 1)
+    return mix[0] * normal + mix[1] * price.cached_input + mix[2] * price.output
 
 
 def price_text(price: Price | None, mix: tuple[float, float, float]) -> str:
@@ -285,6 +297,7 @@ def _empty_usage() -> dict:
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "cached_tokens": 0,
+        "cache_write_tokens": 0,  # among input_tokens
         "input_tokens": 0,  # prompt tokens that weren't cached
         "cost_in": 0.0,
         "cost_cached": 0.0,
@@ -296,7 +309,7 @@ def _empty_usage() -> dict:
 
 
 def _add_usage(out: dict, row, costs: tuple[float, float, float] | None) -> None:
-    for field in ("requests", "errors", "prompt_tokens", "completion_tokens", "cached_tokens"):
+    for field in ("requests", "errors", "prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
         out[field] += row[field] or 0
     out["input_tokens"] += max((row["prompt_tokens"] or 0) - (row["cached_tokens"] or 0), 0)
     if costs is None:
@@ -383,6 +396,7 @@ def request_costs(rows, calls, overrides: dict, catalog: PriceCatalog, names: Mo
                 "calls": len(made),
                 "tokens_in": used["input_tokens"] if tokens else None,
                 "tokens_cached": used["cached_tokens"] if tokens else None,
+                "tokens_written": used["cache_write_tokens"] if tokens else None,
                 "tokens_out": used["completion_tokens"] if tokens else None,
                 "cost_in": used["cost_in"],
                 "cost_cached": used["cost_cached"],

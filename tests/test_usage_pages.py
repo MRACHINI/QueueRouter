@@ -33,6 +33,7 @@ def usage_row(model, prompt, cached, completion, day="2026-10-31", client="ali")
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "cached_tokens": cached,
+        "cache_write_tokens": 0,
     }
 
 
@@ -45,6 +46,7 @@ def request_row(rid, model, prompt, cached, completion, council=None):
         "upstream": "syn",
         "prompt_tokens": prompt,
         "cached_tokens": cached,
+        "cache_write_tokens": 0,
         "completion_tokens": completion,
     }
 

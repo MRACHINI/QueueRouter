@@ -9,10 +9,9 @@ from dataclasses import dataclass, field
 import httpx
 
 from .limits import error_message
-from .upstream import upstream_headers
+from .upstream import claude_headers, upstream_headers
 
 FAILED_RETRY_S = 10  # retry a model list we never managed to fetch this often
-ANTHROPIC_VERSION = "2023-06-01"  # the Claude API version its model list is asked in
 
 
 @dataclass
@@ -27,8 +26,8 @@ async def fetch_models(client: httpx.AsyncClient, base_url: str, api_key: str, t
     """GET {base_url}/models; raises on network errors or a non-200 / malformed answer (with the provider's
     own reason, shown on the Upstreams page)."""
     headers, params = upstream_headers({}, api_key), {}
-    if "api.anthropic.com" in base_url:  # Anthropic: its API version header, and up to 1,000 models per page
-        headers["anthropic-version"] = ANTHROPIC_VERSION
+    if "api.anthropic.com" in base_url:  # Anthropic: its own headers, and up to 1,000 models per page
+        headers = claude_headers(headers, api_key)
         params["limit"] = 1000
     response = await client.get(f"{base_url.rstrip('/')}/models", headers=headers, params=params, timeout=timeout)
     if response.status_code != 200:

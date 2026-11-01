@@ -10,8 +10,8 @@ Where they come from, first that knows:
 
 opencode sends the chosen level as ``reasoning_effort``. Providers differ, so it's translated per upstream:
 OpenRouter takes ``reasoning: {effort}``; vLLM servers (ArliAI) switch thinking through the chat template and
-know only low / medium / high; OpenAI-style APIs take ``reasoning_effort`` as it is; Claude's OpenAI-compatible
-endpoint ignores it (no levels are offered there).
+know only low / medium / high; OpenAI-style APIs take ``reasoning_effort`` as it is; Claude gets no level
+(none are offered there: app/claude.py leaves the field out).
 
 The reference list also carries Artificial Analysis scores: the strength order uses them when there's no key.
 """
@@ -85,7 +85,7 @@ def style_of(base_url: str, entry: dict | None) -> str:
     if "openrouter.ai" in url:
         return "openrouter"
     if "api.anthropic.com" in url:
-        return "none"  # its OpenAI-compatible endpoint ignores reasoning_effort
+        return "none"
     if "arliai.com" in url:
         # tested live (2026-10): its reasoning models think whatever is sent (chat-template switch, reasoning,
         # thinking, reasoning_effort, /no_think), and effort makes no steady difference: a selector would mislead

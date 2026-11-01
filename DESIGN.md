@@ -1462,6 +1462,37 @@ v0.52.0: prices in opencode names.
   a price, unknown prices `$?`, councils nothing. Settings → opencode turns it off; opencode's cost uses exact rates.
 - Models without a score are numbered too: names no longer start with a provider, so a name starting with a digit or a
   `$` would have sorted among or above the ranked ones.
+v0.53.0: Claude through its own API, with prompt caching.
+- Upstreams with the Anthropic preset speak Messages: `app/claude.py` translates a `chat/completions` request right
+  before it's sent and the answer as it's read, so the queue, retries, failover, usage
+  and the adapters still see chat completions. Plain httpx like every other upstream, not Anthropic's SDK: its own
+  retries and connection handling would work against QueueRouter's slots, retries and failover. By the preset, not the
+  address: a Custom upstream at api.anthropic.com keeps the OpenAI-compatible endpoint, as a way back.
+- The translation follows what the OpenAI-compatible endpoint documented: fields it ignored are left out, system and
+  developer messages go to the top joined by a newline. Added: tool call ids are made valid (a conversation can come
+  from another provider), tool results move to the start of their turn, `max_tokens` is filled in (16k, 64k streamed)
+  and kept within the model's limit, `temperature` capped at 1. `response_format` is sent for a strict `json_schema`
+  only; the rest was a 400 there and now goes to QueueRouter's own repair. An audio or file part becomes a short note.
+- Automatic caching: a top-level `cache_control` on every request with tools or a history. The breakpoint follows the
+  last block, so one marker covers an agent loop. A single message without tools marks only its system prompt: that part
+  can come again, while a write of a one-off message would be a 25% surcharge. Default 5-minute lifetime (each read
+  renews it; 1 hour doubles the write price).
+- `cache_write_tokens` (migration 37; in `requests` and `usage_daily`, from `prompt_tokens_details`): prompt tokens
+  written to the cache, charged 1.25 × input (`CACHE_WRITE_RATE`). They count as normal input, so the In cost is higher
+  for them; a tooltip and a note on the Usage page give the number. OpenRouter reports the same field.
+- The price in opencode names counts a Claude row's input share at the write rate (`Price.writes_cache`): with automatic
+  caching nearly all input that isn't read from the cache is written to it.
+- Thinking isn't passed back. opencode keeps no thinking blocks; keeping them in QueueRouter (by tool call id) would
+  break on any edited history, since blocks are bound to everything before them: opencode prunes old tool output,
+  QueueRouter compacts, and that's a 400 on Claude 5.1 and later for accounts created since 2026-08-31 unless
+  `drop_block` (a beta) is used. With adaptive thinking a turn without blocks is valid, and "if you never send thinking
+  blocks back, the check has nothing to test": the model loses its earlier reasoning, as it did on the OpenAI endpoint.
+- An app sending `include_usage: false` gets the same as one that says nothing: usage is asked for and hidden from it.
+- Model lists from api.anthropic.com use `x-api-key` too.
+- Tested against a strict mock of the API written from its docs (`tests/mock_upstream.py`), with the official OpenAI and
+  Anthropic SDKs, and with real opencode 2.2.5 and 1.19.5 through that mock: their real shell tools ran, and system
+  prompt, tools and earlier messages stayed byte-identical between requests, so about 97% of a follow-up was readable
+  from the cache. Not yet tested against Claude itself.
 
 ### Later (agreed, not scheduled)
 
@@ -1565,11 +1596,8 @@ v0.52.0: prices in opencode names.
   judge (Haiku for picks / light review); compaction (summarise, cheap summary model) on Claude-facing aliases;
   the orchestrator only for big jobs on its own alias with a tight budget (~3 rounds, ~4 tasks), Sonnet not
   Haiku. To build, most valuable first:
-  - **Native Anthropic upstream with prompt caching.** Talk to Claude through the Messages API (not the
-    compatibility layer): convert chat requests to /v1/messages and back (QueueRouter already converts the other
-    way for /v1/messages clients), mark the stable start of the conversation (system prompt, tools, older turns)
-    with cache_control so repeats cost ~10%; report cached tokens; thinking returned as reasoning; workspace
-    header and API version settable. Makes every Claude setup above cheaper.
+  - **Native Anthropic upstream with prompt caching** (done: v0.53.0). Left: thinking returned as reasoning, a
+    workspace header and per-model effort levels.
   - **Escalation alias:** a cheap model does the step; Claude is called only when needed (repeated tool
     failures / errors in the conversation, the cheap model saying it is unsure, or a refusal). Hard to judge
     reliably; start with explicit signals (failed tests twice, error loops).

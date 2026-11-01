@@ -103,6 +103,11 @@ from a **web admin UI**.
 - **Other API shapes**: Anthropic Messages (`/v1/messages`) and OpenAI Responses (`/v1/responses`)
   are translated to chat completions, so tools speaking either API get the same queue, policies,
   aliases and fallbacks. Hosted/server tools (web search, code interpreter…) aren't supported.
+- **Claude with prompt caching**: the Anthropic preset talks to Claude's own Messages API, so agents and
+  conversations are cached by themselves: what Claude read a moment ago costs a tenth of the input price or less. Tools,
+  streaming and images work as before; apps keep speaking chat completions. Writing to the cache costs 1.25 × the input
+  price, so a single message without tools only caches its system prompt. Claude's thinking isn't shown, or passed back
+  between tool calls. An upstream added as Custom with the same address stays on Claude's OpenAI-compatible endpoint.
 - **Backup and restore** (owner): download a zip (database + optional encryption key), daily
   automatic copies in `/data/backups`, and restore from an upload or a listed copy — checked first,
   then QueueRouter restarts itself to load it (the previous data is kept).
@@ -133,7 +138,7 @@ from a **web admin UI**.
   model, CSV export.
 - **Cost at official prices**: what your tokens would have cost on the model makers' own APIs
   (prices from [models.dev](https://models.dev), refreshed daily; cached prompt tokens at the
-  cached rate), and how much your flat-rate plan saves. Per-model overrides on the Models page;
+  cached rate, tokens written to Claude's cache at 1.25 × the input price), and how much your flat-rate plan saves. Per-model overrides on the Models page;
   set your plan price on the pool (ArliAI plans fill it in).
 - **Alerts**: upstream down/recovered, queue backed up, long waits, high error rate, clients hitting
   their limits, keys about to expire, daily tokens — shown in the admin (unread badge) and sent to
@@ -378,7 +383,8 @@ QueueRouter plugin (re-install it once after upgrading to 0.38).
 opencode shows a session cost next to the context size, worked out from each model's price. Through the plugin
 QueueRouter gives it that price: yours (**Models → Reference prices**), else nothing extra on a pool with a monthly
 price (e.g. ArliAI), the upstream's own price (OpenRouter), or the models.dev match, the highest when several
-upstreams serve a model. Councils and summaries make calls opencode can't see; the **Usage** page counts everything.
+upstreams serve a model. Councils and summaries make calls opencode can't see, and it isn't told about Claude's cache
+writes, which it prices as plain input; the **Usage** page counts everything.
 
 ### Model names
 
@@ -414,6 +420,7 @@ cached and output prices weighted by your own token mix of the last 30 days (a t
 read once a day: the same work priced on every model. For a coding agent most tokens are cached input, so input and
 output prices alone would mislead: at 17% input, 83% cached and 0.4% output, a model at $0.60 in, $0.11 cached and $2.20
 out shows `$0.203`, while one at $0.30 in, $0.30 cached and $1.20 out shows `$0.304`. The Models page shows your mix.
+On Claude the input share counts at 1.25 × the input price, because nearly all of it is written to the prompt cache.
 
 A monthly plan shows `plan`, because a request costs nothing extra, unless its row has a price of its own. A model
 without a known price shows `$?`, and a council shows none because one request makes several calls. Very cheap models

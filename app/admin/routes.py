@@ -97,8 +97,8 @@ PRICING_DAYS = 30  # the price table lists models used this recently (plus offer
 LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes / send anyway
 REQUEST_LIST_COLUMNS = (
     "id, ts, client, priority, model, target_model, upstream, status, outcome, retries, queue_ms, ttft_ms, "
-    "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, finish_reason, stopped, compaction, council, role, "
-    "parent"
+    "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, finish_reason, stopped, "
+    "compaction, council, role, parent"
 )
 REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "id",
@@ -1553,6 +1553,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "prompt_tokens",
             "completion_tokens",
             "cached_tokens",
+            "cache_write_tokens",
             "cost_usd",
             *(["upstream", "label"] if by_model else []),
         ]
