@@ -39,7 +39,7 @@ async def test_pinned_names_go_to_that_upstream(make_stack, make_mock):
         new = (await c.get("/admin/aliases/new")).text  # the picker offers one entry per provider
         assert '"id": "mock-model@second"' in new and '"id": "mock-model@upstream"' in new and "only second" in new
         config = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
-        assert config["pinned"]["name"] == "pinned → upstream|mock-model"
+        assert config["pinned"]["name"] == "$?|pinned → mock-model|upstream"
         assert config["pinned"]["limit"]["context"] == 262_144
 
 

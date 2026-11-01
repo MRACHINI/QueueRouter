@@ -9,7 +9,7 @@ That way ``GLM-4.6-Derestricted-v5`` gets GLM-4.6's score (shown as inherited), 
 
 opencode's desktop app sorts a provider's models by name, so the order is carried in the names: ``01|58.3|…``,
 ``02|52.0|…`` (the number, then the score); aliases (the entries picked on purpose) come first as ``00|…``;
-models without a score last.
+models without a score last, numbered too, so they stay there whatever their names start with.
 """
 
 from __future__ import annotations
@@ -195,20 +195,14 @@ class Scores:
 
 def numbered(ranked: list[tuple[str, float]], aliases: list[str], unranked: list[str]) -> list[tuple[str, str]]:
     """[(model or alias, its prefix)] in opencode order: aliases ("00"), the ranked strongest first (01, 02…,
-    ties by name), then the rest without a number."""
-    width = max(2, len(str(len(ranked))))
+    ties by name), then the rest."""
+    width = max(2, len(str(len(ranked) + len(unranked))))
     order = [(a, "0" * width) for a in sorted(aliases)]
-    for i, (model, _) in enumerate(sorted(ranked, key=lambda x: (-x[1], x[0])), 1):
-        order.append((model, str(i).zfill(width)))
-    order += [(m, "") for m in sorted(unranked)]
-    return order
+    strongest = [model for model, _ in sorted(ranked, key=lambda x: (-x[1], x[0]))]
+    return order + [(model, str(i).zfill(width)) for i, model in enumerate([*strongest, *sorted(unranked)], 1)]
 
 
-def label(prefix: str, score: float | None, inherited: bool, name: str) -> str:
-    """The name opencode shows: ``03|45.1|Provider|model`` (``~45.1`` when it's the base model's score),
-    ``00|alias → Provider|model`` for an alias without a score of its own; a model without a score keeps its name."""
-    if not prefix:
-        return name
-    if score is None:
-        return f"{prefix}{SEPARATOR}{name}"
-    return f"{prefix}{SEPARATOR}{'~' if inherited else ''}{score:.1f}{SEPARATOR}{name}"
+def label(prefix: str, score: float | None, price: str, name: str) -> str:
+    """The name opencode shows: ``04|32.5|$0.200|model|Provider``; what isn't known or is switched off is left out."""
+    shown_score = f"{score:.1f}" if score is not None else ""
+    return SEPARATOR.join(part for part in (prefix, shown_score, price, name) if part)

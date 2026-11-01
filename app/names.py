@@ -1,5 +1,6 @@
 """What a model is called. A model on a provider (upstream) is one entry: the same ID on two providers is two entries,
-each with its own optional custom name, price, score and limits, and is shown as ``Provider|name`` everywhere.
+each with its own optional custom name, price, score and limits, and is shown as ``Provider|name`` on QueueRouter's
+pages and ``name|Provider`` in opencode (where the number, score and price come first).
 
 A custom name is what people see and what a model's automatic score, price and thinking levels are looked up by. The
 real ID stays what's stored, sent to the provider, and what opencode sends back, so naming a model breaks nothing.
@@ -42,14 +43,21 @@ class ModelNames:
         provider = upstream if upstream and upstream != "-" else pinned
         return f"{provider}{SEPARATOR}{self.name(bare, provider)}" if provider else self.name(bare)
 
-    def label_on(self, model: str, upstreams: Iterable[str]) -> str:
-        """For a choice several providers may serve: ``A, B +2|name`` (the first custom name among them)."""
+    def _on(self, model: str, upstreams: Iterable[str]) -> tuple[str, str]:
+        """(``A, B +2``, the first custom name among them) for a model several providers may serve."""
         names = list(dict.fromkeys(upstreams))
-        if len(names) < 2:
-            return self.label(model, names[0] if names else None)
         shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
-        custom = next((n for n in (self.name(model, u) for u in names) if n != model), model)
-        return f"{shown}{SEPARATOR}{custom}"
+        return shown, next((n for n in (self.name(model, u) for u in names) if n != model), model)
+
+    def label_on(self, model: str, upstreams: Iterable[str]) -> str:
+        """``A, B +2|name``: for a choice several providers may serve."""
+        shown, custom = self._on(model, upstreams)
+        return f"{shown}{SEPARATOR}{custom}" if shown else custom
+
+    def listed(self, model: str, upstreams: Iterable[str]) -> str:
+        """``name|Provider``, how opencode shows it: the name after the number, score and price."""
+        shown, custom = self._on(model, upstreams)
+        return f"{custom}{SEPARATOR}{shown}" if shown else custom
 
     def of_request(self, model: str | None, target: str | None, upstream: str | None) -> str:
         """What a request asked for and got: ``Provider|name``, or ``alias → Provider|name``."""

@@ -41,11 +41,11 @@ def test_names_match_their_base_model():
     assert scores.score("nvidia/kimi-k3.1-pro:free", "intelligence")[0] == 70
     assert scores.score("Kimi K3.1 Pro", "agentic") is None  # that index isn't there
     order = ranking.numbered([("a", 10), ("b", 30), ("c", 30)], ["team"], ["z", "y"])
-    assert order == [("team", "00"), ("b", "01"), ("c", "02"), ("a", "03"), ("y", ""), ("z", "")]
-    assert ranking.label("03", 45.1, False, "up|m") == "03|45.1|up|m"
-    assert ranking.label("04", 56, True, "GLM-4.6-Derestricted-v5") == "04|~56.0|GLM-4.6-Derestricted-v5"
-    assert ranking.label("00", None, False, "team → m") == "00|team → m"
-    assert ranking.label("", None, False, "z") == "z"
+    assert order == [("team", "00"), ("b", "01"), ("c", "02"), ("a", "03"), ("y", "04"), ("z", "05")]
+    assert ranking.label("03", 45.1, "$0.20", "m|up") == "03|45.1|$0.20|m|up"
+    assert ranking.label("04", 56, "", "GLM-4.6-Derestricted-v5") == "04|56.0|GLM-4.6-Derestricted-v5"
+    assert ranking.label("00", None, "$?", "team → m") == "00|$?|team → m"
+    assert ranking.label("", None, "", "z") == "z"
 
 
 async def test_index_is_read_page_by_page(tmp_path):
@@ -85,10 +85,10 @@ async def test_opencode_list_is_numbered_by_strength(make_stack):
         await add_chain(c, "smart", "mock-model", ["other-model"], ["errors"])
         models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
         assert list(models) == ["smart", "mock-model@upstream", "small-model@upstream", "other-model@upstream"]
-        assert models["smart"]["name"].startswith("00|smart")
-        assert models["mock-model@upstream"]["name"] == "01|70.0|upstream|mock-model"
-        assert models["small-model@upstream"]["name"] == "02|50.0|upstream|small-model"
-        assert models["other-model@upstream"]["name"] == "upstream|other-model"
+        assert models["smart"]["name"].startswith("00|$?|smart → ")
+        assert models["mock-model@upstream"]["name"] == "01|70.0|$?|mock-model|upstream"
+        assert models["small-model@upstream"]["name"] == "02|50.0|$?|small-model|upstream"
+        assert models["other-model@upstream"]["name"] == "03|$?|other-model|upstream"  # stays last, whatever its name
         page = (await c.get("/admin/models")).text
         assert "Strength order in opencode" in page and "Artificial Analysis" in page and "Thinking levels" in page
 

@@ -238,6 +238,7 @@ TUNABLES: dict[str, type] = {
     "affinity_wait_s": float,
     "lb_strategy": str,
     "opencode_rank": bool,
+    "opencode_price": bool,
     "opencode_plugin_updates": bool,
     "rank_index": str,
     "rank_key": str,
@@ -311,6 +312,7 @@ class Settings:
     # Several upstreams
     lb_strategy: str = "least-busy"  # least-busy | weighted | ordered (failover)
     opencode_rank: bool = False  # order and number the opencode model list by strength (app/ranking.py)
+    opencode_price: bool = True  # show each model's blended price in its opencode name (app/pricing.py)
     opencode_plugin_updates: bool = True  # installed opencode plugins replace themselves with the served one
     rank_index: str = "intelligence"  # intelligence | coding | agentic (Artificial Analysis)
     rank_key: str = ""  # Artificial Analysis API key (free tier)

@@ -60,7 +60,16 @@ from .opencode import (
     wellknown_manifest,
 )
 from .params import CHARS_PER_TOKEN, apply_rules, estimate_prompt_tokens, parse_rules, requested_output, too_long
-from .pricing import Price, PriceCatalog, resolve, token_cost
+from .pricing import (
+    DEFAULT_MIX,
+    MIX_DAYS,
+    Price,
+    PriceCatalog,
+    price_text,
+    resolve,
+    token_cost,
+    token_mix,
+)
 from .quotas import MonthlyUsage, month_of, over_quota, quota_share, seconds_to_next_month
 from .ratelimit import RateLimiter
 from .sessions import session_key
@@ -126,6 +135,9 @@ MID_STREAM = b"\n\n"
 
 def sse_error(message: str, status: int, kind: str = "upstream_error") -> bytes:
     return b"data: " + json.dumps(error_body(message, status, kind)).encode() + b"\n\ndata: [DONE]\n\n"
+
+
+MIX_REFRESH_S = 86_400
 
 
 def stopped_at(fields: dict, answered: bool = False) -> str:
@@ -513,6 +525,15 @@ def create_app(
         upstream_id, name = snapshot.names.id_of(upstream), snapshot.names.name(model, upstream)
         costs = token_cost(resolve(model, price_overrides, prices, upstream_id, name), prompt, completion, cached)
         return sum(costs) if costs else 0.0
+
+    mix_read: dict = {"at": None, "mix": DEFAULT_MIX}
+
+    async def current_mix() -> tuple[float, float, float]:
+        """The token mix of the last days, for the prices in opencode names: read once a day, so names change rarely."""
+        now = time.monotonic()
+        if mix_read["at"] is None or now - mix_read["at"] > MIX_REFRESH_S:
+            mix_read.update(at=now, mix=token_mix(*await asyncio.to_thread(store.token_totals, MIX_DAYS)))
+        return mix_read["mix"]
 
     monthly = MonthlyUsage(cost_of)
 
@@ -1807,7 +1828,10 @@ def create_app(
 
         offered_by = {m: [t.upstream.name for t, _ in pairs] for m, pairs in listed.items()}  # shown in opencode
         manual_thinking = await asyncio.to_thread(store.list_model_thinking) if with_thinking else {}
-        overrides = await asyncio.to_thread(store.list_model_prices) if with_thinking else {}  # yours, current
+        show_prices = cfg().opencode_price
+        overrides = await asyncio.to_thread(store.list_model_prices) if with_thinking or show_prices else {}  # current
+        mix = await current_mix() if show_prices else DEFAULT_MIX
+        shown: dict[str, str] = {}  # the price in each entry's name
         allowed = client.policy.allowed_models
         result: dict[str, dict] = {}
         for model_id in sorted(served):
@@ -1817,11 +1841,14 @@ def create_app(
                     continue
                 pair = [(target, entry)]
                 limits = limits_on(model_id, [target])
-                name = snapshot.names.label(model_id, target.upstream.name)
+                name = snapshot.names.listed(model_id, [target.upstream.name])
                 result[key] = {"name": name, **({"limit": limits} if limits else {})}
+                price = model_price(model_id, pair, overrides)
+                if show_prices:
+                    shown[key] = price_text(price, mix)
                 if with_thinking and (levels := thinking_for(model_id, pair, manual_thinking)):
                     result[key]["thinking"] = {"variants": levels.variants, "default": levels.default}
-                if with_thinking and (price := model_price(model_id, pair, overrides)):
+                if with_thinking and price:
                     result[key]["cost"] = price_json(price)
                 if with_thinking and reads_images(model_id, pair):
                     result[key]["input"] = ["text", "image"]
@@ -1843,7 +1870,7 @@ def create_app(
                 limits = {"context": alias.virtual_context, "output": min(output, alias.virtual_context)}
             result[alias.name] = {
                 "name": f"{alias.name} → "
-                + snapshot.names.label_on(
+                + snapshot.names.listed(
                     target or "",
                     [t.upstream.name for t in pinned if t.upstream.name in offered_by.get(target, [])]
                     or [t.upstream.name for t in pinned],
@@ -1855,18 +1882,23 @@ def create_app(
             if with_thinking and plain and (levels := thinking_for(target, pairs, manual_thinking)):
                 result[alias.name]["thinking"] = {"variants": levels.variants, "default": levels.default}
             # a council makes several calls opencode never sees: no price rather than a low one
-            if with_thinking and plain and (price := model_price(target, pairs, overrides)):
+            price = model_price(target, pairs, overrides) if plain else None
+            if show_prices and plain:
+                shown[alias.name] = price_text(price, mix)
+            if with_thinking and price:
                 result[alias.name]["cost"] = price_json(price)
             if with_thinking and reads_images(target, pairs):
                 result[alias.name]["input"] = ["text", "image"]
-        if not cfg().opencode_rank:
-            return result
-        # opencode's desktop app sorts by name, so the order travels in the names; its terminal keeps this order
-        order, why = strength_order(list(result), await asyncio.to_thread(store.list_model_scores))
+        order, why = [(name, "") for name in result], {}
+        if cfg().opencode_rank:
+            # opencode's desktop app sorts by name, so the order travels in the names; its terminal keeps this order
+            order, why = strength_order(list(result), await asyncio.to_thread(store.list_model_scores))
         return {
             name: {
                 **result[name],
-                "name": ranking.label(prefix, why[name]["score"], why[name]["inherited"], result[name]["name"]),
+                "name": ranking.label(
+                    prefix, why.get(name, {}).get("score"), shown.get(name, ""), result[name]["name"]
+                ),
             }
             for name, prefix in order
         }

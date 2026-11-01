@@ -46,7 +46,7 @@ async def test_opencode_config(make_stack):
         models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
         assert models["mock-model@upstream"]["limit"]["context"] == 32_768
         assert models["smart"] == {
-            "name": "smart → upstream|mock-model",
+            "name": "plan|smart → mock-model|upstream",  # a monthly plan: nothing extra per request
             "limit": {"context": 32_768, "output": 16_384},
         }
 
@@ -158,8 +158,8 @@ async def test_model_names_show_providers(make_stack, make_mock):
         await add_alias(c, "pinned", "mock-model", upstream_ids=(second.id,))
         await add_alias(c, "ghost", "not-served")
         models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
-    assert models["mock-model@upstream"]["name"] == "upstream|mock-model"  # one entry per provider
-    assert models["mock-model@second"]["name"] == "second|mock-model"
+    assert models["mock-model@upstream"]["name"] == "$?|mock-model|upstream"  # one entry per provider
+    assert models["mock-model@second"]["name"] == "$?|mock-model|second"
     assert "mock-model" not in models
-    assert models["pinned"]["name"] == "pinned → second|mock-model"
-    assert models["ghost"]["name"] == "ghost → upstream, second|not-served"  # where it would be sent
+    assert models["pinned"]["name"] == "$?|pinned → mock-model|second"
+    assert models["ghost"]["name"] == "$?|ghost → not-served|upstream, second"  # where it would be sent

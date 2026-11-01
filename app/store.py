@@ -1363,6 +1363,16 @@ class Store:
             (since,),
         )
 
+    def token_totals(self, days: int) -> tuple[int, int, int]:
+        """(prompt, cached, completion) tokens over the last ``days`` days."""
+        since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - (days - 1) * 86_400))
+        row = self.read(
+            "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(cached_tokens), 0), "
+            "COALESCE(SUM(completion_tokens), 0) FROM usage_daily WHERE day >= ?",
+            (since,),
+        )[0]
+        return row[0], row[1], row[2]
+
     def used_models(self, days: int | None = None) -> list[tuple[str, str]]:
         """(upstream, model) pairs in the usage history (only the last ``days`` days when given)."""
         since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86_400)) if days else ""

@@ -11,7 +11,17 @@ from cryptography.fernet import Fernet
 
 from app.main import stopped_at
 from app.names import EVERY, ModelNames
-from app.pricing import Price, PriceCatalog, model_costs, request_costs, resolve, summarize_usage
+from app.pricing import (
+    DEFAULT_MIX,
+    Price,
+    PriceCatalog,
+    model_costs,
+    price_text,
+    request_costs,
+    resolve,
+    summarize_usage,
+    token_mix,
+)
 from app.store import MIGRATIONS, Store
 from app.upstream import client_identity, upstream_headers
 from tests.test_admin import OWNER, csrf_of, login
@@ -110,6 +120,19 @@ def test_request_rows_have_their_label_and_price(catalog):
     assert costed["label"] == "fast → Synthetic|GLM-4.7" and costed["cost"] == 1.0
 
 
+def test_the_price_in_opencode_names():
+    mix = token_mix(2_535_277_961, 2_102_288_531, 11_312_905)  # what a real month looked like
+    assert [round(share, 3) for share in mix] == [0.17, 0.826, 0.004]
+    assert price_text(Price(0.60, 2.20, 0.11, source="x"), mix) == "$0.203"
+    assert price_text(Price(0.30, 1.20, 0.30, source="x"), mix) == "$0.304"  # no cache discount: dearer than it looks
+    assert price_text(Price(1.0, 1.0, 1.0, source="x"), mix) == "$1.000"  # always three decimals
+    assert price_text(Price(0.15, 0.60, 0.02, source="x"), mix) == "$0.045"  # cheap models stay readable
+    assert price_text(Price(0.001, 0.002, 0.0001, source="x"), mix) == "$0.000"
+    assert price_text(None, mix) == "$?"
+    assert price_text(Price(0.0, 0.0, 0.0, source="plan"), mix) == "plan"
+    assert token_mix(10, 5, 5) == DEFAULT_MIX  # too little usage to say
+
+
 def test_how_far_a_cancelled_request_got():
     assert stopped_at({"queue_ms": None, "ttft_ms": None}) == "in queue"
     assert stopped_at({"queue_ms": 5, "ttft_ms": None}) == "before first byte"
@@ -158,8 +181,8 @@ async def test_opencode_lists_each_provider_and_requests_go_there(make_stack, ma
         second, ids = await two_providers(c, stack, make_mock)
         models = await opencode(c, stack)
         assert {k: v["name"] for k, v in models.items()} == {
-            "mock-model@upstream": "upstream|mock-model",
-            "mock-model@second": "second|mock-model",
+            "mock-model@upstream": "$?|mock-model|upstream",
+            "mock-model@second": "$?|mock-model|second",
         }
         before = stack.mock["served"]
         body = chat("hi", model="mock-model@second")
@@ -221,8 +244,8 @@ async def test_a_custom_name_shows_everywhere_and_finds_score_and_price(make_sta
 
         models = await opencode(c, stack, "?plugin=2")
         key = "hf:zai/secret-tune@upstream"
-        assert models[key]["name"] == "01|60.0|upstream|GLM-4.7"  # the score, by the custom name
-        assert models[key]["cost"]["input"] == 1  # the price too; the key is still the real ID
+        assert models[key]["name"] == "01|60.0|$0.299|GLM-4.7|upstream"  # the score and price, by the custom name
+        assert models[key]["cost"]["input"] == 1  # the key is still the real ID
 
         body = chat("hi", model=key)
         assert (await c.post("/v1/chat/completions", headers=stack.headers, json=body)).status_code == 200
@@ -241,7 +264,7 @@ async def test_a_custom_name_shows_everywhere_and_finds_score_and_price(make_sta
         form["name"] = ""  # empty: back to the ID
         assert "m=saved" in (await c.post("/admin/model-names", data=form)).headers["location"]
         models = await opencode(c, stack)
-        assert models[key]["name"] == "upstream|hf:zai/secret-tune"
+        assert models[key]["name"] == "01|$?|hf:zai/secret-tune|upstream"
 
         form.update(name="x", upstream_id="9999")
         assert "m=saved" not in (await c.post("/admin/model-names", data=form)).headers["location"]
@@ -270,8 +293,8 @@ async def test_each_provider_has_its_own_settings(make_stack, make_mock):
 
         models = await opencode(c, stack, "?plugin=2")
         mine, other = models["mock-model@second"], models["mock-model@upstream"]
-        assert mine["name"].startswith("01|77.0|second|")
-        assert not other["name"][0].isdigit()  # the other provider's row keeps what it had
+        assert mine["name"].startswith("01|77.0|$0.825|") and mine["name"].endswith("|mock-model|second")
+        assert other["name"] == "02|$?|mock-model|upstream"  # the other provider's row keeps what it had
         assert mine["cost"] == {"input": 2.0, "output": 3.0, "cache_read": 0.5} and "cost" not in other
         assert mine["limit"] == {"context": 4096, "output": 1024} and other["limit"]["context"] == 262_144
         assert "thinking" in mine and "thinking" not in other
@@ -335,6 +358,52 @@ async def test_every_page_with_a_model_opens_and_shows_labels(make_stack, make_m
         assert (await c.get("/admin/jobs")).status_code == 200
         csv_text = (await c.get("/admin/usage.csv?by=model")).text
         assert ",second,second|Named" in csv_text
+
+
+async def test_opencode_names_carry_the_price(make_stack):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0, opencode_rank=True)
+    stack.mock["extra_models"] = ["small-model"]
+    store = stack.app.state.store
+    store.set_model_score("mock-model", "t", 32.45)
+    store.set_model_price("mock-model", "t", None, 1.0, 2.0, 0.1)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        models = await opencode(c, stack)
+        assert models["mock-model@upstream"]["name"] == "01|32.5|$0.299|mock-model|upstream"
+        assert "~" not in models["mock-model@upstream"]["name"]
+        assert models["small-model@upstream"]["name"] == "02|$?|small-model|upstream"
+
+        pool = store.list_pools()[0]
+        store.update_pool(pool.id, "t", monthly_price=20.0)
+        stack.app.state.reload()
+        models = await opencode(c, stack)
+        assert models["small-model@upstream"]["name"] == "02|plan|small-model|upstream"  # nothing extra per request
+        assert models["mock-model@upstream"]["name"] == "01|32.5|$0.299|mock-model|upstream"  # yours still shows
+
+        await login(c, stack.url)
+        page = (await c.get("/admin/models")).text
+        assert "a typical mix until there" in page and "20.0% input" in page
+
+
+async def test_prices_in_names_can_be_turned_off(make_stack):
+    stack = make_stack(models_cache_s=0, opencode_rank=True, opencode_price=False)
+    store = stack.app.state.store
+    store.set_model_score("mock-model", "t", 40)
+    store.set_model_price("mock-model", "t", None, 1.0, 2.0, 0.1)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        models = await opencode(c, stack, "?plugin=2")
+    entry = models["mock-model@upstream"]
+    assert entry["name"] == "01|40.0|mock-model|upstream" and entry["cost"]["input"] == 1
+
+
+async def test_token_totals(make_stack):
+    stack = make_stack(bootstrap=OWNER)
+    store = stack.app.state.store
+    assert store.token_totals(30) == (0, 0, 0)
+    now = time.time()
+    tokens = {"prompt_tokens": 100, "cached_tokens": 40, "completion_tokens": 5}
+    old = {"id": "old", "ts": now - 40 * 86_400, "stream": 0, "retries": 0, "outcome": "done", **tokens}
+    store.record_requests([{**old, "id": "new", "ts": now}, old])
+    assert store.token_totals(30) == (100, 40, 5)  # the last 30 days only
 
 
 async def test_a_cancelled_stream_says_how_far_it_got(make_stack):

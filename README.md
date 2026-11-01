@@ -113,7 +113,8 @@ from a **web admin UI**.
 - **Costs**: at official prices, split into normal input, cached input and output, for each request (Requests
   page), per client and day, and per model over 1 day, 1 week or 30 days (Usage page). A council's cost adds up
   its members and judge. Click a row on the Requests page for its identifiers, User-Agents and timings.
-- **Every model shown with its provider**: `Synthetic|GLM-4.7` everywhere, and one entry per provider in opencode.
+- **Every model shown with its provider**: `Synthetic|GLM-4.7` on every page, and one entry per provider in opencode
+  (`04|32.5|$0.200|GLM-4.7|Synthetic`: number, score, price, name, provider).
   Each provider's model has its own price, score, context size and thinking levels. Give it an optional custom name
   and it shows everywhere, in opencode too, and its automatic score and price are found by that name; the real ID
   is still what's sent to the provider. See [Model names](#model-names).
@@ -382,8 +383,9 @@ upstreams serve a model. Councils and summaries make calls opencode can't see; t
 ### Model names
 
 **Models → Model names** gives a model on a provider your own name, for example `DeepSeek V4 Flash` for
-`hf:deepseek-ai/DeepSeek-V4.1-Flash-1017`. It then shows as `Synthetic|DeepSeek V4 Flash` on every page and in
-opencode, past requests included, and the model's automatic score, price and thinking levels are looked up by it.
+`hf:deepseek-ai/DeepSeek-V4.1-Flash-1017`. It then shows as `Synthetic|DeepSeek V4 Flash` on every page, past
+requests included, and as `DeepSeek V4 Flash|Synthetic` in opencode, and the model's automatic score, price and
+thinking levels are looked up by it.
 Several models can share a name: each still has its own row, and its own price and score if you set them.
 
 Names are for people. The real ID is what's stored and sent to the provider, so aliases, a client's allowed models
@@ -397,13 +399,26 @@ that send it, on any provider that offers it. Choose your model again in opencod
 ### Models in strength order
 
 Turn on **Settings → opencode → Order models by strength** and the opencode model list is numbered: your aliases
-first (`00|smart`), then the strongest models with their score (`01|58.3|…`, `02|52.0|…`; `~` marks a
-score taken from the base model), then models without a score. Scores come from
+first (`00|$0.200|smart → GLM-4.7|Synthetic`), then the strongest models with their score
+(`01|58.3|$0.200|GLM-4.7|Synthetic`), then models without a score (`12|$0.200|model|Synthetic`). Scores come from
 the [Artificial Analysis](https://artificialanalysis.ai/) index (intelligence, coding or agentic): as published in
 OpenRouter's public model list with no setup, or the full index with a free API key in Settings (read once a day), or
 from your own score per provider's model on the **Models** page, which wins. The index is searched by the model's
 custom name when it has one. Fine-tunes and renamed variants get their base model's score:
 `GLM-4.6-Derestricted-v5` ranks as GLM-4.6.
+
+### Prices in model names
+
+opencode names show one price, in USD per million tokens, so models can be compared at a glance. It's each row's input,
+cached and output prices weighted by your own token mix of the last 30 days (a typical mix until there's enough usage),
+read once a day: the same work priced on every model. For a coding agent most tokens are cached input, so input and
+output prices alone would mislead: at 17% input, 83% cached and 0.4% output, a model at $0.60 in, $0.11 cached and $2.20
+out shows `$0.203`, while one at $0.30 in, $0.30 cached and $1.20 out shows `$0.304`. The Models page shows your mix.
+
+A monthly plan shows `plan`, because a request costs nothing extra, unless its row has a price of its own. A model
+without a known price shows `$?`, and a council shows none because one request makes several calls. Very cheap models
+can show `$0.000`. Turn it off with **Settings → opencode → Show prices in model names**. opencode's own session cost
+still uses the exact rates.
 
 ## Environment variables (bootstrap only)
 

@@ -1452,6 +1452,16 @@ v0.51.0: a model on a provider is one entry.
   can't tell who closed the connection.
 - `Via` is neither forwarded to providers nor listed as an app identifier (the gate adds it).
 - A job past its deadline is never picked up: one added just after a tick had expired the others could run anyway.
+v0.52.0: prices in opencode names.
+- opencode names are `04|32.5|$0.200|model|Provider`: number, score (one decimal), price (three decimals), name,
+  provider. The admin pages stay `Provider|name`. The `~` for a score taken from the base model is gone from the names; the
+  Models page still says "from …".
+- The price is one figure per million tokens: a row's input, cached and output prices weighted by the token mix of the
+  last 30 days (all clients, read once a day, a typical mix below 1M tokens). One mix for all models, so it's the same
+  work priced on each; a model's own mix would reward what was used least. Monthly plans show `plan` unless the row has
+  a price, unknown prices `$?`, councils nothing. Settings → opencode turns it off; opencode's cost uses exact rates.
+- Models without a score are numbered too: names no longer start with a provider, so a name starting with a digit or a
+  `$` would have sorted among or above the ranked ones.
 
 ### Later (agreed, not scheduled)
 

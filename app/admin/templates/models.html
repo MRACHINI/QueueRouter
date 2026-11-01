@@ -43,8 +43,8 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
 </div>
 
 <h2 id="names">Model names</h2>
-<p class="muted small">Give a model on a provider your own name. It shows everywhere as <span class="mono">Provider|your name</span>,
-opencode included, and the model's automatic score, price and thinking levels are looked up by it. The real ID is still
+<p class="muted small">Give a model on a provider your own name. It shows everywhere as <span class="mono">Provider|your name</span>
+(in opencode <span class="mono">your name|Provider</span>), and the model's automatic score, price and thinking levels are looked up by it. The real ID is still
 what's sent to the provider. Apps can't ask for a model by this name (several can share one): use an alias for that. Empty
 the field and Save to go back to the ID.</p>
 <details class="card" {% if model_names | selectattr("name") | list %}open{% endif %}>
@@ -134,8 +134,7 @@ value wins; a plan's context cap still applies on top).</p>
 <h2 id="ranking">Strength order in opencode</h2>
 <p class="muted small">With <a href="/admin/settings">Settings → opencode → Order models by strength</a> on, the
 opencode model list is numbered: aliases first (<span class="mono">00</span>), then the strongest models, one entry per provider,
-with their score (<span class="mono">01|58.3|…</span>, <span class="mono">02|52.0|…</span>; a
-<span class="mono">~</span> before it: the base model's), then models without a score. A model's score is yours
+with their score (<span class="mono">01|58.3|$0.200|model|Provider</span>), then models without a score. A model's score is yours
 when you set one here (same scale as the index; it can also move an alias into the list), else the
 {{ ranking.index }} index, looked up by the model's custom name when it has one{% if not ranking.enabled %} · <strong>ordering is off</strong>{% endif %}. Variants such as
 fine-tunes get their base model's score (marked "from …").</p>
@@ -287,6 +286,10 @@ name when it has one. Each row is one provider's model: override it with another
 Empty override = automatic. Manual prices win over a reference; <em>Remove price</em> goes back to automatic.
 Costs are counted for the model that answered on the provider that served it (an alias's target), so price the target,
 not the alias. Prices apply to past usage too.</p>
+<p class="small muted">The price in opencode names is per million tokens of your mix: {{ "%.1f" | format(mix[0] * 100) }}% input,
+{{ "%.1f" | format(mix[1] * 100) }}% cached and {{ "%.1f" | format(mix[2] * 100) }}% output
+({% if typical_mix %}a typical mix until there's more usage{% else %}your last {{ mix_days }} days{% endif %}). A monthly plan
+shows <span class="mono">plan</span> unless its row has a price of its own. <a href="/admin/settings">Settings → opencode</a> turns it off.</p>
 
 <h2>Models per upstream</h2>
 {% for name, ids in models.items() %}

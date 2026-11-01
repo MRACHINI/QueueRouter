@@ -251,6 +251,31 @@ def token_cost(price: Price | None, prompt: int, completion: int, cached: int) -
 
 
 PRICE_PER_MONTH_DAYS = 30.4375
+MIX_DAYS = 30  # usage that decides the token mix below
+MIN_MIX_TOKENS = 1_000_000  # less says little: DEFAULT_MIX is used
+DEFAULT_MIX = (0.20, 0.79, 0.01)  # shares of normal input, cached input and output tokens, typical of coding agents
+
+
+def token_mix(prompt: int, cached: int, completion: int) -> tuple[float, float, float]:
+    """(normal input, cached input, output) shares of all tokens used."""
+    total = prompt + completion
+    if total < MIN_MIX_TOKENS:
+        return DEFAULT_MIX
+    cached = min(cached, prompt)
+    return (prompt - cached) / total, cached / total, completion / total
+
+
+def blended_price(price: Price, mix: tuple[float, float, float]) -> float:
+    """USD per million tokens of that mix: one figure that compares models for the work actually done. An agent's
+    tokens are mostly cached input, so input and output prices alone would mislead."""
+    return mix[0] * price.input + mix[1] * price.cached_input + mix[2] * price.output
+
+
+def price_text(price: Price | None, mix: tuple[float, float, float]) -> str:
+    """The price in an opencode name: ``$0.203``, ``plan`` (a monthly plan: nothing extra per request), ``$?``."""
+    if price is None:
+        return "$?"
+    return "plan" if price.source == "plan" else f"${blended_price(price, mix):.3f}"
 
 
 def _empty_usage() -> dict:

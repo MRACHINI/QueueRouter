@@ -45,7 +45,16 @@ from ..names import EVERY, ModelNames
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
 from ..presets import ARLIAI_PLANS, PRESETS, plan_for
-from ..pricing import PriceCatalog, model_costs, request_costs, resolve, summarize_usage
+from ..pricing import (
+    DEFAULT_MIX,
+    MIX_DAYS,
+    PriceCatalog,
+    model_costs,
+    request_costs,
+    resolve,
+    summarize_usage,
+    token_mix,
+)
 from ..ranking import CREDIT, CREDIT_URL, Scores
 from ..ranking import INDEXES as RANK_INDEXES
 from ..slots import STRATEGIES
@@ -252,6 +261,13 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Order models by strength",
         "Numbers the opencode model list: aliases first (00), then the strongest models (01, 02…), then the rest. "
         "Scores come from the index below, or from your own scores on the Models page.",
+    ),
+    "opencode_price": (
+        "opencode",
+        "Show prices in model names",
+        "Adds one price per million tokens to each model's name in opencode, from its prices and your token mix of "
+        "the last 30 days: 04|32.5|$0.200|model|Provider. A monthly plan without a price of its own shows plan, a "
+        "model without a known price $?. Prices are set on the Models page.",
     ),
     "rank_index": (
         "opencode",
@@ -1595,6 +1611,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             upstream_names=upstream_names,
             models=models,
             pricing=pricing,
+            mix=(mix := token_mix(*store.token_totals(MIX_DAYS))),
+            typical_mix=mix == DEFAULT_MIX,
+            mix_days=MIX_DAYS,
             references=ctx.prices.references(),
             catalog_size=len(ctx.prices.prices),
             catalog_age_h=round((time.time() - ctx.prices.fetched_at) / 3600, 1) if ctx.prices.fetched_at else None,
