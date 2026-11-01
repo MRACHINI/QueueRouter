@@ -7,17 +7,9 @@ one again (each view is in the audit log). Renaming a client keeps its key and m
 apply immediately.</p>
 
 <details class="card">
-  <summary><strong>opencode plugin</strong> (optional add-on, recommended)</summary>
-  <p class="small">Tags opencode's requests with its session and task, so QueueRouter finishes a
-  conversation (and its subagents) before starting new ones and applies run budgets per task; sends
-  title generation at low priority; and loads your models from <code>QUEUEROUTER_KEY</code> (no login needed),
-  keeping the list current while opencode runs (new models and aliases appear by themselves). Install once, then restart opencode:</p>
-  <p class="small muted">Linux / macOS:</p>
-<pre class="mono wrap-any" id="plugin-posix">{{ plugin.posix }}</pre>
-  <button type="button" class="secondary" data-copy="#plugin-posix">Copy</button>
-  <p class="small muted">Windows (PowerShell):</p>
-<pre class="mono wrap-any" id="plugin-windows">{{ plugin.windows }}</pre>
-  <button type="button" class="secondary" data-copy="#plugin-windows">Copy</button>
+  <summary><strong>Connect opencode</strong> (one command: plugin and key)</summary>
+  <p class="small muted" id="plugin-for"><em>Show</em> on a client below fills in its key.</p>
+  {% include "opencode_install.html" %}
 </details>
 
 <div class="table-wrap">
@@ -37,7 +29,7 @@ apply immediately.</p>
     <td data-label="Key">
       <code id="key-{{ c.id }}" class="wrap-any">{{ c.key_prefix }}…</code>
       {% if c.key_kept and user.can_view_content %}
-      <button type="button" class="secondary" data-show-key="/admin/clients/{{ c.id }}/key" data-target="#key-{{ c.id }}" data-csrf="{{ csrf }}">Show</button>
+      <button type="button" class="secondary" data-show-key="/admin/clients/{{ c.id }}/key" data-target="#key-{{ c.id }}" data-client="{{ c.name }}" data-csrf="{{ csrf }}">Show</button>
       {% elif c.key_kept %}
       <div class="small muted" title="A client's key also reads its job results and files">Showing keys needs <em>can read logged content</em> (Users page).</div>
       {% else %}

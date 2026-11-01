@@ -1351,6 +1351,7 @@ def create_app(
             name_table,
             lambda: snapshot.names,
             model_label,
+            lambda request: public_base(request),
         ),
     )
 

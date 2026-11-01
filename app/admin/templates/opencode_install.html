@@ -1,0 +1,12 @@
+  <p class="small">Run this once on each computer, then restart opencode (terminal version: <code>opencode service restart</code>).
+  It installs the QueueRouter plugin and saves the key in a file beside it, so nothing goes in the environment. The plugin
+  loads every model and alias this key may use and keeps the list current while opencode runs; tags requests with their
+  session and task, so a conversation (and its subagents) finishes before new ones start and run budgets apply per task;
+  sends title generation at low priority; and updates itself.</p>
+  <p class="small muted">Linux / macOS:</p>
+<pre class="mono wrap-any" id="plugin-posix">{{ plugin.posix }}</pre>
+  <button type="button" class="secondary" data-copy="#plugin-posix">Copy</button>
+  <p class="small muted">Windows (PowerShell):</p>
+<pre class="mono wrap-any" id="plugin-windows">{{ plugin.windows }}</pre>
+  <button type="button" class="secondary" data-copy="#plugin-windows">Copy</button>
+  <p class="small muted">Then pick a <code>queuerouter/…</code> model in opencode.</p>

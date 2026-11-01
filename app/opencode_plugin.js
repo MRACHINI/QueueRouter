@@ -1,6 +1,6 @@
 // QueueRouter plugin for opencode, served by QueueRouter at /opencode/queuerouter.js.
-// Install: save it in opencode's global plugin folder (~/.config/opencode/plugin/) and set
-// QUEUEROUTER_KEY to a client key (or log in with `opencode auth login <QueueRouter URL>`).
+// Install: the command on QueueRouter's Clients page saves this file in opencode's global plugin folder
+// (~/.config/opencode/plugin/) and the client key beside it, as queuerouter.key. QUEUEROUTER_KEY works too.
 //
 // One file for every opencode plugin system:
 // - setup()  — the newer ones (desktop app; opencode 2.x and 1.19): adds QueueRouter as a provider
@@ -16,22 +16,29 @@
 
 import { copyFileSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const BASE = "__QUEUEROUTER_BASE__"; // filled in by QueueRouter when it serves this file
 const PLUGIN = "__QUEUEROUTER_PLUGIN__"; // this file's fingerprint, also filled in by QueueRouter
 const PROVIDER = "queuerouter";
 const KEY_ENV = "QUEUEROUTER_KEY";
+const KEY_FILE = "queuerouter.key"; // beside this plugin
 const LOW_PRIORITY_AGENTS = new Set(["title", "summary"]);
 const REFRESH_S = Number(process.env.QUEUEROUTER_REFRESH_S ?? 60);
 const DEFAULT_CONTEXT = 131072;
 const DEFAULT_OUTPUT = 16384;
 const OPENCODE2_PACKAGE = "@opencode/ai/providers/openai-compatible"; // opencode 2.x built-in (1.x: @ai-sdk/openai-compatible)
 
-// The client key: QUEUEROUTER_KEY, else the one `opencode auth login <QueueRouter URL>` stored.
+// The client key: QUEUEROUTER_KEY, else the file beside this plugin, else auth.json (what `opencode auth login` stored
+// on 1.x; 2.x keeps logins in its database, out of a plugin's reach).
 function readKey() {
   if (process.env[KEY_ENV]) return process.env[KEY_ENV];
+  try {
+    const own = ownFile();
+    const key = own && readFileSync(join(dirname(own), KEY_FILE), "utf8").trim(); // an editor may add a BOM or line end
+    if (key) return key;
+  } catch {}
   try {
     const data = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
     const auth = JSON.parse(readFileSync(join(data, "opencode", "auth.json"), "utf8"));

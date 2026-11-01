@@ -261,7 +261,7 @@ owner account. Then:
 
 1. **Upstreams** → add ArliAI (pick your plan) with your API key.
 2. **Clients** → create a client per app (e.g. `opencode`, priority `high`); copy its key (shown
-   with a ready-made opencode config; **Show** on the Clients page displays it again later, for admins with
+   with a ready-made opencode command; **Show** on the Clients page displays it again later, for admins with
    *can read logged content* on the Users page, since a key also reads that client's job results).
 3. Optionally **Models** → add aliases.
 
@@ -310,44 +310,39 @@ ignored, and the log says so).
 
 ## Use with opencode
 
-opencode doesn't discover models from custom providers, so QueueRouter generates the provider
-config for it: every model and alias the key may use, with context limits (capped at your plan,
-e.g. ArliAI Pro 262,144) and `timeout: false` (queued requests may wait longer than opencode's
-default). The client page in the admin shows these commands with your key filled in.
+opencode doesn't discover models from custom providers, so QueueRouter gives it a small plugin with every model and
+alias the key may use, their context limits (capped at your plan, e.g. ArliAI Pro 262,144) and `timeout: false` (queued
+requests may wait longer than opencode's default).
 
-**Automatic (opencode 1.19+, recommended)** — log in once; opencode stores the key and reloads
-the model list from QueueRouter on every start, so new models and aliases just appear:
+One command installs the plugin and saves your client key in a file beside it, so nothing goes in the environment.
+**Clients → Connect opencode** shows it with your domain, and **Show** on a client fills in its key (a new client's page
+has it filled in already):
 
 ```bash
-QUEUEROUTER_KEY=<client key> opencode auth login https://queuerouter.example.com
+mkdir -p ~/.config/opencode/plugin && curl -fsSL https://queuerouter.example.com/opencode/queuerouter.js -o ~/.config/opencode/plugin/queuerouter.js && (umask 077; printf %s '<client key>' > ~/.config/opencode/plugin/queuerouter.key)
 ```
 
 ```powershell
-$env:QUEUEROUTER_KEY="<client key>"; opencode auth login https://queuerouter.example.com/windows
+$d="$HOME/.config/opencode/plugin"; New-Item -ItemType Directory -Force $d | Out-Null; Invoke-WebRequest https://queuerouter.example.com/opencode/queuerouter.js -OutFile "$d/queuerouter.js"; Set-Content "$d/queuerouter.key" '<client key>' -Encoding ascii
 ```
 
-Then pick a `queuerouter/…` model with `/models`. (This uses opencode's `/.well-known/opencode`
-mechanism; the Windows URL just swaps the login command for a PowerShell one.)
+Restart opencode (terminal version: `opencode service restart`) and pick a `queuerouter/…` model.
 
-**Plugin (optional, recommended)** — QueueRouter also serves an opencode plugin. One file works in the opencode
-**terminal** and the **desktop app**, on opencode 1.19 and 2.x (tested with 1.19.3 and 2.1.2). It tags each
-request with opencode's session and task, so QueueRouter finishes a conversation (subagents
-included) before starting new ones and applies run budgets and loop detection per task; it sends
-title generation at low priority so it never holds up the main model; and it loads your models on
-every start from `QUEUEROUTER_KEY` (then the login above is optional). It also keeps the list current **while
-opencode runs**: it checks QueueRouter every minute and, when models or aliases changed and no session is
-busy, reloads opencode's providers so the model picker updates by itself (`QUEUEROUTER_REFRESH_S`
-changes the interval, `0` turns it off). Even without the plugin, QueueRouter groups an opencode conversation's
-requests (subagents included) from the session headers opencode sends, and tags them `opencode`. Install once into opencode's
-global plugin folder and restart opencode (the Clients page shows these with your domain):
+The key sits in plain text in `queuerouter.key`. To change it, run the command again or edit the file, then restart
+opencode. `QUEUEROUTER_KEY` in the environment still works, and wins over the file.
 
-```bash
-mkdir -p ~/.config/opencode/plugin && curl -fsSL https://queuerouter.example.com/opencode/queuerouter.js -o ~/.config/opencode/plugin/queuerouter.js
-```
+Don't use `opencode auth login` on opencode 2.x: it fails while opencode's background service is running, and the key
+it stores stays in opencode's database, where the plugin can't read it. Models would show up, but without the live
+updates, thinking levels, session cost and self-update below.
 
-```powershell
-$d="$HOME/.config/opencode/plugin"; New-Item -ItemType Directory -Force $d | Out-Null; Invoke-WebRequest https://queuerouter.example.com/opencode/queuerouter.js -OutFile "$d/queuerouter.js"
-```
+**What the plugin does.** One file works in the opencode **terminal** and the **desktop app** (tested with opencode
+2.2.5; its code for 1.19 is still there, but no longer tested). It tags each request with opencode's session and task,
+so QueueRouter finishes a conversation (subagents included) before starting new ones and applies run budgets and loop
+detection per task; it sends title generation at low priority so it never holds up the main model; and it loads your
+models on every start. It also keeps the list current **while opencode runs**: it checks QueueRouter every minute and,
+when models or aliases changed and no session is busy, reloads opencode's providers so the model picker updates by
+itself (`QUEUEROUTER_REFRESH_S` changes the interval, `0` turns it off). Even without the plugin, QueueRouter groups an
+opencode conversation's requests (subagents included) from the session headers opencode sends, and tags them `opencode`.
 
 From 0.41 the plugin **updates itself**: when QueueRouter serves a changed plugin, the installed file is replaced
 with it (checked, and swapped in one step). The desktop app reloads it by itself; otherwise opencode uses it from
@@ -357,7 +352,7 @@ QueueRouter server hands out code that runs on every machine with the plugin, so
 machines. From 0.44 a plugin only updates itself over https (or from QueueRouter on the same machine): over plain
 http anyone on the network path could hand it other code. With an http address, re-install by hand.
 
-**Config file** — for older opencode, or if you prefer files: download it from the admin
+**Config file** — without the plugin: download it from the admin
 (**Clients → opencode.json** on the client's row), or with curl as below; save it as
 `opencode.json` in your project or point `OPENCODE_CONFIG` at it, then
 set `QUEUEROUTER_KEY` to your key. Re-download to refresh.
@@ -476,7 +471,7 @@ Traefik address doesn't.
 | `GET /v1/queue` | queue depth, your client's queued/active, estimated wait |
 | `GET /v1/opencode-config` | generated opencode provider config for your key |
 | `GET /opencode/queuerouter.js` | opencode plugin (session/task tags, priorities, model list) |
-| `GET /.well-known/opencode` | opencode login manifest (`/windows/.well-known/opencode` for Windows) |
+| `GET /.well-known/opencode` | opencode 1.x login manifest (`/windows/.well-known/opencode` for Windows) |
 | `GET /stats` | full stats as JSON (client key required) |
 | `GET /metrics` | Prometheus metrics; `Authorization: Bearer <metrics token>` (Settings → Monitoring) |
 | `/v1/schedules` | recurring jobs: `POST` `{"name", "cron", "request", ...job fields}`, `GET`, `PATCH {"enabled"}`, `DELETE`, `POST /{id}/run` |

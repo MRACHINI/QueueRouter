@@ -1493,6 +1493,21 @@ v0.53.0: Claude through its own API, with prompt caching.
   Anthropic SDKs, and with real opencode 2.2.5 and 1.19.5 through that mock: their real shell tools ran, and system
   prompt, tools and earlier messages stayed byte-identical between requests, so about 97% of a follow-up was readable
   from the cache. Not yet tested against Claude itself.
+v0.54.0: opencode 2.x connects with one command, and nothing goes in the environment.
+- The login never worked properly on 2.x. `opencode auth login` keeps the key in opencode.db, not auth.json, and the
+  plugin API shows a credential's id and label but not its value, so the plugin ran without a key: models came from
+  opencode's remote config, with no live updates, thinking levels, session cost or self-update, and no sign of it. The
+  login also runs its command in the background service, so it fails while that service runs without QUEUEROUTER_KEY.
+- The plugin reads `queuerouter.key` beside its own file, after QUEUEROUTER_KEY and before auth.json (which keeps
+  working). Beside the plugin, because that folder is the one place known to work on every install, the desktop app
+  included, whatever HOME and XDG say there. Not in auth.json: it can hold other logins, opencode reads it too, and a
+  one-liner can't merge JSON safely. A changed key takes a restart: the model list is the same, so nothing reloads.
+- Clients → Connect opencode has one command for both, for Linux/macOS and Windows PowerShell. A new key's page has the
+  key filled in; Show fills it in on the Clients page, and its answer carries the commands so the quoting stays on the
+  server. `-Encoding ascii` because Windows PowerShell's utf8 writes a BOM. The page uses the same public address as the
+  plugin it downloads (`public_base`): it used to ignore the proxy's X-Forwarded-* headers.
+- The login is gone from the page and the README. /.well-known/opencode stays for 1.x, and its error points at the page.
+- From here on the plugin is only tested on 2.x. Its 1.x code stays.
 
 ### Later (agreed, not scheduled)
 

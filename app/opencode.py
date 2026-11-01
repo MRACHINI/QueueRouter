@@ -5,7 +5,9 @@ provider block for it: every model and alias the client may use, with context/ou
 
 - ``GET /v1/opencode-config`` (client key): the config, for ``OPENCODE_CONFIG`` or as remote config.
 - ``GET /.well-known/opencode``: lets ``opencode auth login https://<domain>`` store the client key
-  and pull the config above on every start (``remote_config``), so model lists stay current.
+  and pull the config above on every start (``remote_config``), so model lists stay current. Only for
+  opencode 1.x: 2.x runs the login in its background service and keeps the key out of the plugin's reach,
+  so ``plugin_install_commands`` is the way in.
 """
 
 from __future__ import annotations
@@ -13,11 +15,14 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import shlex
 from collections.abc import Iterable
 from pathlib import Path
 
 PROVIDER_ID = "queuerouter"
 KEY_ENV = "QUEUEROUTER_KEY"
+KEY_FILE = "queuerouter.key"  # beside the plugin, which reads it
+KEY_PLACEHOLDER = "YOUR_CLIENT_KEY"
 DEFAULT_OUTPUT = 16_384
 CONTEXT_KEYS = (
     "context_length",
@@ -30,7 +35,10 @@ OUTPUT_KEYS = ("max_output_tokens", "max_completion_tokens", "max_tokens")  # la
 
 # The login command only hands opencode the key from $QUEUEROUTER_KEY (opencode runs it without a
 # shell and stores whatever it prints). Windows has no `sh`, hence a PowerShell variant.
-_MISSING = f"Set {KEY_ENV} to your QueueRouter client key (Admin > Clients), then run the login again."
+_MISSING = (
+    "opencode 2.x: use the one-line install on the Clients page of QueueRouter instead. "
+    f"Older opencode: set {KEY_ENV} to your client key, then run the login again."
+)
 LOGIN_COMMANDS = {
     "posix": [
         "sh",
@@ -125,13 +133,20 @@ def plugin_source(base_url: str) -> str:
     )
 
 
-def plugin_install_commands(base_url: str) -> dict[str, str]:
-    """One-line installs into opencode's global plugin folder (~/.config/opencode/plugin)."""
+def plugin_install_commands(base_url: str, key: str = KEY_PLACEHOLDER) -> dict[str, str]:
+    """One-line installs into opencode's global plugin folder (~/.config/opencode/plugin): the plugin, and the client
+    key in a file beside it, so nothing goes in the environment and opencode's own files stay as they are."""
     url = f"{base_url}{PLUGIN_PATH}"
+    powershell_key = key.replace("'", "''")
     return {
-        "posix": f"mkdir -p ~/.config/opencode/plugin && curl -fsSL {url} -o ~/.config/opencode/plugin/queuerouter.js",
+        "posix": (
+            f"mkdir -p ~/.config/opencode/plugin && curl -fsSL {url} -o ~/.config/opencode/plugin/queuerouter.js && "
+            f"(umask 077; printf %s {shlex.quote(key)} > ~/.config/opencode/plugin/{KEY_FILE})"
+        ),
         "windows": (
             '$d="$HOME/.config/opencode/plugin"; New-Item -ItemType Directory -Force $d | Out-Null; '
-            f'Invoke-WebRequest {url} -OutFile "$d/queuerouter.js"'
+            f'Invoke-WebRequest {url} -OutFile "$d/queuerouter.js"; '
+            # ascii: Windows PowerShell's utf8 would start the file with a BOM
+            f"""Set-Content "$d/{KEY_FILE}" '{powershell_key}' -Encoding ascii"""
         ),
     }

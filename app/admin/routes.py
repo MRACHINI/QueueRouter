@@ -377,6 +377,7 @@ class AdminContext:
     name_table: Callable[[], list[dict]]
     names: Callable[[], ModelNames]
     model_label: Callable[..., str]
+    public_base: Callable[[Request], str]
 
 
 class NeedLogin(Exception):
@@ -897,7 +898,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     # -- clients -------------------------------------------------------------------------
 
     def show_new_key(request: Request, session: AdminSession, name: str, key: str, regenerated: bool):
-        base = bootstrap.public_url or f"{request.url.scheme}://{request.url.netloc}"
+        base = ctx.public_base(request)
         return page(
             request,
             "client_key.html",
@@ -906,15 +907,13 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             key=key,
             regenerated=regenerated,
             base_url=f"{base}/v1",
-            site_url=base,
-            plugin=plugin_install_commands(base),
+            plugin=plugin_install_commands(base, key),
         )
 
     @app.get("/admin/clients")
     async def clients(request: Request):
         session = require(request, "admin")
         live = ctx.live_state().get("clients", {})
-        base = bootstrap.public_url or f"{request.url.scheme}://{request.url.netloc}"
         return page(
             request,
             "clients.html",
@@ -922,7 +921,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             clients=store.list_clients(),
             priorities=PRIORITIES,
             live=live,
-            plugin=plugin_install_commands(base),
+            plugin=plugin_install_commands(ctx.public_base(request)),
             month={c.name: ctx.month_usage(c.name) for c in store.list_clients()},
             now=time.time(),
             content_days=store.get_tunables().get("content_log_days", Settings().content_log_days),
@@ -988,7 +987,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         key = store.client_key(client_id, session.user.username)
         if key is None:
             return JSONResponse({"error": "only this key's hash is kept: issue a new key to see it"}, status_code=404)
-        return JSONResponse({"key": key}, headers={"Cache-Control": "no-store"})
+        shown = {"key": key, "install": plugin_install_commands(ctx.public_base(request), key)}  # for the opencode card
+        return JSONResponse(shown, headers={"Cache-Control": "no-store"})
 
     @app.post("/admin/clients/{client_id}/policy")
     async def clients_policy(client_id: int, request: Request):

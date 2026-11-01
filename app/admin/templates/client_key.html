@@ -15,34 +15,12 @@
   <button type="button" class="ghost" data-copy="#base-url">Copy</button>, API key = the key above.</p>
 
 <details class="card" open>
-  <summary><strong>opencode — automatic</strong> (models and limits stay up to date)</summary>
-  <p class="small">Log in once; opencode then loads every model and alias this key may use, with context
-  limits, each time it starts. Requires a recent opencode (1.19+).</p>
-  <p class="small muted">Linux / macOS:</p>
-<pre class="mono wrap-any" id="oc-posix">QUEUEROUTER_KEY={{ key }} opencode auth login {{ site_url }}</pre>
-  <button type="button" class="secondary" data-copy="#oc-posix">Copy</button>
-  <p class="small muted">Windows (PowerShell):</p>
-<pre class="mono wrap-any" id="oc-windows">$env:QUEUEROUTER_KEY="{{ key }}"; opencode auth login {{ site_url }}/windows</pre>
-  <button type="button" class="secondary" data-copy="#oc-windows">Copy</button>
-  <p class="small muted">Then pick a <code>queuerouter/…</code> model with <code>/models</code> in opencode.</p>
+  <summary><strong>Connect opencode</strong> (one command: plugin and key)</summary>
+  {% include "opencode_install.html" %}
 </details>
 
 <details class="card">
-  <summary><strong>opencode plugin</strong> (optional add-on, recommended)</summary>
-  <p class="small">Tags opencode's requests with its session and task, so QueueRouter finishes a
-  conversation (and its subagents) before starting new ones and applies run budgets per task; sends
-  title generation at low priority; and loads your models from <code>QUEUEROUTER_KEY</code> (no login needed),
-  keeping the list current while opencode runs (new models and aliases appear by themselves). Install once, then restart opencode:</p>
-  <p class="small muted">Linux / macOS:</p>
-<pre class="mono wrap-any" id="plugin-posix">{{ plugin.posix }}</pre>
-  <button type="button" class="secondary" data-copy="#plugin-posix">Copy</button>
-  <p class="small muted">Windows (PowerShell):</p>
-<pre class="mono wrap-any" id="plugin-windows">{{ plugin.windows }}</pre>
-  <button type="button" class="secondary" data-copy="#plugin-windows">Copy</button>
-</details>
-
-<details class="card">
-  <summary><strong>opencode — config file</strong> (older opencode, or no login)</summary>
+  <summary><strong>opencode — config file</strong> (without the plugin)</summary>
   <p class="small">Download the generated config and point opencode at it (re-run to refresh the model list):</p>
 <pre class="mono wrap-any" id="oc-file">curl -H "Authorization: Bearer {{ key }}" {{ base_url }}/opencode-config -o ~/.config/opencode/queuerouter.json</pre>
   <button type="button" class="secondary" data-copy="#oc-file">Copy</button>

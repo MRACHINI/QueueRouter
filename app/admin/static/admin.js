@@ -76,6 +76,13 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await response.json();
       if (!response.ok || !data.key) throw new Error(data.error || `HTTP ${response.status}`);
       if (target) target.textContent = data.key;
+      // The Connect opencode card, now with this client's key.
+      Object.entries(data.install || {}).forEach(([platform, command]) => {
+        const block = document.getElementById(`plugin-${platform}`);
+        if (block) block.textContent = command;
+      });
+      const filledFor = document.getElementById("plugin-for");
+      if (filledFor) filledFor.textContent = `With the key of ${button.dataset.client}.`;
       button.removeAttribute("data-show-key");
       button.dataset.copyText = data.key;  // the click-to-copy handler above takes the next click
       button.textContent = "Copy";

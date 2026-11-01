@@ -187,7 +187,10 @@ async def test_client_lifecycle_applies_live(admin_stack):
             data={"csrf": csrf, "name": "n8n", "priority": "low", "notes": "workflows", "expires": ""},
         )
         key = key_of(created.text)
-        assert "opencode auth login" in created.text and key.startswith("qr-")
+        assert key.startswith("qr-")
+        assert f"printf %s {key} &gt; ~/.config/opencode/plugin/queuerouter.key" in created.text
+        assert f"Set-Content &#34;$d/queuerouter.key&#34; &#39;{key}&#39; -Encoding ascii" in created.text
+        assert "opencode auth login" not in created.text  # it can't reach the plugin on opencode 2.x
         r = await c.post(api, json=body, headers={"Authorization": f"Bearer {key}"})
         assert r.status_code == 200
 
@@ -241,7 +244,8 @@ async def test_rename_show_key_and_timed_logging(admin_stack):
         await eventually(lambda: store.query("SELECT 1 FROM usage_daily WHERE client = 'bilal'"), timeout=10)
 
         shown = await c.post(f"/admin/clients/{client.id}/key", headers={"X-CSRF-Token": csrf})
-        assert shown.json() == {"key": key} and shown.headers["cache-control"] == "no-store"
+        assert shown.json()["key"] == key and shown.headers["cache-control"] == "no-store"
+        assert all(key in command for command in shown.json()["install"].values())  # the Connect opencode card
         assert (await c.post(f"/admin/clients/{client.id}/key", headers={"X-CSRF-Token": "forged"})).status_code == 403
         assert store.query("SELECT target FROM audit_log WHERE action = 'client.show_key'")[0]["target"] == "bilal"
 

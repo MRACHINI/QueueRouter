@@ -4,7 +4,7 @@ import ipaddress
 
 import httpx
 
-from app.opencode import KEY_ENV, model_limits
+from app.opencode import KEY_ENV, KEY_FILE, KEY_PLACEHOLDER, model_limits, plugin_install_commands
 from tests.test_admin import OWNER, csrf_of, login
 from tests.test_aliases import add_alias
 from tests.test_policies import set_policy
@@ -104,10 +104,38 @@ async def test_plugin_is_served_pointing_at_this_router(make_stack):
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/javascript")
         assert 'const BASE = "https://qr.example.com";' in r.text
         assert 'export default { id: "queuerouter", server, setup }' in r.text and '"chat.headers"' in r.text
+        assert f'const KEY_FILE = "{KEY_FILE}";' in r.text  # where the install command saves the key
         await login(c, stack.url)
         page = (await c.get("/admin/clients")).text
         assert "~/.config/opencode/plugin/queuerouter.js" in page
         assert "https://qr.example.com/opencode/queuerouter.js" in page
+        assert KEY_PLACEHOLDER in page and f"~/.config/opencode/plugin/{KEY_FILE}" in page
+        assert 'id="plugin-for"' in page  # Show fills in the key
+
+
+def test_install_commands_quote_the_key():
+    commands = plugin_install_commands("https://qr.example.com", "qr-abc_1")
+    assert commands["posix"] == (
+        "mkdir -p ~/.config/opencode/plugin && curl -fsSL https://qr.example.com/opencode/queuerouter.js "
+        "-o ~/.config/opencode/plugin/queuerouter.js && "
+        "(umask 077; printf %s qr-abc_1 > ~/.config/opencode/plugin/queuerouter.key)"
+    )
+    assert commands["windows"].endswith("""Set-Content "$d/queuerouter.key" 'qr-abc_1' -Encoding ascii""")
+
+    odd = plugin_install_commands("https://qr.example.com", "it's $odd")  # a key from ACCESS_KEYS can be anything
+    assert """printf %s 'it'"'"'s $odd' > """ in odd["posix"]
+    assert "'it''s $odd'" in odd["windows"]
+    assert KEY_PLACEHOLDER in plugin_install_commands("https://qr.example.com")["posix"]
+
+
+async def test_install_commands_behind_trusted_proxy(make_stack):
+    """The Clients page uses the public address, like the plugin it downloads."""
+    stack = make_stack(bootstrap={**OWNER, "trusted_proxies": (ipaddress.ip_network("127.0.0.1/32"),)})
+    forwarded = {"X-Forwarded-Proto": "https", "X-Forwarded-Host": "qr.example.com"}
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        page = (await c.get("/admin/clients", headers=forwarded)).text
+    assert "https://qr.example.com/opencode/queuerouter.js" in page
 
 
 async def test_plugin_fingerprint_for_self_update(make_stack):

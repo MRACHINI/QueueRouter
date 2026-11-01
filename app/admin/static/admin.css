@@ -72,6 +72,7 @@ h2 { font-size: 1.1rem; margin: 1.6rem 0 0.6rem; }
 .muted { color: var(--muted); }
 .small { font-size: 0.85rem; }
 .wrap-any { overflow-wrap: anywhere; }
+pre.wrap-any { white-space: pre-wrap; }
 
 /* layout */
 .container { width: 100%; margin: 0 auto; padding: 16px 24px; flex: 1; }  /* as wide as the window */
