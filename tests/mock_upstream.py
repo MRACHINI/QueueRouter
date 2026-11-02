@@ -396,7 +396,7 @@ def create_mock(limit: int = 2) -> FastAPI:
                 },
             }
 
-        thoughts = int(body.get("mock_think", 0))
+        thoughts = int(body.get("mock_think", state.get("think", 0)))  # state: for apps that can't send mock_think
 
         async def gen():
             finished = False

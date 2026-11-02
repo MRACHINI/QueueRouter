@@ -152,6 +152,7 @@ def header_value(text: str) -> str:
 
 # ends whatever event the upstream left half-sent, so an error added mid-stream parses as its own event
 MID_STREAM = b"\n\n"
+KEEPALIVE = b": keep-alive\n\n"  # an SSE comment: apps skip it, but it shows the stream is alive
 
 
 def sse_error(message: str, status: int, kind: str = "upstream_error") -> bytes:
@@ -3452,16 +3453,17 @@ def create_app(
         if effort:  # passed on only to a model whose thinking levels are known (build_request)
             headers["x-queuerouter-effort"] = effort
         response = await serve(request, client, "chat/completions", json.dumps(chat).encode(), headers, "")
+        thinking = anthropic_api.wants_thinking(payload)  # the model's reasoning as thinking blocks
         if isinstance(response, StreamingResponse):
             return StreamingResponse(
-                anthropic_api.stream(response.body_iterator, model),
+                anthropic_api.stream(response.body_iterator, model, thinking),
                 media_type="text/event-stream",
                 headers={**kept_headers(response), "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
         if response.status_code >= 400:
             return anthropic_denied(response)
         try:
-            message = anthropic_api.from_chat(json.loads(response.body), model)
+            message = anthropic_api.from_chat(json.loads(response.body), model, thinking)
         except (ValueError, AttributeError):
             return JSONResponse(anthropic_api.error(502, "the upstream answer was not valid JSON"), status_code=502)
         return JSONResponse(message, headers=kept_headers(response))
@@ -3976,23 +3978,36 @@ def create_app(
                                 message = content.decode(errors="replace")[:500] or f"upstream returned HTTP {status}"
                             yield sse_error(message, status)
                             return
+                        # a provider can be silent for minutes (a long prompt, a model thinking in a way that isn't
+                        # passed on): keep-alives between events keep apps and proxies from giving up on the stream
+                        sse = response.headers.get("content-type", "").startswith("text/event-stream")
+                        between = True  # what the app got so far ends with a whole event
+                        idle = keepalive_s() if sse else None
                         try:
-                            async for chunk in within(response.aiter_bytes(), adm.deadline):
-                                sniffer.feed(chunk, time.monotonic())
-                                if rlog.fields["ttft_ms"] is None:
-                                    rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
-                                if captured is not None and len(captured) < CONTENT_CAPTURE_MAX:
-                                    captured += chunk
-                                if held_back is not None:
-                                    chunk = held_back.feed(chunk)
-                                if chunk:
-                                    yield chunk
-                                if adm.expired():
-                                    outcome, status = "timeout", 504
-                                    yield MID_STREAM + sse_error(
-                                        "request exceeded this key's total time limit", 504, "request_timeout"
-                                    )
-                                    return
+                            async with contextlib.aclosing(
+                                within(response.aiter_bytes(), adm.deadline, idle)
+                            ) as chunks:
+                                async for chunk in chunks:
+                                    if not chunk:
+                                        if between:
+                                            yield KEEPALIVE
+                                        continue
+                                    sniffer.feed(chunk, time.monotonic())
+                                    if rlog.fields["ttft_ms"] is None:
+                                        rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
+                                    if captured is not None and len(captured) < CONTENT_CAPTURE_MAX:
+                                        captured += chunk
+                                    if held_back is not None:
+                                        chunk = held_back.feed(chunk)
+                                    if chunk:
+                                        between = chunk.endswith((b"\n\n", b"\r\n\r\n"))
+                                        yield chunk
+                                    if adm.expired():
+                                        outcome, status = "timeout", 504
+                                        yield MID_STREAM + sse_error(
+                                            "request exceeded this key's total time limit", 504, "request_timeout"
+                                        )
+                                        return
                         except httpx.HTTPError as exc:
                             status = 502
                             yield MID_STREAM + sse_error(f"upstream stream interrupted: {type(exc).__name__}", 502)
@@ -4076,21 +4091,40 @@ def alias_entry(alias, target: dict | None) -> dict:
     return entry
 
 
-async def within(chunks: AsyncIterator[bytes], deadline: float | None) -> AsyncIterator[bytes]:
+async def within(
+    chunks: AsyncIterator[bytes], deadline: float | None, idle: float | None = None
+) -> AsyncIterator[bytes]:
     """``chunks`` until the monotonic ``deadline`` (None: no limit); TimeoutError once it passes, also while a
-    stalled provider sends nothing (checking only between chunks would wait for its read timeout)."""
+    stalled provider sends nothing (checking only between chunks would wait for its read timeout). With ``idle``,
+    an empty chunk whenever nothing came for that long: the caller's cue for a keep-alive. The read in progress
+    goes on meanwhile."""
     iterator = chunks.__aiter__()
-    while True:
-        if deadline is None:
-            chunk = await anext(iterator, None)
-        else:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError
-            chunk = await asyncio.wait_for(anext(iterator, None), remaining)
-        if chunk is None:
-            return
-        yield chunk
+    pending: asyncio.Future | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(anext(iterator, None))
+            limits = [idle] if idle else []
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                limits.append(remaining)
+            done, _ = await asyncio.wait({pending}, timeout=min(limits) if limits else None)
+            if not done:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError
+                yield b""
+                continue
+            chunk, pending = pending.result(), None
+            if chunk is None:
+                return
+            yield chunk
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+        elif pending is not None and not pending.cancelled():
+            pending.exception()  # seen, so it isn't reported as never retrieved
 
 
 def _granted_at(rlog: RequestLog) -> float | None:

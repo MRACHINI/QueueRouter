@@ -124,6 +124,19 @@ async def test_keepalive_while_queued(make_stack):
     assert "data: [DONE]" in text
 
 
+async def test_keepalive_while_the_provider_is_silent(make_stack):
+    """A long prompt, or thinking that isn't passed on, can keep a provider silent for minutes: keep-alives between
+    events show the app the stream is alive (Claude Code gave up on a silent one after five minutes)."""
+    stack = make_stack(keepalive_interval_s=0.1)
+    async with httpx.AsyncClient(timeout=30) as c:
+        _, text = await read_stream(c, stack.url, stack.headers, chat("slow", stream=True, mock_delay=0.35))
+    assert text.count(": keep-alive") >= 3
+    events = [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: {")]
+    assert (
+        "".join(e["choices"][0]["delta"].get("content") or "" for e in events if e.get("choices")) == "t0 t1 t2 t3 t4 "
+    )
+
+
 async def test_queue_wait_timeout(make_stack):
     stack = make_stack(limit=1, max_queue_wait_s=0.2)
     async with httpx.AsyncClient(timeout=30) as c:

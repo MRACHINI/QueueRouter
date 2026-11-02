@@ -230,6 +230,52 @@ def test_a_prompt_too_long_is_said_the_way_claude_does():
     assert said(400, "max_tokens is too large") == "max_tokens is too large"  # not the prompt
 
 
+async def anthropic_events(chunks: list[dict], thinking: bool) -> list[dict]:
+    async def body():
+        for chunk in chunks:
+            yield f"data: {json.dumps(chunk)}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+
+    out = b"".join([e async for e in anthropic_api.stream(body(), "m", thinking)]).decode()
+    return [json.loads(line[6:]) for line in out.splitlines() if line.startswith("data: ")]
+
+
+async def test_the_models_reasoning_reaches_the_app():
+    """Silent while the model reasoned, a stream looked stalled: the Claude app gave up after five minutes."""
+    chunks = [
+        {"choices": [{"delta": {"reasoning_content": "Let me "}}]},
+        {"choices": [{"delta": {"reasoning": "think."}}]},
+        {"choices": [{"delta": {"content": "Done."}, "finish_reason": "stop"}]},
+    ]
+    shown = await anthropic_events(chunks, thinking=True)
+    starts = [(e["index"], e["content_block"]["type"]) for e in shown if e["type"] == "content_block_start"]
+    assert starts == [(0, "thinking"), (1, "text")]
+    deltas = [e["delta"] for e in shown if e["type"] == "content_block_delta"]
+    assert "".join(d.get("thinking", "") for d in deltas) == "Let me think." and deltas[-1]["text"] == "Done."
+    assert [e["index"] for e in shown if e["type"] == "content_block_stop"] == [0, 1]
+    hidden = await anthropic_events(chunks, thinking=False)  # an app that didn't ask: pings, not blocks
+    assert [e["content_block"]["type"] for e in hidden if e["type"] == "content_block_start"] == ["text"]
+    assert [e["type"] for e in hidden].count("ping") == 1  # one every few seconds at most
+    body = {"choices": [{"message": {"content": "Done.", "reasoning_content": "hmm"}, "finish_reason": "stop"}]}
+    assert [b["type"] for b in anthropic_api.from_chat(body, "m", thinking=True)["content"]] == ["thinking", "text"]
+    assert [b["type"] for b in anthropic_api.from_chat(body, "m")["content"]] == ["text"]
+    assert anthropic_api.wants_thinking({"thinking": {"type": "adaptive"}}) and not anthropic_api.wants_thinking({})
+
+
+async def test_reasoning_through_the_sdk(make_stack):
+    stack = make_stack()
+    stack.mock["think"] = 3
+    client = anthropic.AsyncAnthropic(base_url=stack.url, api_key=ACCESS_KEY, max_retries=0)
+    messages = [{"role": "user", "content": "hi"}]
+    thinking = {"type": "enabled", "budget_tokens": 1024}
+    async with client.messages.stream(model="mock-model", max_tokens=2000, thinking=thinking, messages=messages) as s:
+        final = await s.get_final_message()
+    assert [b.type for b in final.content] == ["thinking", "text"] and final.content[0].thinking == "r0 r1 r2 "
+    async with client.messages.stream(model="mock-model", max_tokens=100, messages=messages) as s:
+        plain = await s.get_final_message()
+    assert [b.type for b in plain.content] == ["text"]
+
+
 async def test_a_request_the_adapters_cant_translate_is_on_the_requests_page(make_stack):
     stack = make_stack()
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:

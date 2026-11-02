@@ -1541,6 +1541,18 @@ v0.55.0: Claude Code works through /v1/messages, and both adapters and the Claud
   the check's to refuse.
 - An overflow error through /v1/messages is worded Claude's way (`prompt is too long: N tokens > M maximum`), the only
   wording Claude Code compacts and retries on. Refused adapter requests are logged as `refused` with the reason.
+v0.55.1: the Claude app hung on a code review: the model's thinking reaches it, and silent streams get keep-alives.
+- Seen live: DeepSeek V4.1 Flash on Synthetic, behind `claude-opus-5-5`, read a 122,530-token review and produced
+  28,807 tokens at 96/s; the app cancelled after 302 s, then its retry got no first token for 206 s. /v1/messages
+  passed on text and tool calls but not `reasoning_content`, and nothing else went out, so the app saw an empty stream:
+  through a gateway it gives up after about five minutes without data.
+- /v1/messages: reasoning (`reasoning_content`, OpenRouter's `reasoning`) becomes thinking blocks (signature empty; they
+  come back in the history and are dropped there) when the request asks for thinking, as Claude Code always does; an
+  app that didn't ask gets a ping every 5 s instead, since it may expect the text first. Not while a tool call's block
+  is open.
+- Every stream (stream_flow): when the provider sends nothing for the keep-alive interval (15 s), an SSE comment
+  `: keep-alive`, only right after a whole event and only on an SSE response. `within` waits on the read in progress
+  without cancelling it. /v1/messages turns the comments into `ping` events, as it did for queued requests.
 
 ### Later (agreed, not scheduled)
 

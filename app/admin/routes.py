@@ -171,7 +171,11 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
     "session_window_s": ("Scheduling", "Session window (s)", "How long after a request a session counts as mid-task."),
     "fair_share": ("Scheduling", "Fair share", "Among equals, the client served least recently goes first."),
     "max_queue_wait_s": ("Queue", "Max queue wait (s)", "Give up after waiting this long (504). 0 = wait forever."),
-    "keepalive_interval_s": ("Queue", "Keep-alive interval (s)", "SSE comments sent to queued streaming clients."),
+    "keepalive_interval_s": (
+        "Queue",
+        "Keep-alive interval (s)",
+        "SSE comments sent to streaming clients while queued, or while the provider sends nothing.",
+    ),
     "max_retries": ("Upstream", "Max retries", "On 429/5xx/connection errors. -1 = forever, 0 = none."),
     "retry_base_delay_s": ("Upstream", "Retry base delay (s)", "Exponential backoff start (Retry-After wins)."),
     "retry_max_delay_s": ("Upstream", "Retry max delay (s)", "Backoff cap."),

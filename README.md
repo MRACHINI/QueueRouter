@@ -14,7 +14,7 @@ from a **web admin UI**.
 ## Features
 
 - **True queuing** with the connection held open; slots are held until the last streamed byte;
-  SSE keep-alives while queued so nothing times out.
+  SSE keep-alives while queued, and while a provider sends nothing, so nothing times out.
 - **Smart ordering**: priority per client (`high` / `normal` / `low`) with aging so nothing
   starves; *finish what you started* (sessions mid-task go before new ones); fair share between
   clients.
@@ -465,9 +465,12 @@ What QueueRouter does for Claude Code:
   model's levels.
 - It asks for 32,000 tokens of answer (128,000 for a name like Opus's): lowered to what the model can give.
 - "Too long" is said the way Claude says it, so Claude Code compacts the conversation and tries again by itself.
+- The model's thinking is shown as Claude's thinking, and keep-alives go out while a provider sends nothing. Claude
+  Code gives up on a stream that stays silent for about five minutes, which a model thinking over a large review can.
 
-It can't show thinking, and PDFs and Claude Code's web search don't work. For a name it doesn't know, Claude Code
-assumes a context of 200,000 tokens: on smaller models it compacts once it's told the prompt is too long.
+PDFs and Claude Code's web search don't work. For a name it doesn't know, Claude Code assumes a context of 200,000
+tokens: on smaller models it compacts once it's told the prompt is too long. Naming an alias like a Claude model
+(`claude-opus-5-5`) makes it assume that model's context, 1,000,000 tokens for Opus.
 
 ## Environment variables (bootstrap only)
 

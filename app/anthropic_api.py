@@ -6,8 +6,9 @@ System messages inside ``messages`` (Claude Code sends them) stay where they are
 (``_remind``), and the chat completions forms some apps mix in (tool and function messages, tool_calls,
 input_text and image_url parts) are taken as they are.
 The effort asked for travels beside the request (``effort_of``): QueueRouter passes it on only to a model whose
-thinking levels it knows. Not supported: server tools (web search...), PDF/file documents (in a tool result, a
-note says so). Thinking settings and cache_control markers are ignored.
+thinking levels it knows. The model's reasoning comes back as thinking blocks when the app asks for thinking.
+Not supported: server tools (web search...), PDF/file documents (in a tool result, a note says so). cache_control
+markers are ignored.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator
 
@@ -39,6 +41,7 @@ ERROR_TYPES = {
     529: "overloaded_error",
 }
 TEXT_KINDS = ("text", "input_text", "output_text")  # the last two: OpenAI Responses' names, which some apps send
+PING_EVERY_S = 5.0  # while a model reasons and the app didn't ask to see it
 IMAGE_NOTE = "[An image in this tool result was left out: this model API can't receive it.]"
 
 
@@ -350,11 +353,26 @@ def tool_input(raw) -> dict:
     return value if isinstance(value, dict) else {"value": value}
 
 
-def from_chat(body: dict, model: str) -> dict:
-    """OpenAI chat completion -> Anthropic Message."""
+def wants_thinking(payload: dict) -> bool:
+    """Whether the app asked for thinking (``thinking`` enabled or adaptive). Only then does the model's reasoning
+    come back as thinking blocks: an app that didn't ask may expect the text first."""
+    setting = payload.get("thinking")
+    return isinstance(setting, dict) and setting.get("type") in ("enabled", "adaptive")
+
+
+def _reasoning(holder: dict) -> str:
+    """A message's or a delta's reasoning text, as providers name it (vLLM, DeepSeek: reasoning_content)."""
+    found = holder.get("reasoning_content") or holder.get("reasoning")
+    return found if isinstance(found, str) else ""
+
+
+def from_chat(body: dict, model: str, thinking: bool = False) -> dict:
+    """OpenAI chat completion -> Anthropic Message (its reasoning as a thinking block, if ``thinking``)."""
     choice = (body.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     content: list[dict] = []
+    if thinking and (reasoning := _reasoning(message)):
+        content.append({"type": "thinking", "thinking": reasoning, "signature": ""})
     text = message.get("content")
     if isinstance(text, list):
         text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
@@ -385,12 +403,15 @@ def from_chat(body: dict, model: str) -> dict:
     }
 
 
-async def stream(body: AsyncIterator[bytes], model: str) -> AsyncIterator[bytes]:
-    """OpenAI chat completion chunks -> Anthropic stream events."""
+async def stream(body: AsyncIterator[bytes], model: str, thinking: bool = False) -> AsyncIterator[bytes]:
+    """OpenAI chat completion chunks -> Anthropic stream events. The model's reasoning comes as thinking blocks if
+    ``thinking`` (the app asked for it), else as a ping now and then: either way the app hears the model is at work.
+    Silent, a stream looks stalled, and Claude Code gives up on it after about five minutes."""
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
     started = False
+    pinged = 0.0  # when the last ping for reasoning that isn't passed on went
     block_index = -1
-    open_block: str | None = None  # "text" or "tool:<openai index>"
+    open_block: str | None = None  # "thinking", "text" or "tool:<openai index>"
     tool_blocks: dict[int, int] = {}  # openai tool index -> our block index
     call_ids: dict[str, int] = {}  # for providers that leave the index out
     finish = None
@@ -424,7 +445,7 @@ async def stream(body: AsyncIterator[bytes], model: str) -> AsyncIterator[bytes]
     async with contextlib.aclosing(events(body)) as stream_events:
         async for kind, data in stream_events:
             if kind == "comment":
-                yield encode("ping", {"type": "ping"})  # waiting in the queue
+                yield encode("ping", {"type": "ping"})  # waiting in the queue, or a provider that's silent
                 continue
             if kind == "done":
                 break
@@ -443,6 +464,28 @@ async def stream(body: AsyncIterator[bytes], model: str) -> AsyncIterator[bytes]
                 usage = data["usage"]
             for choice in data.get("choices") or []:
                 delta = choice.get("delta") or {}
+                reasoning = _reasoning(delta)
+                if reasoning and thinking and not (open_block or "").startswith("tool:"):
+                    if open_block != "thinking":
+                        yield close()
+                        block_index += 1
+                        open_block = "thinking"
+                        block = {"type": "thinking", "thinking": "", "signature": ""}
+                        yield encode(
+                            "content_block_start",
+                            {"type": "content_block_start", "index": block_index, "content_block": block},
+                        )
+                    yield encode(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": block_index,
+                            "delta": {"type": "thinking_delta", "thinking": reasoning},
+                        },
+                    )
+                elif reasoning and time.monotonic() - pinged >= PING_EVERY_S:
+                    pinged = time.monotonic()
+                    yield encode("ping", {"type": "ping"})
                 text = delta.get("content")
                 if text:
                     if open_block != "text":
