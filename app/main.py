@@ -62,6 +62,7 @@ from .limits import OVERFLOW_STATUS, ModelLimits, error_message, overflow_body, 
 from .names import EVERY
 from .opencode import (
     DEFAULT_OUTPUT,
+    OUTPUT_KEYS,
     PLUGIN_HEADER,
     PLUGIN_PATH,
     model_limits,
@@ -70,7 +71,15 @@ from .opencode import (
     provider_config,
     wellknown_manifest,
 )
-from .params import CHARS_PER_TOKEN, apply_rules, estimate_prompt_tokens, parse_rules, requested_output, too_long
+from .params import (
+    CHARS_PER_TOKEN,
+    apply_rules,
+    estimate_prompt_tokens,
+    fit_output,
+    parse_rules,
+    requested_output,
+    too_long,
+)
 from .pricing import (
     DEFAULT_MIX,
     MIX_DAYS,
@@ -879,6 +888,22 @@ def create_app(
             contexts.append(known["context"])
         return min(contexts) if contexts else None
 
+    def model_output(model: str | None, candidates: tuple[Candidate, ...]) -> int | None:
+        """The longest answer the model gives, when every upstream it may go to says (its model list, or the Models
+        page): the smallest of them. None when one doesn't say."""
+        sizes = []
+        for candidate in candidates:
+            target = snapshot.upstreams.get(candidate.upstream_id)
+            if target is None:
+                continue
+            entry = next((m for m in catalogs.models(target.id, raw=True) if m["id"] == model), None)
+            entry = context_sizes.apply(model or "", target.id, entry) or {}
+            size = next((v for k in OUTPUT_KEYS if isinstance(v := entry.get(k), int) and v > 0), None)
+            if size is None:
+                return None
+            sizes.append(size)
+        return min(sizes) if sizes else None
+
     def candidates_for(model: str | None, only: tuple[int, ...] = (), raw: bool = False) -> tuple[Candidate, ...]:
         """Usable upstreams for ``model``: those that list it, or all of them if none does
         (the upstream then decides; lists may be stale or incomplete), plus those whose list isn't fetched
@@ -1237,18 +1262,23 @@ def create_app(
             efforts = thinking_mod.ordered(yours.split(","))
             return thinking_mod.Thinking(thinking_mod.levels(efforts), None, "yours") if efforts else None
         for target, entry in pairs:
-            style = thinking_mod.style_of(target.upstream.base_url, entry)
+            native = claude.native(target.upstream)  # Claude's own levels, which its model list states
+            style = "claude" if native else thinking_mod.style_of(target.upstream.base_url, entry)
             if style in ("none", "fixed"):  # no levels to offer there
                 continue
-            found = thinking_mod.from_block(entry.get("reasoning"), entry.get("supported_parameters") or ())
+            if native:
+                found = thinking_mod.from_claude(entry)
+            else:
+                found = thinking_mod.from_block(entry.get("reasoning"), entry.get("supported_parameters") or ())
             source = target.upstream.name
             if found is None or found == ("none", "high"):  # nothing, or only on / off: the reference may know more
                 ref = reference.thinking(snapshot.names.name(model_id, target.upstream.name))
-                if ref is not None and (found is not None or style in ("openai", "openrouter")):
+                if ref is not None and (found is not None or style in ("openai", "openrouter", "claude")):
                     found, source = ref, "OpenRouter (reference)"
             if found is None or (style == "unknown" and source != target.upstream.name):
                 continue  # an unknown API: only levels its own list states
-            return thinking_mod.Thinking(thinking_mod.for_style(style, found), found[1], source)
+            if variants := thinking_mod.for_style(style, found):
+                return thinking_mod.Thinking(variants, found[1], source)
         return None
 
     def ranking_table() -> dict:
@@ -1394,7 +1424,9 @@ def create_app(
         path = "messages" if native else adm.path
         url = f"{target.upstream.base_url}/{path}" + (f"?{adm.query}" if adm.query else "")
         body = adm.body
-        thinking = bool(body) and b'"reasoning_effort"' in body  # asked the way this provider understands
+        # how hard to think, not one of the model's levels (Claude Code's effort, from /v1/messages): the nearest one
+        hint = adm.headers.get("x-queuerouter-effort") if adm.path == "chat/completions" else None
+        thinking = bool(body) and (b'"reasoning_effort"' in body or bool(hint))  # asked as this provider understands
         if body and (
             native or target.upstream.params or thinking
         ):  # this provider's own rules (e.g. fields it rejects)
@@ -1408,6 +1440,11 @@ def create_app(
                     entry = next(
                         (m for m in catalogs.models(target.id, raw=True) if m.get("id") == payload.get("model")), None
                     )
+                    if hint and "reasoning_effort" not in payload:  # to no model whose levels aren't known
+                        found = thinking_for(str(payload.get("model") or ""), [(target, entry or {})], {})
+                        level = thinking_mod.nearest([value for _, value in found.variants], hint) if found else None
+                        if level:
+                            payload["reasoning_effort"] = level
                     if native:
                         payload = claude.request(payload, entry)
                     else:
@@ -3374,6 +3411,18 @@ def create_app(
             if k.lower().startswith("x-queuerouter-") or k.lower() in ("x-request-id", "x-queue-wait-ms", "retry-after")
         }
 
+    def adapter_refused(request: Request, client: ClientKey, path: str, message: str, payload) -> None:
+        """A request an API adapter couldn't translate: on the Requests page like any refusal, so it can be seen."""
+        rlog = RequestLog(f"qr-{uuid.uuid4().hex[:12]}", "POST", path, client_ip(request, bootstrap.trusted_proxies))
+        model = payload.get("model") if isinstance(payload, dict) else None
+        rlog.fields.update(
+            client=client.name,
+            model=model if isinstance(model, str) else None,
+            user_agent=(request.headers.get("user-agent") or "")[:300] or None,
+            client_headers=client_identity(request.headers, None),
+        )
+        rlog.finish(stats, outcome="refused", status=400, error=message[:500])
+
     def anthropic_denied(response: Response) -> JSONResponse:
         return JSONResponse(
             anthropic_api.from_openai_error(response.status_code, response.body),
@@ -3389,21 +3438,20 @@ def create_app(
         body = await read_body(request)
         if isinstance(body, Response):
             return anthropic_denied(body)
+        payload = None
         try:
             payload = json.loads(body)
             chat = anthropic_api.to_chat(payload)
+            effort = anthropic_api.effort_of(payload)
         except (ValueError, AttributeError, KeyError, TypeError) as exc:  # not JSON, or fields of the wrong kind
             message = str(exc) if isinstance(exc, anthropic_api.Unsupported) else "the body isn't a valid request"
+            adapter_refused(request, client, "/v1/messages", message, payload)
             return JSONResponse(anthropic_api.error(400, message), status_code=400)
         model = str(payload.get("model") or "")
-        response = await serve(
-            request,
-            client,
-            "chat/completions",
-            json.dumps(chat).encode(),
-            adapter_headers(request, "api:anthropic"),
-            "",
-        )
+        headers = adapter_headers(request, "api:anthropic")
+        if effort:  # passed on only to a model whose thinking levels are known (build_request)
+            headers["x-queuerouter-effort"] = effort
+        response = await serve(request, client, "chat/completions", json.dumps(chat).encode(), headers, "")
         if isinstance(response, StreamingResponse):
             return StreamingResponse(
                 anthropic_api.stream(response.body_iterator, model),
@@ -3442,6 +3490,7 @@ def create_app(
         body = await read_body(request)
         if isinstance(body, Response):
             return body
+        payload = None
         try:
             payload = json.loads(body)
             history: list[dict] = []
@@ -3458,6 +3507,7 @@ def create_app(
             chat, turn = responses_api.to_chat(payload, history)
         except (ValueError, AttributeError, KeyError, TypeError) as exc:  # not JSON, or fields of the wrong kind
             message = str(exc) if isinstance(exc, responses_api.Unsupported) else "the body isn't a valid request"
+            adapter_refused(request, client, "/v1/responses", message, payload)
             return error_response(message, 400, "invalid_request_error")
         model = str(payload.get("model") or "")
         response_id = responses_api.new_id("resp")
@@ -3607,6 +3657,9 @@ def create_app(
                 step_payload["model"] = step_model  # the upstream gets the real model name
             context = model_context(step_model, step_candidates)
             real_context = context  # the provider's own figure (compaction below works in estimate units)
+            fit = cfg().context_check  # an answer size the model can't give is lowered, not refused (fit_output)
+            most = model_output(step_model, step_candidates) if fit else None
+            lowered = fit and fit_output(step_payload, real_context, stats.ratio(step_model), most)
             compaction = None
             bigger_next = "context" in triggers and i < len(chain) - 1  # a fallback loses nothing: prefer it
             if alias and alias.compact != "off" and context and not (bigger_next and too_long(step_payload, context)):
@@ -3655,6 +3708,7 @@ def create_app(
                     result = compact_request(step_payload, context, output, plans, key)
                 if result is not None:
                     step_payload, compaction = result.payload, result.label
+                    lowered = fit and fit_output(step_payload, real_context, stats.ratio(step_model), most) or lowered
             if cfg().context_check and (over := too_long(step_payload, context)):
                 scale = real_context / context if context and real_context else 1  # reported in the provider's units
                 too_long_for = too_long_for or (
@@ -3667,7 +3721,7 @@ def create_app(
                     continue  # try a model with a bigger context
                 break
             unchanged = i == 0 and not alias and not param_changes and not pin and not strip_usage
-            unchanged = unchanged and compaction is None
+            unchanged = unchanged and compaction is None and not lowered
             step_body = body if unchanged else json.dumps(step_payload).encode()
             estimate = estimate_prompt_tokens(step_payload)
             steps.append(Step(step_model, step_candidates, step_body, compaction, estimate))

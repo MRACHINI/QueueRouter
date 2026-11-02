@@ -83,6 +83,9 @@ def apply_rules(payload: dict, alias_rules: dict, client_rules: dict) -> list[st
 
 CHARS_PER_TOKEN = 4.0  # typical for English and code; deliberately not too pessimistic
 MARGIN = 1.15  # only refuse when the estimate is clearly over: a false refusal is worse than a 400
+FIT_SPARE = 1.1  # lowering the answer size: the prompt may count this much more than estimated
+FIT_RESERVE = 512  # and a chat template adds tokens of its own (roles, separators), even to a tiny prompt
+MIN_FIT = 1_024  # an answer size not lowered below this: the context check decides instead
 
 
 def _text_of(value: Any) -> str:
@@ -120,6 +123,27 @@ def requested_output(payload: dict) -> int:
         if isinstance(value, int) and value > 0:
             return value
     return 0
+
+
+def fit_output(payload: dict, context: int | None, ratio: float = 1.0, most: int | None = None) -> bool:
+    """Lower the answer size asked for (``max_tokens``, ``max_completion_tokens``) to what the model can give: its own
+    output limit (``most``), and what its context leaves after the prompt (estimated; ``ratio``: how much bigger the
+    provider counts). Apps made for one model ask for its size everywhere (Claude Code: 128,000 for Opus): lowered,
+    the request still goes. A prompt that leaves less than MIN_FIT is left to the context check. True if lowered."""
+    asked = requested_output(payload)
+    if not asked:
+        return False
+    room = min(asked, most) if most else asked
+    if context:
+        left = context - round(estimate_prompt_tokens(payload) * ratio * FIT_SPARE) - FIT_RESERVE
+        if left >= MIN_FIT:
+            room = min(room, left)
+    if room >= asked:
+        return False
+    for key in ("max_completion_tokens", "max_tokens"):
+        if isinstance(payload.get(key), int) and payload[key] > room:
+            payload[key] = room
+    return True
 
 
 def too_long(payload: dict, context: int | None) -> tuple[int, int] | None:

@@ -115,9 +115,11 @@ def test_a_conversation_in_claudes_format():
         "stream",
         "stop_sequences",
         "temperature",
+        "output_config",
     }
-    assert body["system"] == "first\nsecond" and body["cache_control"] == {"type": "ephemeral"}
+    assert body["system"] == "first" and body["cache_control"] == {"type": "ephemeral"}
     assert body["max_tokens"] == 500 and body["stop_sequences"] == ["END"] and body["temperature"] == 1
+    assert body["output_config"] == {"effort": "high"}
     assert body["tools"] == [
         {
             "name": "search",
@@ -127,6 +129,7 @@ def test_a_conversation_in_claudes_format():
     ]
     assert body["messages"] == [
         {"role": "user", "content": [{"type": "text", "text": "look"}]},
+        {"role": "system", "content": [{"type": "text", "text": "second"}]},  # where it was: the start stays as it is
         {
             "role": "assistant",
             "content": [
@@ -223,8 +226,143 @@ def test_max_tokens_is_always_there(fields, entry, expected):
     ],
 )
 def test_tool_choice(fields, expected):
-    assert claude.request(user(tools=TOOLS, **fields)).get("tool_choice") == expected
-    assert "tool_choice" not in claude.request(user(**fields))  # the API refuses it without tools
+    older = "claude-opus-5"  # a forced call is still taken there
+    assert claude.request(user(model=older, tools=TOOLS, **fields)).get("tool_choice") == expected
+    assert "tool_choice" not in claude.request(user(model=older, **fields))  # the API refuses it without tools
+
+
+@pytest.mark.parametrize(
+    "fields, choice, note",
+    [
+        ({"tool_choice": "required"}, None, "Answer this turn by calling one of the tools."),
+        ({"tool_choice": {"type": "function", "function": {"name": "search"}}}, None, "calling the tool search."),
+        (
+            {"tool_choice": "required", "parallel_tool_calls": False},
+            {"type": "auto", "disable_parallel_tool_use": True},
+            "one of the tools",
+        ),
+    ],
+)
+def test_the_newest_models_are_asked_for_a_tool_call(fields, choice, note):
+    """Claude Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 refuse a forced call (400): it's asked for at the end."""
+    body = claude.request(user(tools=TOOLS, **fields))
+    assert body.get("tool_choice") == choice
+    last = body["messages"][-1]
+    assert last["role"] == "system" and note in last["content"][0]["text"]
+    for model in ("claude-haiku-5-5", "claude-opus-5", "claude-sonnet-5"):  # these still take one
+        assert "tool_choice" in claude.request(user(model=model, tools=TOOLS, **fields))
+
+
+@pytest.mark.parametrize(
+    "model, in_place",
+    [
+        (MODEL, True),
+        ("claude-opus-4-8", True),
+        ("claude-sonnet-5-5", True),
+        ("claude-haiku-5-5", True),
+        ("claude-fable-5", True),
+        ("claude-future-1", True),  # a name of a kind QueueRouter doesn't know: a new model
+        ("claude-opus-4-7", False),
+        ("claude-sonnet-5", False),
+        ("claude-haiku-4-5-20251001", False),
+        ("claude-3-7-sonnet-latest", False),
+    ],
+)
+def test_system_messages_during_the_conversation(model, in_place):
+    """They stay where they are: moved to the top, they would change the start of every request (no cache)."""
+    messages = [
+        {"role": "system", "content": "be brief"},
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "system", "content": "now in French"},
+        {"role": "user", "content": "three"},
+    ]
+    body = claude.request({"model": model, "messages": messages})
+    assert body["system"] == "be brief"
+    if in_place:  # right after the next user turn: Claude takes it nowhere else
+        assert body["messages"][-2:] == [
+            {"role": "user", "content": [{"type": "text", "text": "three"}]},
+            {"role": "system", "content": [{"type": "text", "text": "now in French"}]},
+        ]
+    else:  # a reminder in the user's turn
+        assert body["messages"][-1]["content"][-1]["text"] == "<system-reminder>\nnow in French\n</system-reminder>"
+        assert all(m["role"] != "system" for m in body["messages"])
+    between = [
+        {"role": "user", "content": "one"},
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "two"},
+    ]
+    body = claude.request({"model": MODEL, "messages": between})
+    assert [m["role"] for m in body["messages"]] == ["user", "system"]  # a user turn, then the message
+
+
+def test_the_conversation_is_put_in_the_shape_claude_insists_on():
+    def shaped(*messages, model=MODEL):
+        return claude.request({"model": model, "messages": list(messages)})["messages"]
+
+    greeting = shaped({"role": "assistant", "content": "Hello!"}, {"role": "user", "content": "hi"})
+    assert greeting[0] == {"role": "user", "content": [{"type": "text", "text": claude.START}]}
+    assert shaped({"role": "system", "content": "do it"}) == [
+        {"role": "user", "content": [{"type": "text", "text": claude.GO_AHEAD}]}
+    ]
+    prefill = [{"role": "user", "content": "list them"}, {"role": "assistant", "content": "1."}]
+    assert shaped(*prefill)[-1] == {"role": "user", "content": [{"type": "text", "text": claude.CONTINUE}]}
+    assert shaped(*prefill, model="claude-sonnet-4-5")[-1]["role"] == "assistant"  # older models still take one
+    call = {"role": "assistant", "content": None, "tool_calls": [{"id": "a", "function": {"name": "t"}}]}
+    unanswered = shaped({"role": "user", "content": "go"}, call, {"role": "user", "content": "and?"})
+    assert unanswered[-1]["content"] == [
+        {"type": "tool_result", "tool_use_id": "a", "content": [{"type": "text", "text": claude.NO_RESULT}]},
+        {"type": "text", "text": "and?"},
+    ]
+    assert shaped({"role": "user", "content": "go"}, call)[-1]["content"][0]["tool_use_id"] == "a"
+    orphan = shaped({"role": "user", "content": "go"}, {"role": "tool", "tool_call_id": "x", "content": "out"})
+    assert orphan == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "go"},
+                {"type": "text", "text": "[The result of an earlier tool call x:]"},
+                {"type": "text", "text": "out"},
+            ],
+        }
+    ]
+
+
+EFFORT = {"supported": True, **{e: {"supported": e != "xhigh"} for e in claude.EFFORTS}}
+
+
+@pytest.mark.parametrize(
+    "wanted, model, entry, expected",
+    [
+        ("high", MODEL, None, "high"),
+        ("none", MODEL, None, "low"),  # Claude's lowest: thinking can't be turned off on the newest models
+        ("xhigh", MODEL, {"capabilities": {"effort": EFFORT}}, "high"),  # one it lacks: the nearest below
+        ("max", MODEL, {"capabilities": {"effort": EFFORT}}, "max"),
+        ("high", MODEL, {"capabilities": {"effort": {"supported": False}}}, None),
+        ("high", "claude-haiku-4-5", None, None),  # takes no effort setting
+        ("loud", MODEL, None, None),
+    ],
+)
+def test_a_thinking_level_is_claudes_effort(wanted, model, entry, expected):
+    body = claude.request(user(model=model, reasoning_effort=wanted), entry)
+    assert body.get("output_config", {}).get("effort") == expected
+    schema = {"type": "json_schema", "json_schema": {"name": "a", "schema": {"type": "object"}, "strict": True}}
+    both = claude.request(user(reasoning_effort="low", response_format=schema))["output_config"]
+    assert both == {"effort": "low", "format": {"type": "json_schema", "schema": {"type": "object"}}}
+
+
+def test_parts_in_the_responses_apis_form():
+    parts = [
+        {"type": "input_text", "text": "look"},
+        {"type": "output_text", "text": "at"},
+        {"type": "input_image", "image_url": "https://example.com/a.png"},
+    ]
+    content = claude.request({"model": MODEL, "messages": [{"role": "user", "content": parts}]})["messages"][0]
+    assert content["content"] == [
+        {"type": "text", "text": "look"},
+        {"type": "text", "text": "at"},
+        {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}},
+    ]
 
 
 def test_only_what_comes_again_is_cached():
@@ -528,6 +666,36 @@ async def test_a_malformed_request_is_refused(make_stack):
         assert r.status_code == 400 and "expected format" in r.json()["error"]["message"]
         assert (await ask(c, stack, messages=[{"role": "user", "content": "hi"}]))["choices"]  # its slot is free
     assert len(stack.mock["claude_requests"]) == 1
+
+
+async def test_claude_takes_the_conversation_as_shaped(make_stack):
+    """Through QueueRouter to a Claude as strict as the real one: a system message during the conversation stays where
+    it is, and a tool call is asked for (Opus 5.5 refuses a forced one)."""
+    stack = claude_stack(make_stack)
+    stack.mock["extra_model_entries"][0]["capabilities"] = {"effort": EFFORT}
+    messages = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": "find it"},
+        {"role": "system", "content": "Use the search tool."},
+    ]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await c.get("/v1/models", headers=stack.headers)
+        reply = await ask(c, stack, messages=messages, tools=TOOLS, tool_choice="required", reasoning_effort="xhigh")
+        assert reply["choices"][0]["finish_reason"] == "tool_calls"
+        config = (await c.get("/v1/opencode-config?plugin=2", headers=stack.headers)).json()
+    sent = stack.mock["claude_requests"][-1]
+    assert "tool_choice" not in sent and sent["system"] == SYSTEM
+    assert sent["messages"][-1] == {
+        "role": "system",
+        "content": [
+            {"type": "text", "text": "Use the search tool."},
+            {"type": "text", "text": "Answer this turn by calling one of the tools."},
+        ],
+    }
+    assert sent["output_config"] == {"effort": "high"}  # xhigh it lacks: the nearest below
+    models = config["provider"]["queuerouter"]["models"]
+    model = models.get(f"{MODEL}@upstream") or models[MODEL]
+    assert model["thinking"]["variants"] == [["low", "low"], ["medium", "medium"], ["high", "high"], ["max", "max"]]
 
 
 async def test_other_upstreams_stay_openai_compatible(make_stack):

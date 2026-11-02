@@ -102,12 +102,17 @@ from a **web admin UI**.
   works unchanged. Jobs run at low priority, one at a time by default, and survive restarts.
 - **Other API shapes**: Anthropic Messages (`/v1/messages`) and OpenAI Responses (`/v1/responses`)
   are translated to chat completions, so tools speaking either API get the same queue, policies,
-  aliases and fallbacks. Hosted/server tools (web search, code interpreter…) aren't supported.
+  aliases and fallbacks: Claude Code too (see [Use with Claude Code](#use-with-claude-code)). Apps that mix chat
+  completions' own forms in (tool messages, `tool_calls`, `input_text` parts) are understood. Hosted/server tools (web
+  search, code interpreter…) and PDFs aren't supported; a request that can't be translated shows on the Requests page.
 - **Claude with prompt caching**: the Anthropic preset talks to Claude's own Messages API, so agents and
   conversations are cached by themselves: what Claude read a moment ago costs a tenth of the input price or less. Tools,
   streaming and images work as before; apps keep speaking chat completions. Writing to the cache costs 1.25 × the input
   price, so a single message without tools only caches its system prompt. Claude's thinking isn't shown, or passed back
-  between tool calls. An upstream added as Custom with the same address stays on Claude's OpenAI-compatible endpoint.
+  between tool calls; its levels are offered in opencode. A system message sent during a conversation stays where it is,
+  so the cache still works, and the conversation is put in the shape Claude insists on (it starts with the user, every
+  tool call gets a result). The newest models refuse a forced tool call, so they're asked for one instead. An upstream
+  added as Custom with the same address stays on Claude's OpenAI-compatible endpoint.
 - **Backup and restore** (owner): download a zip (database + optional encryption key), daily
   automatic copies in `/data/backups`, and restore from an upload or a listed copy — checked first,
   then QueueRouter restarts itself to load it (the previous data is kept).
@@ -370,8 +375,9 @@ Models that can think get a level selector in opencode 2.x (next to the model; c
 `low`, `high`… as the model offers them, or `off` / `thinking` for models that can only switch thinking on and off.
 QueueRouter finds the levels in each upstream's model list (OpenRouter lists them) or, by name, in OpenRouter's public
 list, and asks each upstream its own way (OpenRouter `reasoning.effort`, a self-hosted vLLM server's chat-template
-switch, OpenAI-style `reasoning_effort`). ArliAI's models get none: they think whatever is sent. Correct a model on **Models → Thinking levels**. Needs the
-QueueRouter plugin (re-install it once after upgrading to 0.38).
+switch, OpenAI-style `reasoning_effort`). ArliAI's models get none: they think whatever is sent. Claude's models (the
+Anthropic preset) offer Claude's own levels, `low` to `max`, as its model list states. Correct a model on
+**Models → Thinking levels**. Needs the QueueRouter plugin (re-install it once after upgrading to 0.38).
 
 ### Cost in opencode
 
@@ -422,6 +428,47 @@ without a known price shows `$?`, and a council shows none because one request m
 can show `$0.000`. Turn it off with **Settings → opencode → Show prices in model names**. opencode's own session cost
 still uses the exact rates.
 
+## Use with Claude Code
+
+Claude Code speaks Claude's Messages API, which QueueRouter serves at `/v1/messages`, so it can use any model
+QueueRouter has, Claude or not. Anthropic doesn't support Claude Code on other models: it works, but a Claude Code
+update can change what it sends.
+
+**In a terminal** (and the VS Code extension, which reads the same file), put this in `~/.claude/settings.json`
+(`%USERPROFILE%\.claude\settings.json` on Windows), with no `/v1` after the address:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://queuerouter.example.com",
+    "ANTHROPIC_AUTH_TOKEN": "<client key>",
+    "ANTHROPIC_MODEL": "<a model or alias>",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "<a cheaper one, for titles and other background work>",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+```
+
+`/status` then shows the address. Requests carry the client key instead of your claude.ai login, so they don't count
+against a Claude subscription.
+
+**In the Claude desktop app**: Help → Troubleshooting → Enable Developer Mode, then Developer → Configure Third-Party
+Inference. Choose **Gateway**, with your QueueRouter address, a client key, **Bearer**, and the models by their
+QueueRouter names (the app's automatic list only shows names that look like Claude's). This switches the whole app,
+Chat and Cowork included, to QueueRouter; cloud sessions and Remote Control are off while it's on.
+
+What QueueRouter does for Claude Code:
+
+- Its system messages during a conversation become reminders in the user's turn, where they were (the way Claude Code
+  sends them itself where they aren't taken). Many open models' chat templates refuse a system message after the start.
+- Its effort (`output_config.effort`) is sent as the model's nearest thinking level, only where QueueRouter knows the
+  model's levels.
+- It asks for 32,000 tokens of answer (128,000 for a name like Opus's): lowered to what the model can give.
+- "Too long" is said the way Claude says it, so Claude Code compacts the conversation and tries again by itself.
+
+It can't show thinking, and PDFs and Claude Code's web search don't work. For a name it doesn't know, Claude Code
+assumes a context of 200,000 tokens: on smaller models it compacts once it's told the prompt is too long.
+
 ## Environment variables (bootstrap only)
 
 Everything else is configured in the admin UI.
@@ -464,7 +511,7 @@ Traefik address doesn't.
 | `POST /v1/chat/completions`, `POST /v1/*` | queued |
 | `POST /v1/jobs`, `GET /v1/jobs[/{id}]`, `DELETE /v1/jobs/{id}` | async jobs: `{"request": {...}, "endpoint", "priority", "run_at", "deadline", "idle_only", "callback_url", "callback_secret", "tags"}` → 202; result on `GET` when done |
 | `/v1/files`, `/v1/batches` | OpenAI-compatible Batch API (JSONL in, output/error files out, `completion_window` 24h) |
-| `POST /v1/messages` | **Anthropic Messages API** (Claude SDKs and tools), translated to chat completions; streaming, tools, images; `/v1/messages/count_tokens` estimates |
+| `POST /v1/messages` | **Anthropic Messages API** (Claude SDKs, Claude Code), translated to chat completions; streaming, tools, images, system messages inside `messages`, structured output; `/v1/messages/count_tokens` estimates |
 | `POST /v1/responses` | **OpenAI Responses API** (Agents SDK, newer clients); streaming, function tools, structured output, `previous_response_id` (kept encrypted 7 days; `store: false` keeps nothing) |
 | `GET /v1/models` | all upstreams' models + aliases, filtered to the client's allowed models |
 | `GET /v1/models/{id}` | one model (aliases and `model@upstream` too); other `/v1/` GETs are refused unless listed in Settings → "GET paths passed to the provider" |
@@ -481,7 +528,8 @@ Traefik address doesn't.
 low|normal|high` (can only lower your key's priority), `X-Session-Id` (group requests into a
 conversation), `X-Run-Id` (one agent task, for run budgets and loop detection),
 `X-QueueRouter-Run-Budget-Tokens` (lower your run's token budget), `X-QueueRouter-Tags`
-(comma-separated labels).
+(comma-separated labels), `X-QueueRouter-Effort` (`low` to `max`: sent as the model's nearest thinking level where
+QueueRouter knows its levels; `/v1/messages` sets it from `output_config.effort`).
 
 **Response headers**: `X-Request-Id`, `X-QueueRouter-Queue-Depth`, `X-QueueRouter-Position`
 (0 = started immediately), `X-QueueRouter-Est-Wait-Ms`, `X-QueueRouter-Slots`; non-streaming
@@ -490,7 +538,8 @@ responses also `X-Queue-Wait-Ms`.
 QueueRouter only refuses requests for reasons you configured: bad key (401), model not allowed
 (403), a client's queue/rate limit in `reject` mode, run budget or loop rejection (429),
 draining/maintenance (503), body too large (413), and prompts that clearly exceed the model's
-context (400 `context_length_exceeded`).
+context (400 `context_length_exceeded`). An answer size the model can't give (`max_tokens`) is lowered, not refused.
+The API adapters also refuse what they can't translate (400), and those show on the Requests page.
 
 Responses also carry `X-QueueRouter-Model` (the model that actually answered, e.g. after a
 fallback); streams announce a fallback with an SSE comment.

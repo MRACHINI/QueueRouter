@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from app.params import apply_rules, estimate_prompt_tokens, parse_rules, too_long
+from app.params import apply_rules, estimate_prompt_tokens, fit_output, parse_rules, too_long
 from tests.test_admin import OWNER, csrf_of, login
 from tests.test_policies import set_policy
 
@@ -54,6 +54,37 @@ def test_context_check():
     assert too_long(payload, 32_768) == (100_000, 32_768)
     assert too_long(payload, None) is None  # unknown context: never refuse
     assert too_long({"messages": [{"role": "user", "content": "x" * 140_000}]}, 32_768) is None  # within margin
+
+
+def test_an_answer_size_the_model_cant_give_is_lowered():
+    """Apps made for one model ask for its size everywhere (Claude Code: 128,000 for Opus): lowered, not refused."""
+
+    def asked(**fields):
+        return {"messages": [{"role": "user", "content": "x" * 3_999}], **fields}  # 1,000 tokens
+
+    payload = asked(max_tokens=128_000)
+    assert fit_output(payload, 32_768)  # room to spare for the estimate, and for the chat template
+    assert payload["max_tokens"] == 32_768 - 1_100 - 512
+    payload = asked(max_completion_tokens=128_000, max_tokens=128_000)
+    assert fit_output(payload, 32_768, ratio=1.5)  # the provider counts half as much again
+    assert payload["max_completion_tokens"] == payload["max_tokens"] == 32_768 - 1_650 - 512
+    payload = asked(max_tokens=128_000)
+    assert fit_output(payload, None, most=8_192) and payload["max_tokens"] == 8_192  # the model's own output limit
+    for unchanged in (asked(max_tokens=4_000), asked()):
+        assert not fit_output(unchanged, 32_768, most=8_192)
+    tight = asked(max_tokens=4_000)  # the prompt nearly fills the context: the context check decides
+    assert not fit_output(tight, 2_000) and tight["max_tokens"] == 4_000
+
+
+async def test_the_answer_size_is_lowered_to_fit(make_stack):
+    stack = make_stack(models_cache_s=0)
+    stack.mock["extra_model_entries"] = [{"id": "small", "object": "model", "max_model_len": 16_384}]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await c.get("/v1/models", headers=stack.headers)
+        body = {"model": "small", "max_tokens": 128_000, "messages": [{"role": "user", "content": "hi"}]}
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=body)
+        assert r.status_code == 200, r.text
+    assert json.loads(stack.mock["last_body"])["max_tokens"] == 16_384 - 512  # a tiny prompt: the template's room
 
 
 async def test_rules_reach_the_upstream(make_stack):

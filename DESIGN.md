@@ -1508,6 +1508,39 @@ v0.54.0: opencode 2.x connects with one command, and nothing goes in the environ
   plugin it downloads (`public_base`): it used to ignore the proxy's X-Forwarded-* headers.
 - The login is gone from the page and the README. /.well-known/opencode stays for 1.x, and its error points at the page.
 - From here on the plugin is only tested on 2.x. Its 1.x code stays.
+v0.55.0: Claude Code works through /v1/messages, and both adapters and the Claude connection take what apps send now.
+- Claude Code (2.1.316, tested on the VM) failed on its first request: it sends `role: "system"` messages inside
+  `messages` (Claude's mid-conversation system messages: Opus 4.8, Sonnet 5.5, Haiku 5.5 and later take them) for
+  those models and any name it doesn't know, and the adapter only knew user and assistant. Claude Code drops them and
+  tries again only on Claude's own error wording, so it gave up after six tries. The refusal wasn't logged either.
+- /v1/messages: before the conversation they join the system prompt; later ones become a `<system-reminder>` in the
+  user's turn where they were, as Claude Code itself sends them where they aren't taken. Kept as system messages they
+  would reach chat templates of open models that refuse one after the start; moved to the top they would change the
+  start of every request. A message that only sets the effort is dropped; `clear_at: next_user_message` ones once a
+  user message follows; `tool_removal` takes the tool out of the request (every declared tool is offered otherwise,
+  `defer_loading` included). In a tool result, documents and search results become text and what text can't carry
+  (an image, a PDF) a note. Chat completions' own forms (tool and function messages, `tool_calls`, `input_text`,
+  `image_url`) pass as they are; /v1/responses takes them too. `output_config.format` becomes a strict `response_format`.
+- The effort Claude Code sends (always: high for unknown names, medium for Opus) isn't put in the chat request: some
+  providers refuse `reasoning_effort`, which would break every request. It travels in `X-QueueRouter-Effort` (never
+  forwarded) and becomes the nearest thinking level of a model whose levels QueueRouter knows (`thinking.nearest`;
+  thinking is only turned off when that's asked), per upstream in `build_request`.
+- Claude's own API (Anthropic preset): later system messages stay in place as role "system" messages, placed right after
+  the next user turn (Claude takes them only after a user message, last or before an answer); before Opus 4.8,
+  Sonnet 5.5 and Haiku 5.5 they become reminders in that turn (Claude's documented fallback). Model generations are
+  read from the ID (`_since`); a name of an unknown kind is taken as a new model. A forced tool call (`any`, `tool`) is
+  a 400 on Opus 5.5, Sonnet 5.5, Fable 5.1, Mythos 5.1 (and assumed for later): sent as auto with a system message at
+  the end asking for the call. The conversation is made valid: a user turn first (a placeholder), every call answered
+  (a result saying none was recorded), a result without its call as text, no prefill on models that refuse one (a user
+  turn asking to continue), never empty. `reasoning_effort` is `output_config.effort`, limited to the levels the model
+  list states (`capabilities.effort`), and opencode offers those levels.
+- `max_tokens` (and `max_completion_tokens`) is lowered to the model's stated output limit and to what its context
+  leaves after the prompt (estimate × the learned ratio × 1.1, and 512 for the chat template's own tokens), before
+  compaction plans and again after it, rather than
+  refused by the context check: Claude Code asks 128,000 under an Opus name. A prompt leaving less than 1,024 is still
+  the check's to refuse.
+- An overflow error through /v1/messages is worded Claude's way (`prompt is too long: N tokens > M maximum`), the only
+  wording Claude Code compacts and retries on. Refused adapter requests are logged as `refused` with the reason.
 
 ### Later (agreed, not scheduled)
 

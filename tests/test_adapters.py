@@ -1,12 +1,16 @@
 """Anthropic Messages and OpenAI Responses adapters, exercised with the official SDKs."""
 
+import asyncio
 import json
 
 import anthropic
+import httpx
 import openai
 import pytest
 
+from app import anthropic_api, responses_api
 from tests.conftest import ACCESS_KEY
+from tests.test_usage import flushed
 
 TOOL_SCHEMA = {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}
 
@@ -91,6 +95,158 @@ async def test_anthropic_errors(make_stack):
     assert "not supported" in caught.value.body["error"]["message"]
 
 
+async def test_what_claude_code_sends(make_stack):
+    """System messages inside messages (from the first request on), effort, adaptive thinking, context management and
+    deferred tools: taken; the system message stays where it is, as a reminder in the user's turn."""
+    stack = make_stack()
+    body = {
+        "model": "mock-model",
+        "max_tokens": 32_000,
+        "system": [
+            {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1"},
+            {"type": "text", "text": "You are Claude Code.", "cache_control": {"type": "ephemeral"}},
+        ],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Say hi"}]},
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "Today is Monday."}],
+                "output_config": {"effort": "low"},
+            },
+        ],
+        "tools": [{"name": "Bash", "description": "Run", "input_schema": TOOL_SCHEMA, "defer_loading": True}],
+        "thinking": {"type": "adaptive", "display": "omitted"},
+        "output_config": {"effort": "high"},
+        "context_management": {"edits": [{"type": "clear_tool_uses_20250919"}]},
+        "metadata": {"user_id": "u1"},
+        "stream": True,
+    }
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        async with c.stream("POST", "/v1/messages", headers=stack.headers, json=body) as r:
+            text = (await r.aread()).decode()
+    assert r.status_code == 200 and "message_stop" in text and '"tool_use"' in text
+    upstream = sent(stack)
+    assert upstream["messages"] == [
+        {"role": "system", "content": "x-anthropic-billing-header: cc_version=2.1\nYou are Claude Code."},
+        {"role": "user", "content": "Say hi\n\n<system-reminder>\nToday is Monday.\n</system-reminder>"},
+    ]
+    assert upstream["max_tokens"] == 32_000  # it fits this model: left as it is
+    assert "reasoning_effort" not in upstream  # mock-model's thinking levels aren't known: nothing is guessed
+    assert not any(k.startswith("x-queuerouter") for k in stack.mock["last_headers"])
+
+
+async def test_the_effort_asked_for_goes_only_to_models_with_known_levels(make_stack):
+    stack = make_stack(models_cache_s=0)
+    reasoning = {"supported_efforts": ["low", "medium", "high"]}
+    stack.mock["extra_model_entries"] = [{"id": "thinker", "object": "model", "reasoning": reasoning}]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await c.get("/v1/models", headers=stack.headers)
+        for model, effort, expected in (
+            ("thinker", "max", "high"),
+            ("thinker", "low", "low"),
+            ("mock-model", "high", None),
+        ):
+            messages = [{"role": "user", "content": "hi"}]
+            body = {"model": model, "max_tokens": 10, "messages": messages, "output_config": {"effort": effort}}
+            r = await c.post("/v1/messages", headers=stack.headers, json=body)
+            assert r.status_code == 200, r.text
+            assert sent(stack).get("reasoning_effort") == expected, model
+
+
+async def test_messages_in_chat_completions_form(make_stack):
+    """Some apps mix chat completions' own forms into a Messages request: taken as they are, never lost."""
+    stack = make_stack()
+    call = {"id": "c1", "type": "function", "function": {"name": "search", "arguments": '{"q": "x"}'}}
+    body = {
+        "model": "mock-model",
+        "max_tokens": 50,
+        "messages": [
+            {"role": "user", "content": [{"type": "input_text", "text": "find x"}]},
+            {"role": "assistant", "content": None, "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "c1", "content": "42"},
+        ],
+    }
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        r = await c.post("/v1/messages", headers=stack.headers, json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["content"][0]["text"] == "hi tool said 42"
+    messages = sent(stack)["messages"]
+    assert messages == [
+        {"role": "user", "content": "find x"},
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "c1", "content": "42"},
+    ]
+
+
+def test_system_messages_and_what_they_carry():
+    found = [
+        {"type": "search_result", "title": "Doc", "source": "https://x", "content": [{"type": "text", "text": "body"}]},
+        {"type": "tool_reference", "tool_name": "Bash"},
+        {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "x"}},
+    ]
+    removal = {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "Bash"}}
+    request = {
+        "model": "m",
+        "system": "top",
+        "messages": [
+            {"role": "system", "content": "also top"},  # before the conversation: the system prompt
+            {"role": "user", "content": "one"},
+            {"role": "system", "content": "old reminder", "clear_at": "next_user_message"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": found}]},
+            {"role": "system", "content": [removal]},
+            {"role": "system", "content": [], "output_config": {"effort": "low"}},  # only sets the effort
+            {"role": "system", "content": [{"type": "text", "text": "new reminder"}], "clear_at": "next_user_message"},
+        ],
+        "tools": [{"name": name, "input_schema": {"type": "object"}} for name in ("Bash", "Read")],
+        "output_config": {"effort": "high", "format": {"type": "json_schema", "schema": {"type": "object"}}},
+    }
+    chat = anthropic_api.to_chat(request)
+    messages = chat["messages"]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "tool", "user"]
+    assert messages[0] == {"role": "system", "content": "top\nalso top"}
+    assert "old reminder" not in json.dumps(messages)  # a reminder for one turn, cleared since
+    assert "Doc - https://x\nbody" in messages[3]["content"] and "[Tool available: Bash]" in messages[3]["content"]
+    assert "document in this tool result was left out" in messages[3]["content"]  # said, not lost silently
+    assert messages[4] == {"role": "user", "content": "<system-reminder>\nnew reminder\n</system-reminder>"}
+    assert [t["function"]["name"] for t in chat["tools"]] == ["Read"]  # taken away
+    schema = {"name": "output", "schema": {"type": "object"}, "strict": True}
+    assert chat["response_format"] == {"type": "json_schema", "json_schema": schema}
+    assert anthropic_api.effort_of(request) == "low" and "reasoning_effort" not in chat
+    with pytest.raises(anthropic_api.Unsupported, match="server_tool_use"):
+        anthropic_api.to_chat({"messages": [{"role": "user", "content": [{"type": "server_tool_use"}]}]})
+
+
+def test_a_prompt_too_long_is_said_the_way_claude_does():
+    """Claude Code compacts the conversation and tries again only on Claude's own wording."""
+
+    def said(status, message):
+        body = json.dumps({"error": {"message": message}}).encode()
+        return anthropic_api.from_openai_error(status, body)["error"]["message"]
+
+    overflow = "This model's maximum context length is 8192 tokens. However, your request needs about 9500 tokens."
+    assert said(400, overflow) == "prompt is too long: 9500 tokens > 8192 maximum"
+    assert said(413, "Input is too long for this model.") == "prompt is too long: Input is too long for this model."
+    assert said(400, "max_tokens is too large") == "max_tokens is too large"  # not the prompt
+
+
+async def test_a_request_the_adapters_cant_translate_is_on_the_requests_page(make_stack):
+    stack = make_stack()
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        server_tool = [{"type": "server_tool_use", "id": "s", "name": "web_search", "input": {}}]
+        body = {"model": "mock-model", "max_tokens": 5, "messages": [{"role": "user", "content": server_tool}]}
+        r = await c.post("/v1/messages", headers=stack.headers, json=body)
+        assert r.status_code == 400 and "server_tool_use" in r.json()["error"]["message"]
+        r = await c.post("/v1/responses", headers=stack.headers, json={"model": "mock-model", "input": [{"type": "x"}]})
+        assert r.status_code == 400
+        await flushed(stack, 2)
+    rows = await asyncio.to_thread(stack.app.state.store.list_requests, 10)
+    assert {(r["path"], r["outcome"], r["model"]) for r in rows} == {
+        ("/v1/messages", "refused", "mock-model"),
+        ("/v1/responses", "refused", "mock-model"),
+    }
+
+
 # -- OpenAI Responses ------------------------------------------------------------------------
 
 
@@ -153,6 +309,22 @@ async def test_responses_function_calls(make_stack):
 
     rows = stack.app.state.stats.recent
     assert any("api:responses" in (r.get("tags") or "") for r in rows)
+
+
+def test_responses_take_chat_completions_forms():
+    call = {"id": "c1", "type": "function", "function": {"name": "s", "arguments": "{}"}}
+    messages = responses_api.input_messages(
+        [
+            {"role": "user", "content": "find x"},
+            {"role": "assistant", "content": None, "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "c1", "content": [{"type": "input_text", "text": "42"}]},
+        ]
+    )
+    assert messages == [
+        {"role": "user", "content": "find x"},
+        {"role": "assistant", "content": "", "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "c1", "content": "42"},
+    ]
 
 
 def test_review_fixes_adapters():

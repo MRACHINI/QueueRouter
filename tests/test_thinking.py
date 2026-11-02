@@ -36,6 +36,31 @@ def test_levels_from_model_lists():
     assert thinking.style_of("http://10.0.0.5:8000/v1", {"engine": "vllm"}) == "vllm"
 
 
+def test_claudes_own_levels():
+    effort = {"supported": True, **{e: {"supported": e != "xhigh"} for e in thinking.CLAUDE_EFFORTS}}
+    found = thinking.from_claude({"capabilities": {"effort": effort}})
+    assert found == (("low", "medium", "high", "max"), None)
+    assert thinking.for_style("claude", found) == (
+        ("low", "low"),
+        ("medium", "medium"),
+        ("high", "high"),
+        ("max", "max"),
+    )
+    assert thinking.for_style("claude", (("none", "high"), None)) == ()  # one level of its own: nothing to choose
+    assert thinking.from_claude({"capabilities": {"effort": {"supported": False}}}) is None
+    assert thinking.from_claude(None) is None
+
+
+def test_the_nearest_level_for_an_effort():
+    """An app that says how hard to think without picking a level (Claude Code's effort)."""
+    assert thinking.nearest(["low", "medium", "high"], "max") == "high"
+    assert thinking.nearest(["low", "medium", "high"], "medium") == "medium"
+    assert thinking.nearest(["medium", "high"], "low") == "medium"  # all above: the lowest
+    assert thinking.nearest(["none", "high"], "medium") == "high"  # thinking is only turned off when that's asked
+    assert thinking.nearest(["none", "high"], "none") == "none"
+    assert thinking.nearest(["low"], "loud") is None and thinking.nearest([], "high") is None
+
+
 def test_each_upstream_is_asked_its_own_way():
     payload = {"reasoning_effort": "max"}
     assert thinking.translate(payload, "openrouter") and payload == {"reasoning": {"effort": "max"}}

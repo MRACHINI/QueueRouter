@@ -12,7 +12,14 @@ prompt: a write costs 1.25 times the input price (app/pricing.py), which only pa
 Thinking is neither shown nor passed back. opencode keeps no thinking blocks, blocks in a history that opencode or
 QueueRouter shortened would fail their signature check on Claude 5.1 and later (a 400 on newer accounts), and with
 adaptive thinking a turn without them is valid: the model just can't see its earlier reasoning, as on the
-OpenAI-compatible endpoint.
+OpenAI-compatible endpoint. A thinking level asked for (``reasoning_effort``) is Claude's ``output_config.effort``.
+
+System and developer messages before the conversation are its system prompt. Later ones stay where they are, as
+Claude's own ``role: "system"`` messages on the models that take them (Opus 4.8, Sonnet 5.5, Haiku 5.5 and later):
+moved to the top, they would change the start of every request, and nothing could be read from the cache. Elsewhere
+they go into the user's turn, marked as a reminder. The conversation is put in the shape Claude insists on: it
+starts with the user, every tool call is answered, and it doesn't end with the assistant's own start of an answer on
+the models that refuse that. The newest models refuse a forced tool call, so they're asked for one instead.
 """
 
 from __future__ import annotations
@@ -51,12 +58,36 @@ ERROR_STATUS = {  # an error in the middle of a stream: its HTTP status, had it 
 }
 _BAD_ID = re.compile(r"[^a-zA-Z0-9_-]")  # Claude's rule for tool call ids; other providers' ids can break it
 _DATA_URL = re.compile(r"data:([^;,]+);base64,(.*)", re.S)
+EFFORTS = ("low", "medium", "high", "xhigh", "max")  # output_config.effort, lowest first
+NO_RESULT = "No result was recorded for this tool call."
+START = "(The conversation starts here.)"  # Claude wants the user first
+GO_AHEAD = "Go ahead."  # a request with a system prompt and nothing else
+CONTINUE = "Continue your last message from where it stopped, without repeating it."  # in place of a prefill
+# Since which version of each family a model works a certain way (``_since``)
+_SYSTEM_MESSAGES = {"opus": (4, 8), "sonnet": (5, 5), "haiku": (5, 5)}  # Fable and Mythos: all
+_NO_FORCED_TOOLS = {"opus": (5, 5), "sonnet": (5, 5), "fable": (5, 1), "mythos": (5, 1)}  # Haiku: none yet
+_NO_PREFILL = {"opus": (4, 6), "sonnet": (4, 6), "haiku": (5, 5)}  # Fable and Mythos: all
+_EFFORT = {"opus": (4, 6), "sonnet": (4, 6), "haiku": (5, 5)}  # Fable and Mythos: all
+_VERSION = re.compile(r"claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?(?!\d)")
 
 
 def native(upstream) -> bool:
     """Whether this upstream speaks Messages. By the preset, not the address: a Custom upstream at api.anthropic.com
     stays on its OpenAI-compatible endpoint, the way back if something here doesn't suit."""
     return upstream.preset == PRESET
+
+
+def _since(model, first: dict[str, tuple[int, int]], others: bool) -> bool:
+    """Whether ``model`` is a Claude model at or after the version ``first`` gives for its family (``others`` for a
+    family it leaves out). Claude 3 and older never are; a name that isn't a Claude version is taken as a new model."""
+    name = str(model or "").lower()
+    if re.match(r"claude-([0-3]|instant)(\D|$)", name):
+        return False
+    found = _VERSION.search(name)
+    if not found:
+        return True
+    floor = first.get(found[1])
+    return others if floor is None else (int(found[2]), int(found[3] or 0)) >= floor
 
 
 # -- request ---------------------------------------------------------------------------------
@@ -76,10 +107,10 @@ def _blocks(content) -> list[dict]:
     blocks = []
     for part in content if isinstance(content, list) else []:
         kind = part.get("type") if isinstance(part, dict) else None
-        if kind == "text":
+        if kind in ("text", "input_text", "output_text"):  # the last two: OpenAI Responses' names, some apps send
             if str(part.get("text") or "").strip():
                 blocks.append({"type": "text", "text": part["text"]})
-        elif kind == "image_url":
+        elif kind in ("image_url", "input_image"):
             blocks.append(_image(part.get("image_url")))
         elif kind not in (None, "refusal"):  # say so, rather than lose it silently
             blocks.append({"type": "text", "text": f"[A {kind} part was left out: this model API can't receive it.]"})
@@ -106,16 +137,69 @@ def _tool_result(call_id, content) -> dict:
     return result
 
 
-def _messages(chat: list) -> tuple[str, list[dict]]:
-    """(system prompt, Claude's messages). System and developer messages go to the top, wherever they were."""
+def _remind(messages: list[dict], later: list[str], in_place: bool) -> None:
+    """System text from during the conversation, after the user turn that ends ``messages``: Claude's own role
+    "system" message (``in_place``), else a reminder at the end of the last user turn. ``later`` is emptied."""
+    text = "\n".join(line for line in later if line.strip())
+    later.clear()
+    if not text:
+        return
+    if in_place and messages[-1]["role"] == "system":  # one right after another: one message
+        messages[-1]["content"].append({"type": "text", "text": text})
+    elif in_place and messages[-1]["role"] == "user":
+        messages.append({"role": "system", "content": [{"type": "text", "text": text}]})
+    else:
+        turn = next(m for m in reversed(messages) if m["role"] == "user")
+        turn["content"].append({"type": "text", "text": f"<system-reminder>\n{text}\n</system-reminder>"})
+
+
+def _answer_calls(messages: list[dict]) -> None:
+    """Every tool call answered in the next turn, every result answering a call of the turn before, results first in
+    their turn: a call without a result gets one saying so, a result without its call becomes text."""
+    calls: list[str] = []
+    i = 0
+    while i < len(messages):
+        message = messages[i]
+        if message["role"] == "assistant":
+            calls = [block["id"] for block in message["content"] if block["type"] == "tool_use"]
+            if calls and (i + 1 == len(messages) or messages[i + 1]["role"] != "user"):
+                messages.insert(i + 1, {"role": "user", "content": []})
+        elif message["role"] == "user":
+            results: list[dict] = []
+            rest: list[dict] = []
+            answered: set[str] = set()
+            for block in message["content"]:
+                if block["type"] != "tool_result":
+                    rest.append(block)
+                elif block["tool_use_id"] in calls and block["tool_use_id"] not in answered:
+                    answered.add(block["tool_use_id"])
+                    results.append(block)
+                else:  # its call isn't in the turn before: Claude would refuse it as a result
+                    note = f"[The result of an earlier tool call {block['tool_use_id']}:]"
+                    rest += [{"type": "text", "text": note}, *(block.get("content") or [])]
+            missing = [_tool_result(call, NO_RESULT) for call in calls if call not in answered]
+            message["content"] = [*results, *missing, *rest]
+            calls = []
+        i += 1
+
+
+def _messages(chat: list, model) -> tuple[str, list[dict]]:
+    """(system prompt, Claude's messages, in the shape Claude insists on). System and developer messages before the
+    conversation are the system prompt; later ones go right after the next user turn, where Claude allows them."""
+    in_place = _since(model, _SYSTEM_MESSAGES, others=True)
     system: list[str] = []
+    later: list[str] = []  # system text from during the conversation, waiting for the end of a user turn
     messages: list[dict] = []
     legacy_calls = 0  # function_call / role "function": the older form of tool calls, which has no ids
 
     def add(role: str, blocks: list[dict]) -> None:  # consecutive messages of a role are one turn
-        if blocks and messages and messages[-1]["role"] == role:
+        if not blocks:
+            return
+        if role == "assistant" and later and messages and messages[-1]["role"] == "user":
+            _remind(messages, later, in_place)
+        if messages and messages[-1]["role"] == role:
             messages[-1]["content"].extend(blocks)
-        elif blocks:
+        else:
             messages.append({"role": role, "content": blocks})
 
     for message in chat:
@@ -124,7 +208,8 @@ def _messages(chat: list) -> tuple[str, list[dict]]:
             continue
         content = message.get("content")
         if role in ("system", "developer"):
-            system.extend(block["text"] for block in _blocks(content) if block["type"] == "text")
+            texts = [block["text"] for block in _blocks(content) if block["type"] == "text"]
+            (later if messages else system).extend(texts)
         elif role == "assistant":
             blocks = _blocks(content)
             for call in message.get("tool_calls") or []:
@@ -139,9 +224,14 @@ def _messages(chat: list) -> tuple[str, list[dict]]:
             add("user", [_tool_result(f"call_{legacy_calls}", content)])
         else:
             add("user", _blocks(content))
-    for message in messages:  # tool results must open their turn, even with a user message sent between them
-        if message["role"] == "user":
-            message["content"].sort(key=lambda block: block["type"] != "tool_result")
+    _answer_calls(messages)
+    if messages and messages[0]["role"] != "user":
+        messages.insert(0, {"role": "user", "content": [{"type": "text", "text": START}]})
+    if messages and messages[-1]["role"] == "assistant" and _since(model, _NO_PREFILL, others=True):
+        messages.append({"role": "user", "content": [{"type": "text", "text": CONTINUE}]})
+    if not messages:
+        messages.append({"role": "user", "content": [{"type": "text", "text": GO_AHEAD}]})
+    _remind(messages, later, in_place)
     return "\n".join(system), messages
 
 
@@ -182,14 +272,37 @@ def request(payload: dict, entry: dict | None = None) -> dict:
         raise Unsupported("the request's messages or tools aren't in the expected format") from exc
 
 
+def _effort(wanted, entry: dict | None, model) -> str | None:
+    """``output_config.effort`` for a ``reasoning_effort``: Claude's own levels as they are (none and minimal as low),
+    one the model lacks as the nearest it has below (its model list entry says which it has). None for a model that
+    takes no effort setting."""
+    if not isinstance(wanted, str):
+        return None
+    level = {"none": "low", "minimal": "low"}.get(wanted.lower(), wanted.lower())
+    if level not in EFFORTS:
+        return None
+    capabilities = (entry or {}).get("capabilities")
+    capability = capabilities.get("effort") if isinstance(capabilities, dict) else None
+    if not isinstance(capability, dict):
+        return level if _since(model, _EFFORT, others=True) else None
+    if capability.get("supported") is False:
+        return None
+    have = [e for e in EFFORTS if isinstance(capability.get(e), dict) and capability[e].get("supported") is True]
+    if not have:
+        return level
+    below = [e for e in have if EFFORTS.index(e) <= EFFORTS.index(level)]
+    return below[-1] if below else have[0]
+
+
 def _body(payload: dict, entry: dict | None) -> dict:
-    system, messages = _messages(payload.get("messages") or [])
+    model = payload.get("model")
+    system, messages = _messages(payload.get("messages") or [], model)
     stream = payload.get("stream") is True
     limits = (payload.get("max_completion_tokens"), payload.get("max_tokens"))
     wanted = next((n for n in limits if isinstance(n, int) and n > 0), MAX_TOKENS_STREAM if stream else MAX_TOKENS)
     most = (entry or {}).get("max_tokens")
     body: dict = {
-        "model": payload.get("model"),
+        "model": model,
         "max_tokens": min(wanted, most) if isinstance(most, int) and most > 0 else wanted,
         "messages": messages,
     }
@@ -198,9 +311,18 @@ def _body(payload: dict, entry: dict | None) -> dict:
     tools = _tools(payload)
     if tools:
         body["tools"] = tools
-        if choice := _tool_choice(payload):
+        choice = _tool_choice(payload)
+        if choice and choice["type"] in ("any", "tool") and _since(model, _NO_FORCED_TOOLS, others=False):
+            # the newest models refuse a forced call: it's asked for at the end of the conversation instead
+            which = f"the tool {choice['name']}" if choice["type"] == "tool" else "one of the tools"
+            note = [f"Answer this turn by calling {which}."]
+            _remind(messages, note, _since(model, _SYSTEM_MESSAGES, others=True))
+            choice = (
+                {"type": "auto", "disable_parallel_tool_use": True} if "disable_parallel_tool_use" in choice else None
+            )
+        if choice:
             body["tool_choice"] = choice
-    if tools or len(messages) > 1:
+    if tools or sum(m["role"] != "system" for m in messages) > 1:
         body["cache_control"] = {"type": "ephemeral"}
     elif system:  # a one-off request: only its system prompt can come again, a write of the rest would be wasted
         body["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
@@ -215,10 +337,15 @@ def _body(payload: dict, entry: dict | None) -> dict:
     for name in ("top_p", "top_k"):
         if payload.get(name) is not None:
             body[name] = payload[name]
+    config: dict = {}
+    if effort := _effort(payload.get("reasoning_effort"), entry, model):
+        config["effort"] = effort
     answer_format = payload.get("response_format")
     schema = answer_format.get("json_schema") if isinstance(answer_format, dict) else None
     if isinstance(schema, dict) and schema.get("strict") is True and isinstance(schema.get("schema"), dict):
-        body["output_config"] = {"format": {"type": "json_schema", "schema": schema["schema"]}}
+        config["format"] = {"type": "json_schema", "schema": schema["schema"]}
+    if config:
+        body["output_config"] = config
     return body
 
 

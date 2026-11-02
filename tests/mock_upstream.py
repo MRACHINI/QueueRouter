@@ -43,6 +43,8 @@ CLAUDE_FIELDS = {
     "cache_control",
     "output_config",
 }
+CLAUDE_NO_SYSTEM_MESSAGES = {"claude-sonnet-5", "claude-haiku-4-5", "claude-opus-4-7"}  # in ``messages``
+CLAUDE_NO_FORCED_TOOLS = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"}  # tool_choice any / tool
 CLAUDE_ERRORS = {
     401: "authentication_error",
     429: "rate_limit_error",
@@ -154,7 +156,7 @@ def create_mock(limit: int = 2) -> FastAPI:
             return _claude_error(400, f"prompt is too long: 9999999 tokens > {limit} maximum")
         state.setdefault("models", []).append(model)
         usage = _claude_usage(state, body)
-        last = body["messages"][-1]["content"]
+        last = next(m for m in reversed(body["messages"]) if m["role"] == "user")["content"]  # not a system message
         answered = isinstance(last, list) and any(block["type"] == "tool_result" for block in last)
         calls = body.get("tools") and not answered and (body.get("tool_choice") or {}).get("type") != "none"
         offered = [t["name"] for t in body.get("tools") or []]
@@ -466,10 +468,24 @@ def _claude_refusal(body: dict) -> str | None:
     messages = body.get("messages") or []
     if not messages:
         return "messages: at least one message is required"
-    if messages[-1]["role"] != "user":
+    model = body.get("model")
+    if (body.get("tool_choice") or {}).get("type") in ("any", "tool") and model in CLAUDE_NO_FORCED_TOOLS:
+        return 'tool_choice: type "tool" and "any" are not supported for this model.'
+    if messages[0]["role"] != "user":
+        return 'messages: the first message must use the "user" role'
+    if [m for m in messages if m["role"] != "system"][-1]["role"] != "user":
         return "This model does not support assistant message prefill. The conversation must end with a user message."
     waiting: set[str] = set()  # tool calls of the last assistant turn
     for i, message in enumerate(messages):
+        if message["role"] == "system":  # mid-conversation system messages, on the models that take them
+            if model in CLAUDE_NO_SYSTEM_MESSAGES:
+                return "role 'system' is not supported on this model"
+            after = messages[i + 1]["role"] if i + 1 < len(messages) else None
+            if messages[i - 1]["role"] != "user" or after not in (None, "assistant"):
+                return f"messages.{i}: a system message must follow a user message, and be last or before an answer"
+            if not message["content"] or any(b["type"] != "text" or not b["text"].strip() for b in message["content"]):
+                return f"messages.{i}: system content must be non-empty text"
+            continue
         if message["role"] not in ("user", "assistant"):
             return f"messages.{i}.role: Input should be 'user' or 'assistant'"
         blocks = message["content"]

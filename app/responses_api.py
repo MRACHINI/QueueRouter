@@ -3,8 +3,9 @@
 ``input`` / ``instructions`` / function ``tools`` / ``text.format`` are translated to a chat
 completion; output items and stream events are translated back. ``previous_response_id`` works
 for responses stored by QueueRouter (``store``, the default): the conversation is kept encrypted
-for a few days and resent, since upstreams are stateless. Hosted tools (web/file search, code
-interpreter, computer use...) are not supported.
+for a few days and resent, since upstreams are stateless. Chat completions' own message forms, which
+some apps mix in (tool and function messages, an assistant's tool_calls), are taken as they are.
+Hosted tools (web/file search, code interpreter, computer use...) are not supported.
 """
 
 from __future__ import annotations
@@ -53,6 +54,17 @@ def _parts(content) -> str | list[dict]:
     return parts
 
 
+def _tool_text(output) -> str:
+    """A tool's output as the text of a chat tool message (which carries text only: an image becomes a note)."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        parts = _parts(output)
+        parts = [{"type": "text", "text": parts}] if isinstance(parts, str) else parts
+        return "\n".join(p["text"] if p["type"] == "text" else "[An image was returned here.]" for p in parts)
+    return json.dumps(output)
+
+
 def input_messages(value) -> list[dict]:
     """Responses ``input`` -> chat messages."""
     if isinstance(value, str):
@@ -68,9 +80,18 @@ def input_messages(value) -> list[dict]:
             role = item.get("role")
             if role == "developer":
                 role = "system"
+            if role in ("tool", "function"):  # chat completions' own forms, which some apps mix in
+                kept = {"role": role, "content": _tool_text(item.get("content") or "")}
+                kept.update({key: item[key] for key in ("tool_call_id", "name") if isinstance(item.get(key), str)})
+                messages.append(kept)
+                continue
             if role not in ("user", "assistant", "system"):
                 raise Unsupported(f"unknown role {item.get('role')!r}")
-            messages.append({"role": role, "content": _parts(item.get("content"))})
+            message = {"role": role, "content": _parts(item.get("content"))}
+            calls = [c for c in item.get("tool_calls") or [] if isinstance(c, dict)] if role == "assistant" else []
+            if calls:  # chat completions' form, kept as it is
+                message["tool_calls"] = calls
+            messages.append(message)
         elif kind == "function_call":
             call = {
                 "id": item.get("call_id") or item.get("id") or new_id("call"),
@@ -83,13 +104,7 @@ def input_messages(value) -> list[dict]:
             else:
                 messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
         elif kind == "function_call_output":
-            output = item.get("output")
-            if isinstance(output, list):  # parts: a tool message carries text, so an image becomes a note
-                parts = _parts(output)
-                parts = [{"type": "text", "text": parts}] if isinstance(parts, str) else parts
-                output = "\n".join(p["text"] if p["type"] == "text" else "[An image was returned here.]" for p in parts)
-            elif not isinstance(output, str):
-                output = json.dumps(output)
+            output = _tool_text(item.get("output"))
             messages.append({"role": "tool", "tool_call_id": item.get("call_id", ""), "content": output})
         elif kind == "reasoning":
             continue

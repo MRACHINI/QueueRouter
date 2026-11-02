@@ -10,8 +10,9 @@ Where they come from, first that knows:
 
 opencode sends the chosen level as ``reasoning_effort``. Providers differ, so it's translated per upstream:
 OpenRouter takes ``reasoning: {effort}``; vLLM servers (ArliAI) switch thinking through the chat template and
-know only low / medium / high; OpenAI-style APIs take ``reasoning_effort`` as it is; Claude gets no level
-(none are offered there: app/claude.py leaves the field out).
+know only low / medium / high; OpenAI-style APIs take ``reasoning_effort`` as it is; Claude's own API (the
+Anthropic preset) takes its levels as ``output_config.effort`` (app/claude.py), which its model list states.
+An app that says how hard to think without picking a level (Claude Code's effort) gets the ``nearest`` level.
 
 The reference list also carries Artificial Analysis scores: the strength order uses them when there's no key.
 """
@@ -35,6 +36,7 @@ REFERENCE_URL = "https://openrouter.ai/api/v1/models"
 REFRESH_S = 86_400
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")  # what opencode can send, in order
 VLLM_EFFORTS = ("low", "medium", "high")  # what vLLM accepts as reasoning_effort
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")  # Claude's output_config.effort
 TOGGLE = (("off", "none"), ("thinking", "high"))  # an on / off model: two variants
 
 
@@ -78,6 +80,28 @@ def from_block(block, params=()) -> tuple[tuple[str, ...], str | None] | None:
     return None
 
 
+def from_claude(entry: dict | None) -> tuple[tuple[str, ...], str | None] | None:
+    """(efforts, default) from Claude's own model list (``capabilities.effort``: each level ``supported`` or not);
+    None when it doesn't say."""
+    capabilities = (entry or {}).get("capabilities")
+    effort = capabilities.get("effort") if isinstance(capabilities, dict) else None
+    if not isinstance(effort, dict) or effort.get("supported") is False:
+        return None
+    levels_ = tuple(e for e in CLAUDE_EFFORTS if isinstance(effort.get(e), dict) and effort[e].get("supported"))
+    return (levels_, None) if levels_ else None
+
+
+def nearest(offered, wanted) -> str | None:
+    """The level of ``offered`` nearest ``wanted`` from below (the lowest when all are above): for an app that says
+    how hard to think without picking one of the model's levels. Thinking is only turned off when that's asked."""
+    rank = {e: i for i, e in enumerate(EFFORTS)}
+    if wanted not in rank:
+        return None
+    known = sorted((e for e in offered if e in rank and (e != "none" or wanted == "none")), key=rank.__getitem__)
+    below = [e for e in known if rank[e] <= rank[wanted]]
+    return below[-1] if below else known[0] if known else None
+
+
 def style_of(base_url: str, entry: dict | None) -> str:
     """How an upstream is asked for a level: openrouter | vllm | openai | none (ignored: no levels offered, the
     field is dropped) | fixed (no levels offered, requests passed on as they are) | unknown."""
@@ -100,6 +124,9 @@ def style_of(base_url: str, entry: dict | None) -> str:
 def for_style(style: str, found: tuple[tuple[str, ...], str | None]) -> tuple[tuple[str, str], ...]:
     """The variants to offer on an upstream of ``style`` for a model with ``found`` levels."""
     efforts, _ = found
+    if style == "claude":  # its own levels only (thinking can't be turned off on the newest models): two at least
+        own = tuple(e for e in efforts if e in CLAUDE_EFFORTS)
+        return levels(own) if len(own) > 1 else ()
     if style == "vllm":  # on / off always; levels only as vLLM knows them
         middle = tuple(e for e in VLLM_EFFORTS if e in efforts or e == "high" and {"xhigh", "max"} & set(efforts))
         if len(middle) <= 1:
