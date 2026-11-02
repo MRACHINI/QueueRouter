@@ -150,6 +150,25 @@ async def test_prices_for_opencode(make_stack):
         assert "cost" not in plain["paid-model@upstream"]  # the remote config opencode reads itself is unchanged
 
 
+async def test_images_to_a_model_that_reads_text_only_become_a_note(make_stack):
+    """Rather than the provider's 400 ("does not appear to support image inputs"); a model not known to read text
+    only gets them as they are."""
+    stack = make_stack(models_cache_s=0)
+    stack.mock["extra_model_entries"] = [{"id": "reader", "object": "model", "input_modalities": ["text"]}]
+    stack.mock["text_only_models"] = ["reader"]
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await c.get("/v1/models", headers=stack.headers)
+        for model in ("reader", "mock-model"):
+            content = [{"type": "text", "text": "look"}, image]
+            body = {"model": model, "messages": [{"role": "user", "content": content}]}
+            r = await c.post("/v1/chat/completions", headers=stack.headers, json=body)
+            assert r.status_code == 200, r.text
+            if model == "reader":
+                assert "can't see images" in stack.mock["last_body"].decode()
+    assert stack.mock["saw_images"] == ["mock-model"]
+
+
 async def test_image_input_for_opencode(make_stack):
     """opencode refuses to send images to a model not declared to read them: declare it where the lists say so."""
     assert thinking.takes_images({"vlm": True}) is True

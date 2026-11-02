@@ -89,7 +89,7 @@ async def test_anthropic_errors(make_stack):
         await client.messages.create(
             model="mock-model",
             max_tokens=10,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            tools=[{"type": "code_execution_20250825", "name": "code_execution"}],  # web search: QueueRouter runs it
             messages=[{"role": "user", "content": "x"}],
         )
     assert "not supported" in caught.value.body["error"]["message"]
@@ -274,6 +274,74 @@ async def test_reasoning_through_the_sdk(make_stack):
     async with client.messages.stream(model="mock-model", max_tokens=100, messages=messages) as s:
         plain = await s.get_final_message()
     assert [b.type for b in plain.content] == ["text"]
+
+
+async def test_parallel_tool_calls_reach_the_app_whole(make_stack):
+    """Some providers send the arguments of parallel calls interleaved, while Claude's blocks come one after another
+    and an app runs a tool as its block ends; and some count call ids from 0 in every answer."""
+    stack = make_stack()
+    stack.mock["tool_calls"] = [("search", '{"q": "one"}'), ("search", '{"q": "two"}')]
+    stack.mock["interleave"] = True
+    client = anthropic.AsyncAnthropic(base_url=stack.url, api_key=ACCESS_KEY, max_retries=0)
+    tools = [{"name": "search", "description": "Search", "input_schema": TOOL_SCHEMA}]
+    earlier = {"type": "tool_use", "id": "call_1", "name": "search", "input": {"q": "old"}}
+    history = [
+        {"role": "user", "content": "find"},
+        {"role": "assistant", "content": [earlier]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "a"},
+                {"type": "text", "text": "more"},
+            ],
+        },
+    ]
+    async with client.messages.stream(model="mock-model", max_tokens=100, tools=tools, messages=history) as s:
+        final = await s.get_final_message()
+    uses = [b for b in final.content if b.type == "tool_use"]
+    assert [u.input for u in uses] == [{"q": "one"}, {"q": "two"}] and final.stop_reason == "tool_use"
+    assert uses[0].id not in ("call_1", "call_2") and uses[1].id == "call_2"  # call_1 is taken by the earlier call
+    plain = await client.messages.create(model="mock-model", max_tokens=100, tools=tools, messages=history)
+    assert [b.id for b in plain.content if b.type == "tool_use"][1:] == ["call_2"]
+
+
+async def test_claudes_web_search_is_run_by_queuerouter(make_stack):
+    """Claude Code's WebSearch asks for Claude's web search tool: QueueRouter runs the search itself and answers with
+    Claude's own server tool blocks."""
+    stack = make_stack()
+    stack.app.state.store.set_tunables({"search_provider": "searxng", "search_url": stack.mock["url"]}, "t")
+    stack.app.state.reload()
+    stack.mock["tool_calls"] = [("web_search", '{"query": "winfsp unlink"}')]
+    client = anthropic.AsyncAnthropic(base_url=stack.url, api_key=ACCESS_KEY, max_retries=0)
+    search = {"type": "web_search_20250305", "name": "web_search", "max_uses": 1, "blocked_domains": ["spam.example"]}
+    messages = [{"role": "user", "content": "Search the web for winfsp unlink"}]
+    async with client.messages.stream(model="mock-model", max_tokens=100, tools=[search], messages=messages) as s:
+        final = await s.get_final_message()
+    kinds = [b.type for b in final.content]
+    assert kinds == ["text", "server_tool_use", "web_search_tool_result", "text"], kinds
+    call, found = final.content[1], final.content[2]
+    assert call.name == "web_search" and call.input == {"query": "winfsp unlink"} and found.tool_use_id == call.id
+    assert found.content[0].url == "https://example.com/1" and found.content[0].title == "Result for winfsp unlink"
+    assert final.stop_reason == "end_turn" and final.usage.server_tool_use.web_search_requests == 1
+    assert stack.mock["searches"] == ["winfsp unlink"]
+    second = json.loads(stack.mock["last_body"])  # the model read the results; the limit of one was reached
+    assert (
+        second["messages"][-1]["role"] == "tool" and "snippet about winfsp unlink" in second["messages"][-1]["content"]
+    )
+    assert "tools" not in second
+
+    stack.mock["searches"] = []
+    whole = await client.messages.create(model="mock-model", max_tokens=100, tools=[search], messages=messages)
+    assert [b.type for b in whole.content] == ["server_tool_use", "web_search_tool_result", "text"]
+    later = [*messages, {"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in whole.content]}]
+    chat = anthropic_api.to_chat({"messages": [*later, {"role": "user", "content": "thanks"}]})
+    assert [m["role"] for m in chat["messages"]] == ["user", "assistant", "tool", "assistant", "user"]
+    assert "snippet about winfsp unlink" in chat["messages"][2]["content"]  # what the model read, kept
+
+    stack.app.state.store.set_tunables({"search_provider": "off"}, "t")
+    stack.app.state.reload()
+    off = await client.messages.create(model="mock-model", max_tokens=100, tools=[search], messages=messages)
+    assert off.content[1].content.error_code == "unavailable"
 
 
 async def test_a_request_the_adapters_cant_translate_is_on_the_requests_page(make_stack):

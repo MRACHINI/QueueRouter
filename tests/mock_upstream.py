@@ -354,7 +354,7 @@ def create_mock(limit: int = 2) -> FastAPI:
         messages = body.get("messages") or [{}]
         real_tools = {n for n in offered if not str(n).startswith("queuerouter_")}  # not QueueRouter's own tools
         if real_tools and body.get("tool_choice") != "none" and messages[-1].get("role") == "user":
-            return _tool_call(body)  # agents: call the first tool
+            return _tool_call(body, state)  # agents: call the first tool (or state["tool_calls"])
         if messages[-1].get("role") == "tool":
             tag = f"tool said {messages[-1].get('content')}"
             body.setdefault("mock_tag", tag)
@@ -525,12 +525,18 @@ def _claude_usage(state: dict, body: dict) -> dict:
     return {"input_tokens": 3, "cache_creation_input_tokens": written, "cache_read_input_tokens": read // 4}
 
 
-def _tool_call(body: dict):
-    """Answer by calling the first tool with {"q": "x"} (arguments streamed in two pieces)."""
-    name = body["tools"][0]["function"]["name"]
+def _tool_call(body: dict, state: dict):
+    """Answer by calling the first tool with {"q": "x"}, or the calls in ``state["tool_calls"]`` ([(name, arguments
+    text)]), each call's arguments streamed in two pieces (with ``state["interleave"]``, the calls' pieces mixed)."""
+    offered = {(t.get("function") or {}).get("name") for t in body.get("tools") or []}
+    calls = [c for c in state.get("tool_calls") or [] if c[0] in offered]
+    calls = calls or [(body["tools"][0]["function"]["name"], '{"q": "x"}')]
     usage = {"prompt_tokens": 12, "completion_tokens": 3}
     if not body.get("stream"):
-        call = {"id": "call_1", "type": "function", "function": {"name": name, "arguments": '{"q": "x"}'}}
+        whole = [
+            {"id": f"call_{n}", "type": "function", "function": {"name": name, "arguments": arguments}}
+            for n, (name, arguments) in enumerate(calls, 1)
+        ]
         return {
             "id": "x",
             "object": "chat.completion",
@@ -538,7 +544,7 @@ def _tool_call(body: dict):
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": None, "tool_calls": [call]},
+                    "message": {"role": "assistant", "content": None, "tool_calls": whole},
                     "finish_reason": "tool_calls",
                 }
             ],
@@ -551,9 +557,18 @@ def _tool_call(body: dict):
 
     def gen():
         yield chunk({"role": "assistant", "content": "Let me check."})
-        first = {"index": 0, "id": "call_1", "type": "function", "function": {"name": name, "arguments": '{"q": '}}
-        yield chunk({"tool_calls": [first]})
-        yield chunk({"tool_calls": [{"index": 0, "function": {"arguments": '"x"}'}}]}, "tool_calls")
+        pieces = []  # each call's arguments in two halves
+        for n, (name, arguments) in enumerate(calls):
+            half = len(arguments) // 2
+            function = {"name": name, "arguments": arguments[:half]}
+            start = {"index": n, "id": f"call_{n + 1}", "type": "function", "function": function}
+            pieces.append((start, {"index": n, "function": {"arguments": arguments[half:]}}))
+        if state.get("interleave"):  # as some providers do: the calls' first halves, then their second halves
+            order = [p[0] for p in pieces] + [p[1] for p in pieces]
+        else:
+            order = [piece for pair in pieces for piece in pair]
+        for i, piece in enumerate(order):
+            yield chunk({"tool_calls": [piece]}, "tool_calls" if i == len(order) - 1 else None)
         yield chunk(None, usage=usage)
         yield "data: [DONE]\n\n"
 

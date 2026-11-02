@@ -76,7 +76,8 @@ from a **web admin UI**.
 - **Web search for council members**: with a search provider set up (Settings > Web search: Tavily, Brave or
   your own SearXNG), council members can search before the judge decides. QueueRouter runs the searches,
   gives each member its results and asks it again (up to a per-alias limit), and the judge sees every member's
-  sources. opencode never sees this tool. Queries that look like they contain secrets are refused.
+  sources. opencode never sees this tool. Queries that look like they contain secrets are refused. The same search
+  runs Claude's web search tool for apps on `/v1/messages`, such as Claude Code.
 - **Orchestrator** (council mode "orchestrate"): the judge model leads the team. It plans, gives members
   focused tasks (briefs: they see only the task it writes), searches and reads the web, uses a calculator,
   may ask again, then answers (text or the app's own tools). Progress streams live into the app's thinking
@@ -103,8 +104,9 @@ from a **web admin UI**.
 - **Other API shapes**: Anthropic Messages (`/v1/messages`) and OpenAI Responses (`/v1/responses`)
   are translated to chat completions, so tools speaking either API get the same queue, policies,
   aliases and fallbacks: Claude Code too (see [Use with Claude Code](#use-with-claude-code)). Apps that mix chat
-  completions' own forms in (tool messages, `tool_calls`, `input_text` parts) are understood. Hosted/server tools (web
-  search, code interpreter…) and PDFs aren't supported; a request that can't be translated shows on the Requests page.
+  completions' own forms in (tool messages, `tool_calls`, `input_text` parts) are understood. Claude's web search tool
+  is run with QueueRouter's own search (Settings > Web search); other hosted/server tools (code interpreter…) and PDFs
+  aren't supported, and a request that can't be translated shows on the Requests page.
 - **Claude with prompt caching**: the Anthropic preset talks to Claude's own Messages API, so agents and
   conversations are cached by themselves: what Claude read a moment ago costs a tenth of the input price or less. Tools,
   streaming and images work as before; apps keep speaking chat completions. Writing to the cache costs 1.25 × the input
@@ -467,10 +469,19 @@ What QueueRouter does for Claude Code:
 - "Too long" is said the way Claude says it, so Claude Code compacts the conversation and tries again by itself.
 - The model's thinking is shown as Claude's thinking, and keep-alives go out while a provider sends nothing. Claude
   Code gives up on a stream that stays silent for about five minutes, which a model thinking over a large review can.
+- Its web search works: QueueRouter runs the searches the model asks for with its own search (**Settings → Web
+  search**: Tavily, Brave or your SearXNG), gives the model the results, and answers in Claude's own form, sources
+  included. Up to the tool's own limit (5 if it sets none), 10 at most.
+- Tool calls reach it whole and with ids of their own: a provider that mixes up the pieces of parallel calls, or
+  numbers its calls from 0 in every answer, can't make it lose one (`Tool result missing due to internal error`).
+- An image pasted for a model that reads text only becomes a note, rather than the provider's 400.
+- Its subagents and background work ask for `claude-haiku-5-5` (and the main model for `claude-sonnet-5-5` or
+  `claude-opus-5-5`, as you choose): give each an alias, and allow it on the key if the key has a model list.
+  QueueRouter's own refusals show on the Requests page.
 
-PDFs and Claude Code's web search don't work. For a name it doesn't know, Claude Code assumes a context of 200,000
-tokens: on smaller models it compacts once it's told the prompt is too long. Naming an alias like a Claude model
-(`claude-opus-5-5`) makes it assume that model's context, 1,000,000 tokens for Opus.
+PDFs don't work. For a name it doesn't know, Claude Code assumes a context of 200,000 tokens: on smaller models it
+compacts once it's told the prompt is too long. Naming an alias like a Claude model (`claude-opus-5-5`) makes it assume
+that model's context, 1,000,000 tokens for Opus.
 
 ## Environment variables (bootstrap only)
 
@@ -542,7 +553,7 @@ QueueRouter only refuses requests for reasons you configured: bad key (401), mod
 (403), a client's queue/rate limit in `reject` mode, run budget or loop rejection (429),
 draining/maintenance (503), body too large (413), and prompts that clearly exceed the model's
 context (400 `context_length_exceeded`). An answer size the model can't give (`max_tokens`) is lowered, not refused.
-The API adapters also refuse what they can't translate (400), and those show on the Requests page.
+The API adapters also refuse what they can't translate (400). All of these refusals show on the Requests page.
 
 Responses also carry `X-QueueRouter-Model` (the model that actually answered, e.g. after a
 fallback); streams announce a fallback with an SSE comment.

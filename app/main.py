@@ -151,6 +151,8 @@ def header_value(text: str) -> str:
 
 
 # ends whatever event the upstream left half-sent, so an error added mid-stream parses as its own event
+SEARCH_RESULTS = 8  # results per web search QueueRouter runs for Claude's web search tool
+DEFAULT_SEARCHES, MAX_SEARCHES = 5, 10  # searches per message: without the tool's max_uses, and at most
 MID_STREAM = b"\n\n"
 KEEPALIVE = b": keep-alive\n\n"  # an SSE comment: apps skip it, but it shows the stream is alive
 
@@ -1428,8 +1430,9 @@ def create_app(
         # how hard to think, not one of the model's levels (Claude Code's effort, from /v1/messages): the nearest one
         hint = adm.headers.get("x-queuerouter-effort") if adm.path == "chat/completions" else None
         thinking = bool(body) and (b'"reasoning_effort"' in body or bool(hint))  # asked as this provider understands
+        images = bool(body) and not native and b'"image_url"' in body  # Claude reads images; others may not
         if body and (
-            native or target.upstream.params or thinking
+            native or target.upstream.params or thinking or images
         ):  # this provider's own rules (e.g. fields it rejects)
             try:
                 payload = json.loads(body)
@@ -1437,10 +1440,12 @@ def create_app(
                 payload = None
             if isinstance(payload, dict):
                 apply_rules(payload, rules_of(target.upstream.params), {})
-                if native or thinking:
+                if native or thinking or images:
                     entry = next(
                         (m for m in catalogs.models(target.id, raw=True) if m.get("id") == payload.get("model")), None
                     )
+                    if images and text_only(str(payload.get("model") or ""), target, entry):
+                        payload = council_mod.without_images(payload)  # a note, rather than the provider's 400
                     if hint and "reasoning_effort" not in payload:  # to no model whose levels aren't known
                         found = thinking_for(str(payload.get("model") or ""), [(target, entry or {})], {})
                         level = thinking_mod.nearest([value for _, value in found.variants], hint) if found else None
@@ -1988,6 +1993,14 @@ def create_app(
         if False in said:
             return False
         return bool(reference.images(snapshot.names.name(model, pairs[0][0].upstream.name) if pairs else model))
+
+    def text_only(model: str, target: Target, entry: dict | None) -> bool:
+        """Whether a model is known to read text only on this upstream (its list, else the reference list by name).
+        Unknown isn't text only: the provider decides."""
+        said = thinking_mod.takes_images(entry)
+        if said is None:
+            said = reference.images(snapshot.names.name(model, target.upstream.name))
+        return said is False
 
     def text_only_fit(payload: dict) -> dict:
         """``payload`` with its images replaced by a note when its model doesn't read them (judged as for
@@ -3412,17 +3425,22 @@ def create_app(
             if k.lower().startswith("x-queuerouter-") or k.lower() in ("x-request-id", "x-queue-wait-ms", "retry-after")
         }
 
-    def adapter_refused(request: Request, client: ClientKey, path: str, message: str, payload) -> None:
-        """A request an API adapter couldn't translate: on the Requests page like any refusal, so it can be seen."""
+    def log_refusal(request: Request, client: ClientKey, path: str, status: int, message: str, model) -> None:
+        """A request QueueRouter turned away before queueing it, on the Requests page too: the app sees only the
+        answer (a model not allowed for the key, a request an adapter can't translate...)."""
         rlog = RequestLog(f"qr-{uuid.uuid4().hex[:12]}", "POST", path, client_ip(request, bootstrap.trusted_proxies))
-        model = payload.get("model") if isinstance(payload, dict) else None
         rlog.fields.update(
             client=client.name,
             model=model if isinstance(model, str) else None,
             user_agent=(request.headers.get("user-agent") or "")[:300] or None,
             client_headers=client_identity(request.headers, None),
         )
-        rlog.finish(stats, outcome="refused", status=400, error=message[:500])
+        rlog.finish(stats, outcome="refused" if status < 500 else "error", status=status, error=message[:500])
+
+    def adapter_refused(request: Request, client: ClientKey, path: str, message: str, payload) -> None:
+        """A request an API adapter couldn't translate."""
+        model = payload.get("model") if isinstance(payload, dict) else None
+        log_refusal(request, client, path, 400, message, model)
 
     def anthropic_denied(response: Response) -> JSONResponse:
         return JSONResponse(
@@ -3452,21 +3470,142 @@ def create_app(
         headers = adapter_headers(request, "api:anthropic")
         if effort:  # passed on only to a model whose thinking levels are known (build_request)
             headers["x-queuerouter-effort"] = effort
-        response = await serve(request, client, "chat/completions", json.dumps(chat).encode(), headers, "")
         thinking = anthropic_api.wants_thinking(payload)  # the model's reasoning as thinking blocks
+        seen = anthropic_api.used_ids(payload)  # a new tool call doesn't reuse an id of the conversation
+        rounds = SearchRounds(request, client, chat, headers, anthropic_api.search_tool(payload))
+        response = await rounds.ask()
         if isinstance(response, StreamingResponse):
+            translation = anthropic_api.Translation(model, thinking, seen)
             return StreamingResponse(
-                anthropic_api.stream(response.body_iterator, model, thinking),
+                rounds.stream(response, translation),
                 media_type="text/event-stream",
                 headers={**kept_headers(response), "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        if response.status_code >= 400:
-            return anthropic_denied(response)
-        try:
-            message = anthropic_api.from_chat(json.loads(response.body), model, thinking)
-        except (ValueError, AttributeError):
-            return JSONResponse(anthropic_api.error(502, "the upstream answer was not valid JSON"), status_code=502)
-        return JSONResponse(message, headers=kept_headers(response))
+        return await rounds.whole(response, model, thinking, seen)
+
+    class SearchRounds:
+        """One /v1/messages request, asked of the model once or, with Claude's web search tool, in rounds: the model
+        has the tool as a function, and when it calls it, QueueRouter runs the search itself (Settings > Web search)
+        and asks again with the results, up to the tool's ``max_uses``. The app gets one message, with the searches
+        in it as Claude's own server tool blocks. Each round is a request of its own on the Requests page."""
+
+        def __init__(self, request: Request, client: ClientKey, chat: dict, headers: dict, tool: dict | None) -> None:
+            self.request, self.client, self.chat, self.headers, self.tool = request, client, chat, headers, tool
+            self.name = str((tool or {}).get("name") or "web_search")
+            uses = (tool or {}).get("max_uses")
+            self.left = min(uses, MAX_SEARCHES) if isinstance(uses, int) and uses > 0 else DEFAULT_SEARCHES
+
+        async def ask(self) -> Response:
+            return await serve(
+                self.request, self.client, "chat/completions", json.dumps(self.chat).encode(), self.headers, ""
+            )
+
+        def searches(self, calls: list[dict]) -> list[dict]:
+            """The calls of QueueRouter's search among a round's tool calls ({id, name, arguments})."""
+            return [c for c in calls if self.tool is not None and c["name"] == self.name]
+
+        async def search(self, call: dict) -> tuple[str, list[dict] | None, str, str]:
+            """(query, results, Claude's error code or "", what the model is told) for one search call."""
+            query = websearch.call_argument({"function": {"arguments": call["arguments"]}}, "query")
+            if self.left <= 0:
+                return query, None, "max_uses_exceeded", "The search limit is reached: answer with what you have."
+            self.left -= 1
+            s = cfg()
+            try:
+                found = await websearch.search(
+                    app.state.client, s.search_provider, s.search_key, s.search_url, query, SEARCH_RESULTS
+                )
+            except websearch.SearchError as exc:
+                reason = str(exc)
+                code = (
+                    "invalid_input"
+                    if reason.startswith("refused") or reason == "empty query"
+                    else "too_many_requests"
+                    if "HTTP 429" in reason
+                    else "unavailable"
+                )
+                return query, None, code, f"Web search failed: {reason}"
+            found = anthropic_api.within_domains(found, self.tool or {})
+            return query, found, "", websearch.results_text(query, found)
+
+        def next_round(self, text: str, calls: list[dict], told: list[str]) -> None:
+            """The model's turn and the search results go into the conversation; past the limit the tool goes."""
+            for call in calls:
+                call["id"] = call["id"] or f"call_{uuid.uuid4().hex[:24]}"
+            asked = [
+                {
+                    "id": c["id"],
+                    "type": "function",
+                    "function": {"name": c["name"], "arguments": c["arguments"] or "{}"},
+                }
+                for c in calls
+            ]
+            self.chat["messages"].append({"role": "assistant", "content": text or None, "tool_calls": asked})
+            for call, content in zip(calls, told, strict=True):
+                self.chat["messages"].append({"role": "tool", "tool_call_id": call["id"], "content": content})
+            self.chat.pop("tool_choice", None)  # a forced search is done: the model decides now
+            if self.left <= 0:
+                tools = [t for t in self.chat.get("tools") or [] if (t.get("function") or {}).get("name") != self.name]
+                self.chat["tools"] = tools
+                if not tools:
+                    self.chat.pop("tools")
+
+        async def stream(
+            self, response: StreamingResponse, translation: anthropic_api.Translation
+        ) -> AsyncIterator[bytes]:
+            while True:
+                async for event in translation.feed(response.body_iterator):
+                    yield event
+                if translation.failed:
+                    return
+                calls = list(translation.calls.values())
+                searches = self.searches(calls)
+                if not searches:
+                    yield translation.tool_uses()
+                    yield translation.end()
+                    return
+                told = []
+                for call in searches:
+                    yield translation.ping()  # the search can take a few seconds
+                    query, found, failure, content = await self.search(call)
+                    yield translation.web_search(self.name, query, found, failure)
+                    told.append(content)
+                self.next_round(translation.text, searches, told)
+                response = await self.ask()
+                if not isinstance(response, StreamingResponse):  # refused or failed before it started
+                    yield translation.error(response.status_code, response.body)
+                    return
+
+        async def whole(self, response: Response, model: str, thinking: bool, seen: set[str]) -> Response:
+            content: list[dict] = []
+            searched = 0
+            while True:
+                if response.status_code >= 400:
+                    return anthropic_denied(response)
+                try:
+                    body = json.loads(response.body)
+                    message = anthropic_api.from_chat(body, model, thinking, seen)
+                    calls = anthropic_api.chat_calls(body)
+                except (ValueError, AttributeError):
+                    return JSONResponse(
+                        anthropic_api.error(502, "the upstream answer was not valid JSON"), status_code=502
+                    )
+                searches = self.searches(calls)
+                if not searches:
+                    message["content"] = content + message["content"]
+                    if searched:
+                        message["usage"]["server_tool_use"] = {"web_search_requests": searched}
+                    return JSONResponse(message, headers=kept_headers(response))
+                content += [b for b in message["content"] if b["type"] in ("thinking", "text")]
+                told = []
+                for call in searches:
+                    query, found, failure, said = await self.search(call)
+                    content += anthropic_api.search_blocks(self.name, query, found, failure)
+                    told.append(said)
+                    searched += 1
+                text = "".join(b["text"] for b in message["content"] if b["type"] == "text")
+                self.next_round(text, searches, told)
+                response = await self.ask()
 
     @app.post("/v1/messages/count_tokens")
     async def anthropic_count_tokens(request: Request):
@@ -3598,14 +3737,24 @@ def create_app(
         alias = snapshot.aliases.get(model) if model else None
         target_model = alias.target_model if alias else model
         bare_target, target_pin = split_pin(target_model)
+
+        def refused(answer: Response) -> Response:
+            """QueueRouter's own no, on the Requests page too."""
+            try:
+                message = str(json.loads(answer.body)["error"]["message"])
+            except (ValueError, KeyError, TypeError):
+                message = f"HTTP {answer.status_code}"
+            log_refusal(request, client, f"/v1/{path}", answer.status_code, message, model)
+            return answer
+
         # QueueRouter's own requests (council members, judge, summaries) serve a request already admitted: the
         # client's model list and queue limits apply to that request, not to the models working on it
         if not internal and (refusal := policy_refusal(client, model, bare_target)):
-            return refusal
+            return refused(refusal)
         no_fallbacks = not (alias and alias.fallbacks)  # with fallbacks, a missing target just moves on
         checked = cfg().unknown_model_check and no_fallbacks and not target_pin  # a pinned upstream decides
         if checked and (missing := unknown_model(target_model, alias, raw=internal)) is not None:
-            return missing
+            return refused(missing)
         if allow_council and alias and alias.council != "off" and isinstance(payload, dict):
             lane = request_lane(request_headers, client)
             auto = "opencode" if "x-opencode-session-id" in request_headers else None
@@ -3730,12 +3879,10 @@ def create_app(
         if not steps:
             if too_long_for:
                 estimate, context, _, output = too_long_for
-                return Response(
-                    overflow_body(model or "", context, estimate + output),
-                    400,
-                    media_type="application/json",
+                return refused(
+                    Response(overflow_body(model or "", context, estimate + output), 400, media_type="application/json")
                 )
-            return error_response(f"no usable upstream for '{model}' right now", 503, "no_upstream")
+            return refused(error_response(f"no usable upstream for '{model}' right now", 503, "no_upstream"))
         if path == "embeddings":  # their own slots where the provider limits them separately
             steps = [dataclasses.replace(s, candidates=embedding_slots(s.candidates)) for s in steps]
         candidates, body = steps[0].candidates, steps[0].body
@@ -3758,17 +3905,19 @@ def create_app(
                 max_tokens = min(int(header_budget), max_tokens) if max_tokens else int(header_budget)
             if reason := runs.over_budget(run, max_tokens, policy.run_max_requests, policy.run_max_minutes):
                 log.warning(json.dumps({"event": "run_budget_exceeded", "client": client.name, "reason": reason}))
-                return error_response(f"Run budget exceeded: {reason}.", 429, "run_budget_exceeded")
+                return refused(error_response(f"Run budget exceeded: {reason}.", 429, "run_budget_exceeded"))
             repeats = runs.note_request(run, request_fingerprint(payload))
             if policy.loop_threshold and repeats >= policy.loop_threshold:
                 log.warning(
                     json.dumps({"event": "loop_detected", "client": client.name, "repeats": repeats, "run": rkey})
                 )
                 if policy.loop_action == "reject":
-                    return error_response(
-                        f"The same request was sent {repeats} times in 5 minutes; this looks like a loop.",
-                        429,
-                        "loop_detected",
+                    return refused(
+                        error_response(
+                            f"The same request was sent {repeats} times in 5 minutes; this looks like a loop.",
+                            429,
+                            "loop_detected",
+                        )
                     )
         position = queue.predict_position(client.name, lane, session)
         rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies))

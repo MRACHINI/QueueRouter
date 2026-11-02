@@ -1553,6 +1553,29 @@ v0.55.1: the Claude app hung on a code review: the model's thinking reaches it, 
 - Every stream (stream_flow): when the provider sends nothing for the keep-alive interval (15 s), an SSE comment
   `: keep-alive`, only right after a whole event and only on an SSE response. `within` waits on the read in progress
   without cancelling it. /v1/messages turns the comments into `ping` events, as it did for queued requests.
+v0.56.0: Claude's web search through QueueRouter, tool calls sent whole, images for text-only models, own refusals
+logged.
+- Reported by a Claude Code session on DeepSeek: `WebSearch` always 400 (server tool), a Read call now and then
+  `[Tool result missing due to internal error]` (Claude Code's own text for a call it holds no result for), and six
+  403s for its subagents on `claude-haiku-5-5`: the key's model list, a refusal nothing logged.
+- Tool calls (`Translation`, which replaces the stream function and spans several streams): held until the stream ends
+  and sent as whole blocks. Claude's blocks come one after another and an app runs a tool as its block ends, while a
+  provider may send the arguments of parallel calls interleaved: they went into blocks already closed. A call whose
+  id appears earlier in the request (some providers number from 0 in every answer) gets a new id, so a result can't
+  be matched to the wrong call. Pings while held arguments (or reasoning not shown) come in.
+- Claude's web search tool (`web_search_*`): offered to the model as a function under the tool's name. When it calls
+  it, QueueRouter runs the search (websearch.search, Settings > Web search), filters `allowed_domains` /
+  `blocked_domains`, gives the model the results as a tool message and asks again (`SearchRounds`, one request each
+  on the Requests page), up to the tool's `max_uses` (5 without, 10 at most; past it the tool goes). The app gets one
+  message: `server_tool_use` and `web_search_tool_result` blocks between the model's text, `server_tool_use` usage,
+  the last round's usage (the conversation's size). A failed search is Claude's `web_search_tool_result_error`
+  (`unavailable`, `invalid_input`, `too_many_requests`, `max_uses_exceeded`). The snippet travels in
+  `encrypted_content` (base64), so blocks sent back in the history become a call and a tool message with the text the
+  model read. Other server tools are still a 400.
+- Images: a model known to read text only on that upstream (its list, else the reference list) gets a note instead,
+  as council members already did; unknown, the provider decides.
+- QueueRouter's own refusals (a model not allowed, an unknown model, too long, no upstream, run budget, loop) are
+  logged as `refused` (5xx: `error`) with their message. Draining and maintenance aren't.
 
 ### Later (agreed, not scheduled)
 

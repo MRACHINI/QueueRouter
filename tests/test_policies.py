@@ -75,6 +75,22 @@ async def test_allowed_models(make_stack):
         assert [m["id"] for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]] == ["mock-model"]
 
 
+async def test_queuerouters_own_refusals_are_on_the_requests_page(make_stack):
+    """The Claude app's subagents were turned away (a model the key may not use) and nothing showed it."""
+    from tests.test_usage import flushed  # here: test_usage imports this module
+
+    stack = make_stack(bootstrap=OWNER)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await set_policy(c, stack, allowed_models="other-model")
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("x"))
+        assert r.status_code == 403
+        await flushed(stack, 1)
+    row = (await asyncio.to_thread(stack.app.state.store.list_requests, 10))[0]
+    assert (row["outcome"], row["status"], row["model"], row["client"]) == ("refused", 403, "mock-model", "client1")
+    assert row["error"] == "model 'mock-model' is not allowed for this key"
+
+
 async def test_rate_limit_reject_mode(make_stack):
     stack = make_stack(bootstrap=OWNER)
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
