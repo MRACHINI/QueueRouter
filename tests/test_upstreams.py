@@ -27,6 +27,15 @@ async def add_upstream(c, name, base_url, max_concurrency=1, pool="new"):
     assert "m=created" in r.headers["location"], r.headers["location"]
 
 
+async def spread(c, name="spread"):
+    """An alias for mock-model on every upstream: apps reach balancing and failover through one (a bare ID that
+    several upstreams offer is refused)."""
+    from tests.test_aliases import add_alias  # it imports this module
+
+    assert "m=created" in (await add_alias(c, name, "mock-model")).headers["location"]
+    return name
+
+
 async def break_upstream(c, upstream_id):
     """Point an upstream at a closed port."""
     csrf = csrf_of((await c.get("/admin/upstreams")).text)
@@ -53,12 +62,13 @@ async def test_load_balancing_across_pools(make_stack, make_mock):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         await add_upstream(c, "second", second_url)
+        model = await spread(c)
         page = await c.get("/admin/upstreams")
         assert "second" in page.text and "Limit pools" in page.text
 
         api = f"{stack.url}/v1/chat/completions"
         results = await asyncio.gather(
-            *(c.post(api, headers=stack.headers, json=chat(f"r{i}", mock_delay=0.05)) for i in range(8))
+            *(c.post(api, headers=stack.headers, json=chat(f"r{i}", mock_delay=0.05, model=model)) for i in range(8))
         )
     assert all(r.status_code == 200 for r in results)
     # each account's limit (1 + 1) respected, and both were used
@@ -78,6 +88,7 @@ async def test_shared_pool_keys_share_the_limit(make_stack, make_mock):
         await login(c, stack.url)
         pool_id = stack.app.state.store.list_pools()[0].id
         await add_upstream(c, "same-account", second_url, pool=str(pool_id))
+        model = await spread(c)
         api = f"{stack.url}/v1/chat/completions"
 
         async def watch():
@@ -88,7 +99,7 @@ async def test_shared_pool_keys_share_the_limit(make_stack, make_mock):
 
         watcher = asyncio.create_task(watch())
         results = await asyncio.gather(
-            *(c.post(api, headers=stack.headers, json=chat(f"r{i}", mock_delay=0.05)) for i in range(6))
+            *(c.post(api, headers=stack.headers, json=chat(f"r{i}", mock_delay=0.05, model=model)) for i in range(6))
         )
         watcher.cancel()
         stats = (await c.get("/admin/api/stats")).json()
@@ -104,12 +115,13 @@ async def test_failover_and_circuit_breaker(make_stack, make_mock):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         await add_upstream(c, "backup", good_url)
+        model = await spread(c)
         original = stack.app.state.store.list_upstreams()[0]
         await break_upstream(c, original.id)
 
         api = f"{stack.url}/v1/chat/completions"
         for i in range(4):
-            r = await c.post(api, headers=stack.headers, json=chat(f"f{i}"))
+            r = await c.post(api, headers=stack.headers, json=chat(f"f{i}", model=model))
             assert r.status_code == 200, r.text
         stats = (await c.get("/admin/api/stats")).json()
         broken = next(u for u in stats["upstreams"] if u["id"] == original.id)
@@ -125,11 +137,13 @@ async def test_streaming_failover(make_stack, make_mock):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         await add_upstream(c, "backup", good_url)
+        model = await spread(c)
         original = stack.app.state.store.list_upstreams()[0]
         await break_upstream(c, original.id)
         csrf = csrf_of((await c.get("/admin/settings")).text)
         await c.post("/admin/settings", data={"csrf": csrf, "lb_strategy": "ordered", "max_retries": "3"})
-        async with c.stream("POST", "/v1/chat/completions", headers=stack.headers, json=chat("s", stream=True)) as r:
+        stream = chat("s", stream=True, model=model)
+        async with c.stream("POST", "/v1/chat/completions", headers=stack.headers, json=stream) as r:
             text = "".join([chunk async for chunk in r.aiter_text()])
     assert "failing over" in text and text.rstrip().endswith("data: [DONE]")
     assert good["served"] == 1
@@ -142,7 +156,7 @@ async def test_paused_upstream_gets_no_traffic_and_models_merge(make_stack, make
         await login(c, stack.url)
         await add_upstream(c, "second", second_url)
         models = (await c.get("/v1/models", headers=stack.headers)).json()
-        assert [m["id"] for m in models["data"]] == ["mock-model"]  # merged, de-duplicated
+        assert [m["id"] for m in models["data"]] == ["mock-model@upstream", "mock-model@second"]  # each its own
 
         original = stack.app.state.store.list_upstreams()[0]
         csrf = csrf_of((await c.get("/admin/upstreams")).text)
@@ -203,11 +217,12 @@ async def test_an_upstreams_retry_limit_does_not_stop_failover(make_stack, make_
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         await add_upstream(c, "other", other_url)
+        model = await spread(c)
         store = stack.app.state.store
         first = next(u for u in store.list_upstreams() if u.name != "other")
         store.update_upstream(first.id, "test", max_retries=0)
         stack.app.state.reload()
-        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("f"))
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("f", model=model))
         assert r.status_code == 200, r.text
     assert other["served"] == 1
 
@@ -272,10 +287,12 @@ async def test_sticky_routing_returns_to_same_upstream(make_stack, make_mock):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         await add_upstream(c, "second", second_url)
+        model = await spread(c)
         # occupy upstream 1 so the conversation starts on upstream 2
-        blocker = asyncio.create_task(c.post(api, headers=stack.headers, json=chat("blocker", mock_delay=0.1)))
+        first = chat("blocker", mock_delay=0.1, model=model)
+        blocker = asyncio.create_task(c.post(api, headers=stack.headers, json=first))
         await asyncio.sleep(0.2)
-        convo = {"model": "mock-model", "messages": [{"role": "user", "content": "same conversation"}]}
+        convo = {"model": model, "messages": [{"role": "user", "content": "same conversation"}]}
         assert (await c.post(api, headers=stack.headers, json={**convo, "mock_tag": "turn1"})).status_code == 200
         await blocker
         # both free now: least-busy alone would pick upstream 1, sticky routing picks 2 again
@@ -296,13 +313,14 @@ async def test_review_fixes_request_path(make_stack, make_mock):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         await add_upstream(c, "backup", good_url)
+        model = await spread(c)
         original = stack.app.state.store.list_upstreams()[0]
         circuits = stack.app.state.circuits
         circuits.failure(original.id, "test")  # open, then half-open after the cooldown
         await asyncio.sleep(0.3)
         assert circuits.state(original.id) == "half-open"
         stack.mock["daily_quota"] = True
-        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("trial"))
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("trial", model=model))
         assert r.status_code == 200 and good["served"] == 1
         assert circuits.allows(original.id)  # the trial isn't stuck
 

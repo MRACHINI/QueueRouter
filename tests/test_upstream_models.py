@@ -47,7 +47,7 @@ async def test_hidden_models_leave_every_list(make_stack):
         )
         assert await model_ids(c, stack) == ["mock-model", "small-model"]
         config = (await c.get("/v1/opencode-config", headers=stack.headers)).json()
-        assert "other-model@upstream" not in config["provider"]["queuerouter"]["models"]
+        assert not {"other-model", "other-model@upstream"} & set(config["provider"]["queuerouter"]["models"])
         chat = {"model": "other-model", "messages": [{"role": "user", "content": "hi"}]}
         assert (await c.post("/v1/chat/completions", headers=stack.headers, json=chat)).status_code == 404
         pinned = {**chat, "model": "other-model@upstream"}  # naming the upstream doesn't get round it

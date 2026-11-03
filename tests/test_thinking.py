@@ -98,12 +98,12 @@ async def test_opencode_variants_and_translation(make_stack):
     stack.mock["extra_model_entries"] = [{"id": "think-model", "object": "model", "reasoning": True, "engine": "vllm"}]
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         plain = (await c.get("/v1/opencode-config", headers=stack.headers)).json()
-        entry = plain["provider"]["queuerouter"]["models"]["think-model@upstream"]
+        entry = plain["provider"]["queuerouter"]["models"]["think-model"]
         assert "thinking" not in entry  # unchanged for opencode
         config = (await c.get("/v1/opencode-config?plugin=2", headers=stack.headers)).json()
         models = config["provider"]["queuerouter"]["models"]
-        assert models["think-model@upstream"]["thinking"]["variants"] == [["off", "none"], ["thinking", "high"]]
-        assert "thinking" not in models["mock-model@upstream"]
+        assert models["think-model"]["thinking"]["variants"] == [["off", "none"], ["thinking", "high"]]
+        assert "thinking" not in models["mock-model"]
 
         body = {"model": "think-model", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "none"}
         assert (await c.post("/v1/chat/completions", headers=stack.headers, json=body)).status_code == 200
@@ -114,7 +114,7 @@ async def test_opencode_variants_and_translation(make_stack):
         store = stack.app.state.store
         store.set_model_thinking("think-model", "t", "-")
         config = (await c.get("/v1/opencode-config?plugin=2", headers=stack.headers)).json()
-        assert "thinking" not in config["provider"]["queuerouter"]["models"]["think-model@upstream"]
+        assert "thinking" not in config["provider"]["queuerouter"]["models"]["think-model"]
 
 
 async def test_prices_for_opencode(make_stack):
@@ -134,20 +134,20 @@ async def test_prices_for_opencode(make_stack):
             return config["provider"]["queuerouter"]["models"]
 
         found = await models()
-        assert found["paid-model@upstream"]["cost"] == {"input": 1.0, "output": 4.0, "cache_read": 1.0}
-        assert found["free-model@upstream"]["cost"] == {"input": 0.0, "output": 0.0, "cache_read": 0.0}
-        assert "cost" not in found["router@upstream"]  # unknown: opencode shows $0
-        assert "cost" not in found["mock-model@upstream"]
+        assert found["paid-model"]["cost"] == {"input": 1.0, "output": 4.0, "cache_read": 1.0}
+        assert found["free-model"]["cost"] == {"input": 0.0, "output": 0.0, "cache_read": 0.0}
+        assert "cost" not in found["router"]  # unknown: opencode shows $0
+        assert "cost" not in found["mock-model"]
         store.set_model_price("mock-model", "t", None, 2.0, 8.0, 0.5)
-        assert (await models())["mock-model@upstream"]["cost"] == {"input": 2.0, "output": 8.0, "cache_read": 0.5}
+        assert (await models())["mock-model"]["cost"] == {"input": 2.0, "output": 8.0, "cache_read": 0.5}
         pool = store.list_pools()[0]
         store.update_pool(pool.id, "t", monthly_price=20.0)  # a monthly plan: nothing extra per request
         stack.app.state.reload()
         found = await models()
-        assert found["paid-model@upstream"]["cost"]["input"] == 0.0
-        assert found["mock-model@upstream"]["cost"]["input"] == 2.0  # yours wins
+        assert found["paid-model"]["cost"]["input"] == 0.0
+        assert found["mock-model"]["cost"]["input"] == 2.0  # yours wins
         plain = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
-        assert "cost" not in plain["paid-model@upstream"]  # the remote config opencode reads itself is unchanged
+        assert "cost" not in plain["paid-model"]  # the remote config opencode reads itself is unchanged
 
 
 async def test_images_to_a_model_that_reads_text_only_become_a_note(make_stack):
@@ -186,4 +186,4 @@ async def test_image_input_for_opencode(make_stack):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         config = (await c.get("/v1/opencode-config?plugin=2", headers=stack.headers)).json()
         models = config["provider"]["queuerouter"]["models"]
-        assert models["eyes@upstream"]["input"] == ["text", "image"] and "input" not in models["mock-model@upstream"]
+        assert models["eyes"]["input"] == ["text", "image"] and "input" not in models["mock-model"]

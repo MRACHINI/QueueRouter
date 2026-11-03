@@ -33,7 +33,7 @@ async def test_alias_rewrites_model_and_appears_in_models(make_stack):
         assert json.loads(stack.mock["last_body"])["model"] == "mock-model"
 
         models = {m["id"]: m for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]}
-        assert models["smart"]["queuerouter"] == {"type": "alias", "target": "mock-model"}
+        assert models["smart"]["queuerouter"] == {"type": "alias"}  # not what it points to
         assert models["smart"]["max_model_len"] == 262144  # copied from the target
 
         recent = list(stack.app.state.stats.recent)[-1]

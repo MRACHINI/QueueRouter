@@ -59,7 +59,7 @@ from .compaction import compact as compact_request
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
 from .limits import OVERFLOW_STATUS, ModelLimits, error_message, overflow_body, overflow_of
-from .names import EVERY
+from .names import EVERY, SEPARATOR, PublicIds, providers, public_ids
 from .opencode import (
     DEFAULT_OUTPUT,
     OUTPUT_KEYS,
@@ -852,12 +852,15 @@ def create_app(
             return error_response(message, 503, snapshot.mode, **{"Retry-After": retry})
         return None
 
-    def policy_refusal(client: ClientKey, model: str | None, target: str | None = None) -> JSONResponse | None:
+    def policy_refusal(
+        client: ClientKey, model: str | None, target: str | None = None, asked: str | None = None
+    ) -> JSONResponse | None:
         """Admission checks from the client's policy (the only place QueueRouter itself says no).
-        For an alias, allowing either the alias or its target model is enough."""
+        For an alias, allowing either the alias or its target model is enough; for a model's ID for apps (``asked``),
+        that ID or the real one."""
         policy = client.policy
-        if policy.allowed_models and model not in policy.allowed_models and target not in policy.allowed_models:
-            return error_response(f"model '{model}' is not allowed for this key", 403, "model_not_allowed")
+        if policy.allowed_models and not {model, target, asked} & set(policy.allowed_models):
+            return error_response(f"model '{asked or model}' is not allowed for this key", 403, "model_not_allowed")
         if policy.max_queued is not None and queue.client_queued(client.name) >= policy.max_queued:
             return error_response(
                 "too many queued requests for this key", 429, "client_queue_full", **{"Retry-After": "5"}
@@ -940,6 +943,22 @@ def create_app(
         bare, _, upstream = name.rpartition("@")
         target = next((t for t in snapshot.upstreams.values() if t.upstream.name == upstream), None)
         return (bare, (target.id,)) if target is not None and bare else (name, ())
+
+    app_ids_memo: list = [None, None, PublicIds()]  # [snapshot, model lists' state, the IDs]
+
+    def app_ids() -> PublicIds:
+        """The IDs apps know the offered models by (app/names.py), worked out again when a model list, the choice of
+        models offered, a name or an alias changes."""
+        targets = [t for t in snapshot.upstreams.values() if t.usable]
+        state = tuple((t.id, catalogs.fetched_at(t.id), catalogs.filters.get(t.id)) for t in targets)
+        if app_ids_memo[0] is not snapshot or app_ids_memo[1] != state:
+            offered = {t.upstream.name: catalogs.ids(t.id) or () for t in targets}
+            app_ids_memo[:] = [snapshot, state, public_ids(offered, snapshot.names, snapshot.aliases)]
+        return app_ids_memo[2]
+
+    def app_id(model: str, upstream: str) -> str:
+        """The ID apps know ``model`` on ``upstream`` by (``model@upstream`` for one not offered there)."""
+        return app_ids().of.get((upstream, model), f"{model}@{upstream}")
 
     def embedding_slots(candidates: tuple[Candidate, ...]) -> tuple[Candidate, ...]:
         """Candidates using their pool's embedding slots (pool id negated) where it has its own limit."""
@@ -1201,18 +1220,24 @@ def create_app(
         return sorted(rows, key=lambda r: r["label"].lower())
 
     def name_table() -> list[dict]:
-        """Every model on a provider and its custom name, for the Models page."""
+        """Every model on a provider, its custom name and the ID apps know it by (None: not offered there), and what
+        has that name already when it can't be the ID, for the Models page."""
         keys = {(t.id, m["id"]) for t in snapshot.upstreams.values() for m in catalogs.models(t.id)}
         keys |= {k for k in snapshot.names.custom if k[0] in snapshot.upstreams}
-        rows = [
-            {
-                "upstream_id": upstream_id,
-                "upstream": snapshot.upstreams[upstream_id].upstream.name,
-                "model": model_id,
-                "name": snapshot.names.custom.get((upstream_id, model_id), ""),
-            }
-            for upstream_id, model_id in keys
-        ]
+        ids = app_ids()
+        rows = []
+        for upstream_id, model_id in keys:
+            upstream = snapshot.upstreams[upstream_id].upstream.name
+            rows.append(
+                {
+                    "upstream_id": upstream_id,
+                    "upstream": upstream,
+                    "model": model_id,
+                    "name": snapshot.names.custom.get((upstream_id, model_id), ""),
+                    "app_id": ids.of.get((upstream, model_id)),
+                    "clash": ids.clashes.get((upstream, model_id)),
+                }
+            )
         return sorted(rows, key=lambda r: (r["upstream"].lower(), r["model"].lower()))
 
     async def refresh_prices() -> bool:
@@ -1915,10 +1940,12 @@ def create_app(
         shown: dict[str, str] = {}  # the price in each entry's name
         allowed = client.policy.allowed_models
         result: dict[str, dict] = {}
+        public: dict[str, str] = {}  # "model@upstream" -> the ID apps know it by
         for model_id in sorted(served):
             for target, entry in served[model_id]:  # one entry per provider: you choose which serves it
                 key = f"{model_id}@{target.upstream.name}"
-                if allowed and model_id not in allowed and key not in allowed:
+                public[key] = app_id(model_id, target.upstream.name)
+                if allowed and model_id not in allowed and key not in allowed and public[key] not in allowed:
                     continue
                 pair = [(target, entry)]
                 limits = limits_on(model_id, [target])
@@ -1949,13 +1976,12 @@ def create_app(
             if alias.virtual_context:  # told a bigger context than the model has; compaction makes it fit
                 output = limits["output"] if limits else DEFAULT_OUTPUT
                 limits = {"context": alias.virtual_context, "output": min(output, alias.virtual_context)}
+            on = providers(
+                [t.upstream.name for t in pinned if t.upstream.name in offered_by.get(target, [])]
+                or [t.upstream.name for t in pinned]
+            )  # where it's sent, not what to
             result[alias.name] = {
-                "name": f"{alias.name} → "
-                + snapshot.names.listed(
-                    target or "",
-                    [t.upstream.name for t in pinned if t.upstream.name in offered_by.get(target, [])]
-                    or [t.upstream.name for t in pinned],
-                ),
+                "name": f"{alias.name}{SEPARATOR}{on}" if on else alias.name,
                 **({"limit": limits} if limits else {}),
             }
             plain = alias.council == "off"  # a council's members and judge are asked as they are
@@ -1975,7 +2001,7 @@ def create_app(
             # opencode's desktop app sorts by name, so the order travels in the names; its terminal keeps this order
             order, why = strength_order(list(result), await asyncio.to_thread(store.list_model_scores))
         return {
-            name: {
+            public.get(name, name): {
                 **result[name],
                 "name": ranking.label(
                     prefix, why.get(name, {}).get("score"), shown.get(name, ""), result[name]["name"]
@@ -2119,32 +2145,39 @@ def create_app(
         }
 
     async def model_entries(client: ClientKey) -> list[dict] | JSONResponse:
-        """Union of all usable upstreams' model lists (cached; doesn't use a slot) plus the aliases, limited
-        to the client's allowed models."""
+        """Every offered model on every usable upstream (lists cached; doesn't use a slot), under its ID for apps,
+        plus the aliases, limited to the client's allowed models. A model with a custom name gets QueueRouter's own
+        entry, so nothing of the provider's shows; the others keep the provider's."""
         targets = [t for t in snapshot.upstreams.values() if t.usable]
         stale = [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s)]
         if stale:
             await asyncio.gather(*(refresh_catalog(t) for t in stale))
+        ids = app_ids()
+        allowed = set(client.policy.allowed_models or ())
+        manual_thinking = await asyncio.to_thread(store.list_model_thinking)
         merged: dict[str, dict] = {}
         everything: dict[str, dict] = {}  # hidden models too: an alias may point at one
         for target in targets:
+            upstream = target.upstream.name
             for model in catalogs.models(target.id, raw=True):
-                entry = context_sizes.apply(model["id"], target.id, model)
-                everything.setdefault(model["id"], entry)
-                if catalogs.offered(target.id, model["id"]):
-                    merged.setdefault(model["id"], entry)
+                real = model["id"]
+                entry = context_sizes.apply(real, target.id, model)
+                everything.setdefault(real, entry)
+                public = ids.of.get((upstream, real))
+                if public is None or allowed and not {public, real, f"{real}@{upstream}"} & allowed:
+                    continue  # hidden there, or not this client's
+                if (target.id, real) in snapshot.names.custom:
+                    pair = [(target, model)]
+                    levels = thinking_for(real, pair, manual_thinking)
+                    merged[public] = own_entry(public, entry, levels, reads_images(real, pair))
+                else:
+                    merged[public] = {**entry, "id": public}
         if not merged and all(catalogs.ids(t.id) is None for t in targets):
             return error_response("no upstream returned a model list", 502, "upstream_error")
         for alias in snapshot.aliases.values():
-            merged[alias.name] = alias_entry(alias, everything.get(alias.target_model))
-        allowed = client.policy.allowed_models
-        return [
-            m
-            for m in merged.values()
-            if not allowed
-            or m["id"] in allowed
-            or (m["id"] in snapshot.aliases and snapshot.aliases[m["id"]].target_model in allowed)
-        ]
+            if not allowed or {alias.name, alias.target_model} & allowed:
+                merged[alias.name] = alias_entry(alias, everything.get(split_pin(alias.target_model)[0] or ""))
+        return list(merged.values())
 
     @app.get("/v1/models")
     async def models(request: Request):
@@ -3733,8 +3766,14 @@ def create_app(
         except ValueError:  # e.g. multipart (audio transcriptions): forwarded as it is, no rules written into it
             payload = None
         model = payload.get("model") if isinstance(payload, dict) else None
-        model = model if isinstance(model, str) else None
+        model = asked = model if isinstance(model, str) else None
         alias = snapshot.aliases.get(model) if model else None
+        ids = app_ids() if model and not alias and not internal else None
+        # a model's ID for apps: its real ID, only on that provider. A real ID one provider offers stays as it is
+        # (the body unchanged, an upstream whose list isn't in yet still a candidate)
+        if ids and model in ids.to and (ids.to[model][0] != model or model in ids.several):
+            model = "{}@{}".format(*ids.to[model])
+            payload["model"] = model
         target_model = alias.target_model if alias else model
         bare_target, target_pin = split_pin(target_model)
 
@@ -3747,9 +3786,16 @@ def create_app(
             log_refusal(request, client, f"/v1/{path}", answer.status_code, message, model)
             return answer
 
+        if ids and model in ids.shared:  # several providers offer it: the app picks one, QueueRouter doesn't
+            choices = ", ".join(ids.shared[model])
+            return refused(
+                error_response(
+                    f"model '{model}' is offered by several providers: use one of {choices}", 400, "model_ambiguous"
+                )
+            )
         # QueueRouter's own requests (council members, judge, summaries) serve a request already admitted: the
         # client's model list and queue limits apply to that request, not to the models working on it
-        if not internal and (refusal := policy_refusal(client, model, bare_target)):
+        if not internal and (refusal := policy_refusal(client, model, bare_target, asked)):
             return refused(refusal)
         no_fallbacks = not (alias and alias.fallbacks)  # with fallbacks, a missing target just moves on
         checked = cfg().unknown_model_check and no_fallbacks and not target_pin  # a pinned upstream decides
@@ -3880,9 +3926,9 @@ def create_app(
             if too_long_for:
                 estimate, context, _, output = too_long_for
                 return refused(
-                    Response(overflow_body(model or "", context, estimate + output), 400, media_type="application/json")
+                    Response(overflow_body(asked or "", context, estimate + output), 400, media_type="application/json")
                 )
-            return refused(error_response(f"no usable upstream for '{model}' right now", 503, "no_upstream"))
+            return refused(error_response(f"no usable upstream for '{asked}' right now", 503, "no_upstream"))
         if path == "embeddings":  # their own slots where the provider limits them separately
             steps = [dataclasses.replace(s, candidates=embedding_slots(s.candidates)) for s in steps]
         candidates, body = steps[0].candidates, steps[0].body
@@ -4227,7 +4273,8 @@ def rules_of(text: str) -> dict:
 
 
 def alias_entry(alias, target: dict | None) -> dict:
-    """A /v1/models entry for an alias, with the target's context-size fields so apps size prompts right."""
+    """A /v1/models entry for an alias, with the target's context-size fields so apps size prompts right; not
+    the target itself."""
     entry = {"id": alias.name, "object": "model", "created": 0, "owned_by": "queuerouter"}
     for key in CONTEXT_FIELDS:
         if target and key in target:
@@ -4236,8 +4283,29 @@ def alias_entry(alias, target: dict | None) -> dict:
         for key in [k for k in CONTEXT_FIELDS if k in entry]:
             del entry[key]
         entry["context_length"] = alias.virtual_context
-    entry["queuerouter"] = {"type": "alias", "target": alias.target_model}
+    entry["queuerouter"] = {"type": "alias"}
     return entry
+
+
+def own_entry(public: str, entry: dict, thinking: thinking_mod.Thinking | None, images: bool) -> dict:
+    """QueueRouter's /v1/models entry for a model with a custom name: its sizes, thinking levels and whether it
+    reads images, in OpenRouter's well-known form, and nothing else of the provider's (its owner, its own names)."""
+    created = entry.get("created")
+    own = {
+        "id": public,
+        "object": "model",
+        "created": created if isinstance(created, int) else 0,
+        "owned_by": "queuerouter",
+    }
+    own.update({key: entry[key] for key in CONTEXT_FIELDS if key in entry})
+    if thinking is not None:
+        reasoning = {"supported_efforts": list(dict.fromkeys(value for _, value in thinking.variants))}
+        if thinking.default:
+            reasoning["default_effort"] = thinking.default
+        own["reasoning"] = reasoning
+    own["architecture"] = {"input_modalities": ["text", "image"] if images else ["text"]}
+    own["queuerouter"] = {"type": "model"}
+    return own
 
 
 async def within(

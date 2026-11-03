@@ -63,7 +63,7 @@ async def test_limit_learned_from_provider_error(make_stack):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         assert (await c.get("/v1/models", headers=stack.headers)).status_code == 200
         config = (await c.get("/v1/opencode-config", headers=stack.headers)).json()
-        assert "limit" not in config["provider"]["queuerouter"]["models"]["small-model@upstream"]  # not reported
+        assert "limit" not in config["provider"]["queuerouter"]["models"]["small-model"]  # not reported
 
         big = body("x" * 12_000)  # ~3,000 tokens
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=big)
@@ -81,7 +81,7 @@ async def test_limit_learned_from_provider_error(make_stack):
         assert (await c.post("/v1/chat/completions", headers=stack.headers, json=body("short"))).status_code == 200
 
         config = (await c.get("/v1/opencode-config", headers=stack.headers)).json()
-        assert config["provider"]["queuerouter"]["models"]["small-model@upstream"]["limit"]["context"] == 2000
+        assert config["provider"]["queuerouter"]["models"]["small-model"]["limit"]["context"] == 2000
         models = (await c.get("/v1/models", headers=stack.headers)).json()["data"]
         assert next(m for m in models if m["id"] == "small-model")["context_length"] == 2000
 
@@ -110,7 +110,7 @@ async def test_manual_context_size(make_stack):
 
         config = (await c.get("/v1/opencode-config", headers=stack.headers)).json()
         models = config["provider"]["queuerouter"]["models"]
-        assert models["small-model@upstream"]["limit"] == {"context": 4096, "output": 1024}
+        assert models["small-model"]["limit"] == {"context": 4096, "output": 1024}
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=body("x" * 20_000))
         assert r.status_code == 400 and "4096 tokens" in r.json()["error"]["message"]
 
@@ -118,7 +118,7 @@ async def test_manual_context_size(make_stack):
         data = {"csrf": csrf, "model": "mock-model", "context": "8192", "output": ""}
         await c.post("/admin/model-limits", data=data)
         config = (await c.get("/v1/opencode-config", headers=stack.headers)).json()
-        assert config["provider"]["queuerouter"]["models"]["mock-model@upstream"]["limit"]["context"] == 8192
+        assert config["provider"]["queuerouter"]["models"]["mock-model"]["limit"]["context"] == 8192
 
         await c.post("/admin/model-limits", data={"csrf": csrf, "model": "small-model", "context": "", "output": ""})
         rows = await asyncio.to_thread(stack.app.state.store.list_model_limits)

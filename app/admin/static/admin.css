@@ -145,6 +145,7 @@ button:hover { filter: brightness(1.08); }
   background: var(--bg); border: 1px solid var(--border); color: var(--muted); font-weight: 500;
 }
 .badge.high { color: var(--danger); border-color: var(--danger); }
+.warn { color: var(--danger); }
 .badge.low { opacity: 0.7; }
 .secret {
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap;

@@ -1576,6 +1576,30 @@ logged.
   as council members already did; unknown, the provider decides.
 - QueueRouter's own refusals (a model not allowed, an unknown model, too long, no upstream, run budget, loop) are
   logged as `refused` (5xx: `error`) with their message. Draining and maintenance aren't.
+v0.57.0: apps know models by their custom names, and pick the provider of a model several offer.
+- Asked: an app shouldn't learn a model's real ID (`hf:deepseek-ai/…`), and a model on two providers shouldn't go to
+  either by chance. Names were for people only (several models may share one).
+- `names.public_ids`: a model's ID for apps is its custom name (spaces and "@" as dashes), else its real ID, plus
+  `@Provider` when several providers offer one, or when it's an alias's name. On one provider every real ID is
+  claimed first (a name never takes another model's), then names by real ID: a later model with the same name, or
+  one named like an alias, keeps its real ID (`clashes`, shown on the Models page with each model's ID for apps).
+  Worked out for offered models on usable upstreams, again when a list, the models offered or the snapshot changes.
+- serve: an alias first; then an ID for apps (bare or with `@Provider`) becomes `real@Provider`, so everything after
+  it (the client's model list, context, logs, the Requests page) sees what it saw when opencode sent that. A real ID
+  only one provider offers is left as it is (body unchanged; an upstream whose list isn't in yet stays a candidate).
+  A bare ID several upstreams offer, an ID for apps or a real ID, is refused (400 `model_ambiguous`, naming the
+  choices), several keys of one provider included (the user chose that over counting one address as one provider):
+  balancing and failover between them go through an alias, which still sends a bare real target to any upstream
+  offering it; QueueRouter's own requests aren't refused either. Real IDs still work. A client's allowed models may
+  hold either; allowing an ID for apps allows that ID, not the real one. Refusals that name the model name what the
+  app sent.
+- /v1/models: one entry per ID for apps (shared models once per provider). A named model's entry is QueueRouter's:
+  context and output fields, thinking levels as OpenRouter's `reasoning.supported_efforts` / `default_effort`, image
+  input as `architecture.input_modalities`, `owned_by: queuerouter`, the provider's `created`. An alias's entry no
+  longer names its target. opencode's entries use the same IDs (internally still `model@upstream`, for scores and
+  prices), and an alias reads `alias|Provider` instead of `alias → name|Provider`.
+- Not done (on hold): answers still carry the provider's `model`, `id` and own fields, its error texts the real ID,
+  `X-QueueRouter-Model` the target; "did you mean" and council texts name real IDs.
 
 ### Later (agreed, not scheduled)
 

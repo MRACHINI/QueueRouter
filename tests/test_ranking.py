@@ -84,11 +84,11 @@ async def test_opencode_list_is_numbered_by_strength(make_stack):
         await login(c, stack.url)
         await add_chain(c, "smart", "mock-model", ["other-model"], ["errors"])
         models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
-        assert list(models) == ["smart", "mock-model@upstream", "small-model@upstream", "other-model@upstream"]
-        assert models["smart"]["name"].startswith("00|$?|smart → ")
-        assert models["mock-model@upstream"]["name"] == "01|70.0|$?|mock-model|upstream"
-        assert models["small-model@upstream"]["name"] == "02|50.0|$?|small-model|upstream"
-        assert models["other-model@upstream"]["name"] == "03|$?|other-model|upstream"  # stays last, whatever its name
+        assert list(models) == ["smart", "mock-model", "small-model", "other-model"]
+        assert models["smart"]["name"] == "00|$?|smart|upstream"
+        assert models["mock-model"]["name"] == "01|70.0|$?|mock-model|upstream"
+        assert models["small-model"]["name"] == "02|50.0|$?|small-model|upstream"
+        assert models["other-model"]["name"] == "03|$?|other-model|upstream"  # stays last, whatever its name
         page = (await c.get("/admin/models")).text
         assert "Strength order in opencode" in page and "Artificial Analysis" in page and "Thinking levels" in page
 

@@ -83,6 +83,11 @@ class Catalogs:
         age = time.monotonic() - entry.fetched_at
         return age > (max_age_s if entry.ok else min(max_age_s, FAILED_RETRY_S))
 
+    def fetched_at(self, upstream_id: int) -> float | None:
+        """When its list was last asked for (None: never): what changes when the list may have."""
+        entry = self._entries.get(upstream_id)
+        return entry.fetched_at if entry else None
+
     def describe(self, upstream_id: int) -> dict:
         entry = self._entries.get(upstream_id)
         if entry is None:

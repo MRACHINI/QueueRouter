@@ -44,15 +44,18 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
 
 <h2 id="names">Model names</h2>
 <p class="muted small">Give a model on a provider your own name. It shows everywhere as <span class="mono">Provider|your name</span>
-(in opencode <span class="mono">your name|Provider</span>), and the model's automatic score, price and thinking levels are looked up by it. The real ID is still
-what's sent to the provider. Apps can't ask for a model by this name (several can share one): use an alias for that. Empty
-the field and Save to go back to the ID.</p>
+(in opencode <span class="mono">your name|Provider</span>), and the model's automatic score, price and thinking levels are looked up by it.
+It's also the ID apps know the model by, with spaces as dashes (<span class="mono">DeepSeek V4 Flash</span> →
+<span class="mono">DeepSeek-V4-Flash</span>), and <span class="mono">/v1/models</span> shows QueueRouter's own entry for it, not the
+provider's. When more than one provider offers a model by the same ID, each one's ID ends in <span class="mono">@Provider</span>
+and apps must pick one: the bare ID is refused. The real ID is still what's sent to the provider, and apps may still send
+it. Empty the field and Save to go back to the ID.</p>
 <details class="card" {% if model_names | selectattr("name") | list %}open{% endif %}>
   <summary><strong>{{ model_names | length }} models</strong>
     <span class="badge">{{ model_names | selectattr("name") | list | length }} named</span></summary>
   <div class="table-wrap">
   <table class="cards">
-    <thead><tr><th>Provider</th><th>Model ID</th><th>Custom name</th></tr></thead>
+    <thead><tr><th>Provider</th><th>Model ID</th><th>Custom name</th><th>ID for apps</th></tr></thead>
     <tbody>
     {% for n in model_names %}
     <tr>
@@ -66,10 +69,14 @@ the field and Save to go back to the ID.</p>
           <input name="name" value="{{ n.name }}" maxlength="120" placeholder="custom name" aria-label="Custom name" class="grow">
           <button type="submit" class="secondary">Save</button>
         </form>
+        {% if n.clash %}<div class="small warn">Not an ID for apps: on {{ n.upstream }} it's already
+          {% if n.clash == "an alias" %}an alias's name{% else %}the ID of <span class="mono">{{ n.clash }}</span>{% endif %}.
+          Apps reach this model by its real ID until you rename it.</div>{% endif %}
       </td>
+      <td data-label="ID for apps" class="mono small wrap-any">{% if n.app_id %}{{ n.app_id }}{% else %}<span class="muted">not offered</span>{% endif %}</td>
     </tr>
     {% else %}
-    <tr><td colspan="3" class="muted">No models loaded yet.</td></tr>
+    <tr><td colspan="4" class="muted">No models loaded yet.</td></tr>
     {% endfor %}
     </tbody>
   </table>

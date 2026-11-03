@@ -20,7 +20,9 @@ from a **web admin UI**.
   clients.
 - **Several upstreams**: keys and providers grouped into **limit pools** (one per account — keys
   on the same account share its limit), load balancing (least-busy / weighted / ordered),
-  model-aware routing, **failover** on errors, **circuit breakers** with health probes.
+  model-aware routing, **failover** on errors, **circuit breakers** with health probes. For a model several
+  upstreams offer, apps get balancing and failover through an alias: its bare ID is refused, so a request never
+  goes to an upstream nobody picked (see [Model names](#model-names)).
 - **Provider presets** (ArliAI, Google Gemini, NVIDIA, OpenRouter, OpenAI, local servers…) incl. an
   **ArliAI plan selector** (Free → Max) that sets parallel requests
   and context cap.
@@ -128,8 +130,9 @@ from a **web admin UI**.
 - **Every model shown with its provider**: `Synthetic|GLM-4.7` on every page, and one entry per provider in opencode
   (`04|32.5|$0.200|GLM-4.7|Synthetic`: number, score, price, name, provider).
   Each provider's model has its own price, score, context size and thinking levels. Give it an optional custom name
-  and it shows everywhere, in opencode too, and its automatic score and price are found by that name; the real ID
-  is still what's sent to the provider. See [Model names](#model-names).
+  and it shows everywhere, in opencode too, its automatic score and price are found by that name, and apps know it
+  by that name instead of the provider's ID; the real ID is still what's sent to the provider. See
+  [Model names](#model-names).
 - **Charts**: live running/queued chart on the dashboard (last 30 minutes); tokens, requests and
   cost per day on the Usage page (server-rendered SVG, no scripts from elsewhere).
 - **Response times** per model and upstream: the provider's own timings for streamed requests (its queue,
@@ -397,18 +400,42 @@ requests included, and as `DeepSeek V4 Flash|Synthetic` in opencode, and the mod
 thinking levels are looked up by it.
 Several models can share a name: each still has its own row, and its own price and score if you set them.
 
-Names are for people. The real ID is what's stored and sent to the provider, so aliases, a client's allowed models
-and saved model choices keep working, and it's one click away on the Requests page. Apps can't ask for a model by
-its custom name, because several can share one: they send the real ID, or an alias.
+The name is also the **ID apps know the model by**, with spaces as dashes: `DeepSeek-V4-Flash` in `/v1/models`, in
+opencode and in what apps send. When more than one provider offers a model by the same ID, each one's ends in its
+provider, so a request never goes to a provider the app didn't pick:
 
-Each opencode entry is one provider: `GLM-4.7@Synthetic` is only sent to Synthetic, so if it's down, that request
-fails. For automatic switching, make an alias with fallbacks. `GLM-4.7` without a provider still works for apps
-that send it, on any provider that offers it. Choose your model again in opencode once after updating to 0.51.
+| | Synthetic | Refuseless |
+|---|---|---|
+| real ID | `hf:deepseek-ai/DeepSeek-V4.1-Flash-1017` | `deepseek-v4.1-flash-fast` |
+| custom name | `DeepSeek V4.1 Flash` | `DeepSeek V4.1 Flash` |
+| ID for apps | `DeepSeek-V4.1-Flash@Synthetic` | `DeepSeek-V4.1-Flash@Refuseless` |
+| in opencode | `03\|52.1\|$0.200\|DeepSeek V4.1 Flash\|Synthetic` | `04\|52.1\|$0.150\|DeepSeek V4.1 Flash\|Refuseless` |
+
+A bare `DeepSeek-V4.1-Flash` is then refused, and the error lists the IDs to pick from; the same goes for a model
+without a name whose real ID several providers list, and for several keys or accounts of one provider (each upstream
+is its own entry). To spread requests over them with load balancing and failover, make an alias for the bare real ID
+(an alias goes to any upstream that offers its target); for switching in an order you set, an alias with fallbacks. Give two models one name only when they are the same model: an abliterated one wants
+its own (`DeepSeek V4.1 Flash Abliterated`). A model offered by one provider needs no `@Provider`, though apps may
+add it. The Models page shows each model's ID for apps.
+
+In `/v1/models`, a model with a name gets QueueRouter's own entry: its ID, `owned_by: "queuerouter"`, its context
+and output sizes, its thinking levels (`reasoning.supported_efforts`) and whether it reads images
+(`architecture.input_modalities`), and nothing else of the provider's. A model without one keeps the provider's
+entry, under its ID for apps. Aliases show their target's context size, not the target.
+
+The real ID is what's stored and sent to the provider, so aliases, a client's allowed models and saved model
+choices keep working, and it's one click away on the Requests page. Apps may still send it. On one provider, a real
+ID wins over a name, and of two models given the same name the first by real ID keeps it; one named like an alias
+keeps its real ID too. The Models page points these out.
+
+Each opencode entry is one provider, so if it's down, that request fails: make an alias with fallbacks to switch.
+Choose your model again in opencode once after updating to 0.57, since entries offered by one provider lost their
+`@Provider`. Aliases show where they send, not to what: `00|$0.015|Telegram|Synthetic`.
 
 ### Models in strength order
 
 Turn on **Settings → opencode → Order models by strength** and the opencode model list is numbered: your aliases
-first (`00|$0.200|smart → GLM-4.7|Synthetic`), then the strongest models with their score
+first (`00|$0.200|smart|Synthetic`), then the strongest models with their score
 (`01|58.3|$0.200|GLM-4.7|Synthetic`), then models without a score (`12|$0.200|model|Synthetic`). Scores come from
 the [Artificial Analysis](https://artificialanalysis.ai/) index (intelligence, coding or agentic): as published in
 OpenRouter's public model list with no setup, or the full index with a free API key in Settings (read once a day), or
@@ -527,7 +554,7 @@ Traefik address doesn't.
 | `/v1/files`, `/v1/batches` | OpenAI-compatible Batch API (JSONL in, output/error files out, `completion_window` 24h) |
 | `POST /v1/messages` | **Anthropic Messages API** (Claude SDKs, Claude Code), translated to chat completions; streaming, tools, images, system messages inside `messages`, structured output; `/v1/messages/count_tokens` estimates |
 | `POST /v1/responses` | **OpenAI Responses API** (Agents SDK, newer clients); streaming, function tools, structured output, `previous_response_id` (kept encrypted 7 days; `store: false` keeps nothing) |
-| `GET /v1/models` | all upstreams' models + aliases, filtered to the client's allowed models |
+| `GET /v1/models` | all upstreams' models under their IDs for apps (see [Model names](#model-names)) + aliases, filtered to the client's allowed models |
 | `GET /v1/models/{id}` | one model (aliases and `model@upstream` too); other `/v1/` GETs are refused unless listed in Settings → "GET paths passed to the provider" |
 | `GET /v1/queue` | queue depth, your client's queued/active, estimated wait |
 | `GET /v1/opencode-config` | generated opencode provider config for your key |

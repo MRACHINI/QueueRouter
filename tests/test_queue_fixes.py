@@ -11,7 +11,7 @@ from app.slots import LANES, SlotQueue
 from tests.test_admin import OWNER, login
 from tests.test_policies import set_policy
 from tests.test_slots import drain_order
-from tests.test_upstreams import add_upstream, chat
+from tests.test_upstreams import add_upstream, chat, spread
 
 
 async def test_a_retry_frees_its_slot_while_it_waits(make_stack):
@@ -36,9 +36,10 @@ async def test_a_failover_counts_once_for_rate_limits(make_stack, make_mock):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         await add_upstream(c, "other", other_url)
+        model = await spread(c)
         await set_policy(c, stack, rpm=2, on_limit="reject")
         for tag in ("one", "two"):  # each fails over once: two grants, one request
-            r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat(tag))
+            r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat(tag, model=model))
             assert r.status_code == 200, r.text
     assert other["served"] == 2
 
