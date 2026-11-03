@@ -1694,7 +1694,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 raise ValueError("score")
             upstream_id = chosen_upstream(form)
             store.set_model_score(model, session.user.username, score, upstream_id)
-            if score is None:  # one set for every provider, from before scores were per provider, goes too
+            # one set for every provider, from before scores were per provider, goes too; not an alias's of that name
+            if score is None and model not in {a.name for a in store.list_aliases()}:
                 store.set_model_score(model, session.user.username, None)
         except ValueError:
             return back("/admin/models#ranking", error="invalid")

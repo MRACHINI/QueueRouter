@@ -1601,6 +1601,11 @@ v0.57.0: apps know models by their custom names, and pick the provider of a mode
 - Not done (on hold): answers still carry the provider's `model`, `id` and own fields, its error texts the real ID,
   `X-QueueRouter-Model` the target; "did you mean" and council texts name real IDs.
 
+v0.57.1: an alias named like a model's real ID (`claude-opus-5-5`) kept its score to itself.
+- An alias's score is saved under its name for every provider, where scores from before they were per provider are
+  too, so a model with that real ID took the alias's score, and clearing the model's deleted the alias's. A model
+  no longer falls back to a for-every-provider score of an alias's name, and clearing it leaves that one alone.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

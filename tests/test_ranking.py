@@ -93,6 +93,28 @@ async def test_opencode_list_is_numbered_by_strength(make_stack):
         assert "Strength order in opencode" in page and "Artificial Analysis" in page and "Thinking levels" in page
 
 
+async def test_an_alias_named_like_a_model_keeps_its_score_to_itself(make_stack):
+    """An alias's score is saved under its name for every provider, where scores from before they were per
+    provider are too: a model whose ID is that name doesn't get it, and clearing the model's leaves it."""
+    from tests.test_admin import csrf_of
+
+    stack = make_stack(bootstrap=OWNER, opencode_rank=True, models_cache_s=0)
+    stack.mock["extra_models"] = ["small-model"]
+    store = stack.app.state.store
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await add_chain(c, "small-model", "mock-model", [], ["errors"])
+        csrf = csrf_of((await c.get("/admin/models")).text)
+        alias = {"csrf": csrf, "model": "small-model", "upstream_id": ""}
+        assert "m=saved" in (await c.post("/admin/model-scores", data={**alias, "score": "60"})).headers["location"]
+        model = {**alias, "upstream_id": str(store.list_upstreams()[0].id)}
+        assert "m=saved" in (await c.post("/admin/model-scores", data={**model, "score": ""})).headers["location"]
+        models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
+        assert models["small-model"]["name"].startswith("01|60.0|")
+        assert "60.0" not in models["small-model@upstream"]["name"]
+    assert len(store.list_model_scores()) == 1
+
+
 async def test_settings_page_saves_the_ranking_switch(make_stack):
     """The whole Settings form as a browser sends it (every field as rendered), with the switch ticked."""
     import re

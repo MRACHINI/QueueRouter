@@ -1257,7 +1257,8 @@ def create_app(
         for name in names:
             bare, pin = split_pin(name)
             yours = manual.get((pin[0], bare)) if pin else None
-            yours = manual.get((EVERY, bare or "")) if yours is None else yours
+            if yours is None and not (pin and bare in snapshot.aliases):  # an alias's own is under its name
+                yours = manual.get((EVERY, bare or ""))
             if yours is not None:
                 info[name] = {"score": yours, "source": "yours", "inherited": False}
                 ranked.append((name, yours))
