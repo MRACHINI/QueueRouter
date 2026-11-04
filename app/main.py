@@ -511,7 +511,9 @@ def create_app(
     apply_snapshot()
 
     async def refresh_catalog(target: Target) -> bool:
-        return await catalogs.refresh(app.state.client, target.id, target.upstream.base_url, target.api_key)
+        return await catalogs.refresh(
+            app.state.client, target.id, target.upstream.base_url, target.api_key, target.upstream.name
+        )
 
     pending_usage: list[dict] = []
     inflight: dict[str, RequestLog] = {}  # request id -> its log, while queued or running
@@ -957,11 +959,19 @@ def create_app(
 
     def app_ids() -> PublicIds:
         """The IDs apps know the offered models by (app/names.py), worked out again when a model list, the choice of
-        models offered, a name or an alias changes."""
+        models offered, a name or an alias changes. A provider whose list isn't in (just started, or failing) counts
+        the models named there: the names are stored, so a name still reaches it as the real ID."""
         targets = [t for t in snapshot.upstreams.values() if t.usable]
-        state = tuple((t.id, catalogs.fetched_at(t.id), catalogs.filters.get(t.id)) for t in targets)
+        state = tuple((t.id, catalogs.version(t.id), catalogs.filters.get(t.id)) for t in targets)
         if app_ids_memo[0] is not snapshot or app_ids_memo[1] != state:
-            offered = {t.upstream.name: catalogs.ids(t.id) or () for t in targets}
+
+            def offered_by(target: Target) -> Iterable[str]:
+                ids = catalogs.ids(target.id)
+                if ids is not None:
+                    return ids
+                return [m for uid, m in snapshot.names.custom if uid == target.id and catalogs.offered(target.id, m)]
+
+            offered = {t.upstream.name: offered_by(t) for t in targets}
             app_ids_memo[:] = [snapshot, state, public_ids(offered, snapshot.names, snapshot.aliases)]
         return app_ids_memo[2]
 
@@ -1931,9 +1941,8 @@ def create_app(
         """Every model and alias ``client`` may use, with opencode limits (plan caps applied). ``with_thinking``:
         each model's thinking levels and price too (for the plugin: opencode's level selector and its session cost)."""
         targets = [t for t in snapshot.upstreams.values() if t.usable]
-        stale = [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s)]
-        if stale:
-            await asyncio.gather(*(refresh_catalog(t) for t in stale))
+        if stale := [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s) or catalogs.loading(t.id)]:
+            await asyncio.gather(*(refresh_catalog(t) for t in stale))  # a first list on its way too, or it's missing
         served: dict[str, list[tuple[Target, dict]]] = {}  # model -> the upstreams offering it, with its entry
         listed: dict[str, list[tuple[Target, dict]]] = {}  # the same with hidden models (aliases may use them)
         for target in targets:
@@ -2186,9 +2195,8 @@ def create_app(
         entry, so nothing of the provider's shows; the others keep the provider's. In opencode's order, for apps that
         keep the list's: strongest first, equal scores cheapest first, then by name; aliases without a score last."""
         targets = [t for t in snapshot.upstreams.values() if t.usable]
-        stale = [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s)]
-        if stale:
-            await asyncio.gather(*(refresh_catalog(t) for t in stale))
+        if stale := [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s) or catalogs.loading(t.id)]:
+            await asyncio.gather(*(refresh_catalog(t) for t in stale))  # a first list on its way too, or it's missing
         ids = app_ids()
         allowed = set(client.policy.allowed_models or ())
         manual_thinking = await asyncio.to_thread(store.list_model_thinking)

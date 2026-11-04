@@ -8,6 +8,7 @@ Request body extras (all optional) steer its behaviour:
   "mock_fail":    fail this many times per "mock_key" with 503 before succeeding
   state["daily_quota"]: answer every request with a daily-quota 429 (set on the mock's state)
   state["models_status"]: answer GET /v1/models with this status (no usable model list)
+  state["models_delay"]: seconds before answering it; state["models_asked"]: how often it was asked
   state["missing_models"]: answer requests for these models with a 404
   state["text_only_models"]: refuse requests with images for these models (400); state["saw_images"]: who got some
 
@@ -78,6 +79,8 @@ def create_mock(limit: int = 2) -> FastAPI:
 
     @app.get("/v1/models")
     async def models():
+        state["models_asked"] = state.get("models_asked", 0) + 1
+        await asyncio.sleep(state.get("models_delay", 0))  # a slow list
         if state.get("models_status"):  # a provider without a usable model list
             return JSONResponse({"error": {"message": "no model list"}}, status_code=state["models_status"])
         extra = [{"id": m, "object": "model"} for m in state.get("extra_models", [])]  # no size reported

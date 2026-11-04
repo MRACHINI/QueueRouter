@@ -1623,6 +1623,20 @@ v0.59.0: the token mix can count from a day.
   counts usage from that day when it's within the 30 (`store.token_totals(days, since)`). A day to come is refused.
 - The mix is read again at once when the day changes (`mix_due`), not a day later; the Models page's strength table
   reads it too, so its cheapest-first ties match opencode. Usage, requests and their costs are left as they are.
+v0.59.1: names work before a provider's model list is in.
+- Seen live right after a redeploy: requests the gate had held reached the new process while Synthetic's list was
+  still on its way. `DeepSeek-V4.1-Flash-1017@Synthetic` (a custom name) went to Synthetic as the name, since the IDs
+  for apps were worked out from the lists only: a 400 there ("should start with an hf: prefix"). And the IDs, worked
+  out once while the list was on its way, were kept after it came in: the memo changed with `fetched_at`, set when a
+  fetch starts, not when it ends, so /v1/models left Synthetic out until its next fetch.
+- A provider whose list isn't in (just started, or failing) counts the models named there: names are stored, so a
+  name reaches it as the real ID without the list. The memo now follows `Catalogs.version` (a fetch starting and one
+  coming back).
+- /v1/models and the opencode config wait for a provider's first list while it's on its way (at most the 15 s it's
+  allowed) instead of answering without it. A fetch on its way is shared: every request after a start no longer
+  asks the provider again (same address and key; another fetch after an edit).
+- A model list that starts failing is logged once (`model_list_failed`, with the provider's reason, its key masked),
+  and its return (`model_list_back`): before, the reason showed on the Upstreams page only while it lasted.
 
 ### Later (agreed, not scheduled)
 

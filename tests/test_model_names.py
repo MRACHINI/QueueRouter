@@ -356,6 +356,37 @@ async def test_apps_know_models_by_their_names(make_stack, make_mock):
         assert (await ask("hf:zai/secret-tune")).status_code == 403  # known by its real ID, which isn't allowed
 
 
+async def test_names_work_while_a_providers_list_is_on_its_way(make_stack, make_mock):
+    """Seen after a restart: Synthetic's list came late, a named model went to it as the name (a 400 there), and
+    /v1/models left Synthetic out even once its list was in. The names are stored, so they need no list; /v1/models
+    waits for a first list; and the provider is asked for it once, however many requests come meanwhile."""
+    stack = make_stack(bootstrap=OWNER)
+    second_url, second = make_mock(2)
+    second["extra_models"] = ["hf:org/Tune-1017", "plain-model"]
+    second["models_delay"] = 2
+    store = stack.app.state.store
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await add_upstream(c, "second", second_url, max_concurrency=2)
+        second_id = next(u.id for u in store.list_upstreams() if u.name == "second")
+        store.set_model_name(second_id, "hf:org/Tune-1017", "t", "Tune 1017")
+        stack.app.state.reload()
+
+        def ask(model):
+            return c.post("/v1/chat/completions", headers=stack.headers, json=chat("hi", model=model))
+
+        for model in ("Tune-1017", "Tune-1017@second"):  # no list asked for yet
+            assert (await ask(model)).status_code == 200
+            assert json.loads(second["last_body"])["model"] == "hf:org/Tune-1017"  # its real ID, not the name
+        first = asyncio.ensure_future(c.get("/v1/models", headers=stack.headers))  # asks for the list
+        await asyncio.sleep(0.5)
+        assert (await ask("Tune-1017@second")).status_code == 200  # the IDs worked out while it's on its way
+        for answer in await asyncio.gather(first, *(c.get("/v1/models", headers=stack.headers) for _ in range(2))):
+            listed = [m["id"] for m in answer.json()["data"]]
+            assert "Tune-1017" in listed and "plain-model" in listed  # waited for, and not left out once in
+        assert second["models_asked"] == 1
+
+
 async def test_a_custom_name_shows_everywhere_and_finds_score_and_price(make_stack, make_mock):
     stack = make_stack(bootstrap=OWNER, models_cache_s=0, opencode_rank=True)
     stack.app.state.prices.use(PriceCatalog.slim(PRICES), time.time())

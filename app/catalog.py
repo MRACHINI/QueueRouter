@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 
@@ -10,6 +12,8 @@ import httpx
 
 from .limits import error_message
 from .upstream import claude_headers, upstream_headers
+
+log = logging.getLogger("queuerouter")
 
 FAILED_RETRY_S = 10  # retry a model list we never managed to fetch this often
 
@@ -20,6 +24,7 @@ class _Entry:
     models: list[dict] = field(default_factory=list)
     ok: bool = False
     error: str = ""
+    finished: int = 0  # fetches that came back, either way
 
 
 async def fetch_models(client: httpx.AsyncClient, base_url: str, api_key: str, timeout: float = 15) -> list[dict]:
@@ -45,6 +50,7 @@ async def fetch_models(client: httpx.AsyncClient, base_url: str, api_key: str, t
 class Catalogs:
     def __init__(self) -> None:
         self._entries: dict[int, _Entry] = {}
+        self._fetching: dict[int, tuple[tuple[str, str], asyncio.Future]] = {}  # (address, key), the fetch on its way
         # Which models each upstream offers (Upstreams page): {upstream_id: (offer_new, models)}, where
         # models are the hidden ones when offer_new, else the only ones offered. Absent = all offered.
         self.filters: dict[int, tuple[bool, frozenset[str]]] = {}
@@ -83,10 +89,15 @@ class Catalogs:
         age = time.monotonic() - entry.fetched_at
         return age > (max_age_s if entry.ok else min(max_age_s, FAILED_RETRY_S))
 
-    def fetched_at(self, upstream_id: int) -> float | None:
-        """When its list was last asked for (None: never): what changes when the list may have."""
+    def version(self, upstream_id: int) -> tuple[float, int] | None:
+        """What changes when its list may have: a fetch starting, and one coming back (None: never asked)."""
         entry = self._entries.get(upstream_id)
-        return entry.fetched_at if entry else None
+        return (entry.fetched_at, entry.finished) if entry else None
+
+    def loading(self, upstream_id: int) -> bool:
+        """Its first list is on its way (just started, or just added): worth waiting for."""
+        entry = self._entries.get(upstream_id)
+        return upstream_id in self._fetching and not (entry and entry.ok)
 
     def describe(self, upstream_id: int) -> dict:
         entry = self._entries.get(upstream_id)
@@ -94,15 +105,38 @@ class Catalogs:
             return {"models": None, "error": ""}
         return {"models": len(entry.models) if entry.ok else None, "error": entry.error}
 
-    async def refresh(self, client: httpx.AsyncClient, upstream_id: int, base_url: str, api_key: str) -> bool:
+    async def refresh(
+        self, client: httpx.AsyncClient, upstream_id: int, base_url: str, api_key: str, name: str = ""
+    ) -> bool:
+        """Fetch its list again. One already on its way from the same address and key is waited for, not asked
+        again: right after a start every request would ask."""
+        running = self._fetching.get(upstream_id)
+        if running is None or running[0] != (base_url, api_key):
+            task = asyncio.ensure_future(self._fetch(client, upstream_id, base_url, api_key, name))
+            running = self._fetching[upstream_id] = ((base_url, api_key), task)
+
+            def done(_: asyncio.Future) -> None:
+                if self._fetching.get(upstream_id) is running:
+                    del self._fetching[upstream_id]
+
+            task.add_done_callback(done)
+        return await asyncio.shield(running[1])  # one caller giving up doesn't stop it for the others
+
+    async def _fetch(self, client: httpx.AsyncClient, upstream_id: int, base_url: str, api_key: str, name: str) -> bool:
         entry = self._entries.setdefault(upstream_id, _Entry())
         entry.fetched_at = time.monotonic()
         try:
-            entry.models = await fetch_models(client, base_url, api_key)
-            entry.ok, entry.error = True, ""
+            models = await fetch_models(client, base_url, api_key)
         except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
-            entry.error = f"{type(exc).__name__}: {exc}"[:200]  # keep the last good list, if any
+            error = f"{type(exc).__name__}: {exc}"[:200]
+            error = error.replace(api_key, "[key]") if len(api_key) >= 8 else error  # a provider may repeat it
+            if not entry.error:  # once when it starts failing, not on every retry
+                log.warning(json.dumps({"event": "model_list_failed", "upstream": name or upstream_id, "error": error}))
+            entry.error, entry.finished = error, entry.finished + 1  # the last good list, if any, stays
             return False
+        if entry.error:
+            log.info(json.dumps({"event": "model_list_back", "upstream": name or upstream_id, "models": len(models)}))
+        entry.models, entry.ok, entry.error, entry.finished = models, True, "", entry.finished + 1
         return True
 
     def forget(self, keep: set[int]) -> None:
