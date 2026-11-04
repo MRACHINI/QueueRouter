@@ -1616,6 +1616,13 @@ v0.58.0: equal scores go cheapest first, and /v1/models is in strength order.
   in opencode (`00`, now by name case-insensitive), last in /v1/models; with one they rank like models.
 - /v1/models always uses it (the ordering switch only decides opencode's numbered names); the Models page's
   strength table shows the same order.
+v0.59.0: the token mix can count from a day.
+- Claude before v0.53.0 went through its OpenAI-compatible endpoint, which doesn't cache: those days are all input,
+  and right (it's what Claude charged), but they pull the 30-day mix toward input, so every opencode price reads high
+  until they age out. `price_mix_since` (a setting, set next to the mix on the Models page, not on Settings): the mix
+  counts usage from that day when it's within the 30 (`store.token_totals(days, since)`). A day to come is refused.
+- The mix is read again at once when the day changes (`mix_due`), not a day later; the Models page's strength table
+  reads it too, so its cheapest-first ties match opencode. Usage, requests and their costs are left as they are.
 
 ### Later (agreed, not scheduled)
 

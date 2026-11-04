@@ -1373,9 +1373,10 @@ class Store:
             (since,),
         )
 
-    def token_totals(self, days: int) -> tuple[int, int, int]:
-        """(prompt, cached, completion) tokens over the last ``days`` days."""
-        since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - (days - 1) * 86_400))
+    def token_totals(self, days: int, since: str = "") -> tuple[int, int, int]:
+        """(prompt, cached, completion) tokens over the last ``days`` days, from the day ``since`` (YYYY-MM-DD) on
+        when that is later."""
+        since = max(time.strftime("%Y-%m-%d", time.gmtime(time.time() - (days - 1) * 86_400)), since)
         row = self.read(
             "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(cached_tokens), 0), "
             "COALESCE(SUM(completion_tokens), 0) FROM usage_daily WHERE day >= ?",

@@ -541,6 +541,39 @@ async def test_token_totals(make_stack):
     assert store.token_totals(30) == (100, 40, 5)  # the last 30 days only
 
 
+async def test_the_mix_can_count_from_a_day(make_stack):
+    """Days that don't look like today's use (a provider that didn't cache) can be left out of the mix in opencode
+    names: from the Models page, at once, without deleting anything."""
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0, opencode_rank=True)
+    store = stack.app.state.store
+    store.set_model_score("mock-model", "t", 40)
+    store.set_model_price("mock-model", "t", None, 1.0, 2.0, 0.1)
+    now = time.time()
+    row = {"stream": 0, "retries": 0, "outcome": "done", "completion_tokens": 0}
+    store.record_requests(
+        [
+            {**row, "id": "old", "ts": now - 5 * 86_400, "prompt_tokens": 3_000_000, "cached_tokens": 0},  # no cache
+            {**row, "id": "new", "ts": now, "prompt_tokens": 1_000_000, "cached_tokens": 800_000},
+        ]
+    )
+    yesterday = time.strftime("%Y-%m-%d", time.gmtime(now - 86_400))
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        assert (await opencode(c, stack))["mock-model"]["name"] == "01|40.0|$0.820|mock-model|upstream"  # 80% input
+        await login(c, stack.url)
+        csrf = csrf_of((await c.get("/admin/models")).text)
+        for day in ("01/11/2026", time.strftime("%Y-%m-%d", time.gmtime(now + 2 * 86_400))):  # not a day; to come
+            r = await c.post("/admin/price-mix", data={"csrf": csrf, "since": day})
+            assert "e=invalid" in r.headers["location"]
+        r = await c.post("/admin/price-mix", data={"csrf": csrf, "since": yesterday})
+        assert "m=saved" in r.headers["location"]
+        assert (await opencode(c, stack))["mock-model"]["name"] == "01|40.0|$0.280|mock-model|upstream"  # at once
+        page = (await c.get("/admin/models")).text
+        assert f"your usage since {yesterday}" in page and "20.0% input" in page and f'value="{yesterday}"' in page
+        assert (await c.post("/admin/price-mix", data={"csrf": csrf, "since": ""})).status_code == 303
+        assert (await opencode(c, stack))["mock-model"]["name"].startswith("01|40.0|$0.820|")  # the 30 days again
+    assert store.token_totals(30) == (4_000_000, 800_000, 0)  # nothing was deleted
+
+
 async def test_a_cancelled_stream_says_how_far_it_got(make_stack):
     stack = make_stack(bootstrap=OWNER)
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:

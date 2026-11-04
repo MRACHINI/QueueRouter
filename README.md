@@ -455,6 +455,11 @@ output prices alone would mislead: at 17% input, 83% cached and 0.4% output, a m
 out shows `$0.203`, while one at $0.30 in, $0.30 cached and $1.20 out shows `$0.304`. The Models page shows your mix.
 On Claude the input share counts at 1.25 × the input price, because nearly all of it is written to the prompt cache.
 
+Days that don't look like how you use models now can be left out: *Count the mix from* on the Models page takes a
+day, and the mix counts usage from then on (Claude before 0.53.0, for example, was all input: its OpenAI-compatible
+endpoint doesn't cache). It applies at once, deletes nothing and leaves the Usage page as it is; once the day is more
+than 30 days back it changes nothing.
+
 A monthly plan shows `plan`, because a request costs nothing extra, unless its row has a price of its own. A model
 without a known price shows `$?`, and a council shows none because one request makes several calls. Very cheap models
 can show `$0.000`. Turn it off with **Settings → opencode → Show prices in model names**. opencode's own session cost

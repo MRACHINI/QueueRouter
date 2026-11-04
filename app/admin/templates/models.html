@@ -297,8 +297,16 @@ Costs are counted for the model that answered on the provider that served it (an
 not the alias. Prices apply to past usage too.</p>
 <p class="small muted">The price in opencode names is per million tokens of your mix: {{ "%.1f" | format(mix[0] * 100) }}% input,
 {{ "%.1f" | format(mix[1] * 100) }}% cached and {{ "%.1f" | format(mix[2] * 100) }}% output
-({% if typical_mix %}a typical mix until there's more usage{% else %}your last {{ mix_days }} days{% endif %}). A monthly plan
+({% if typical_mix %}a typical mix until there's more usage{% if mix_counts_since %} since {{ mix_since }}{% endif %}{% elif mix_counts_since %}your usage since {{ mix_since }}{% else %}your last {{ mix_days }} days{% endif %}). A monthly plan
 shows <span class="mono">plan</span> unless its row has a price of its own. <a href="/admin/settings">Settings → opencode</a> turns it off.</p>
+<form method="post" action="/admin/price-mix" class="row wrap" id="mix">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Count the mix from <input type="date" name="since" value="{{ mix_since }}" max="{{ today }}"></label>
+  <button type="submit" class="secondary">Save</button>
+</form>
+<p class="small muted">Usage before that day is left out of the mix, for days that don't look like how you use models
+now (a provider that didn't cache, a one-off job). Blank = the last {{ mix_days }} days; once the day is more than
+{{ mix_days }} days back it changes nothing. Nothing is deleted, and the Usage page stays as it is.</p>
 
 <h2>Models per upstream</h2>
 {% for name, ids in models.items() %}

@@ -270,8 +270,8 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "opencode",
         "Show prices in model names",
         "Adds one price per million tokens to each model's name in opencode, from its prices and your token mix of "
-        "the last 30 days: 04|32.5|$0.200|model|Provider. A monthly plan without a price of its own shows plan, a "
-        "model without a known price $?. Prices are set on the Models page.",
+        "the last 30 days (or from the day set on the Models page): 04|32.5|$0.200|model|Provider. A monthly plan "
+        "without a price of its own shows plan, a model without a known price $?. Prices are set on the Models page.",
     ),
     "rank_index": (
         "opencode",
@@ -1602,6 +1602,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             ),
             key=lambda row: row["label"].lower(),
         )
+        since = store.get_tunables().get("price_mix_since", "")  # the token mix counts from this day
         return page(
             request,
             "models.html",
@@ -1616,9 +1617,12 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             upstream_names=upstream_names,
             models=models,
             pricing=pricing,
-            mix=(mix := token_mix(*store.token_totals(MIX_DAYS))),
+            mix=(mix := token_mix(*store.token_totals(MIX_DAYS, since))),
             typical_mix=mix == DEFAULT_MIX,
             mix_days=MIX_DAYS,
+            mix_since=since,
+            mix_counts_since=since > time.strftime("%Y-%m-%d", time.gmtime(time.time() - (MIX_DAYS - 1) * 86_400)),
+            today=datetime.now(UTC).date().isoformat(),
             references=ctx.prices.references(),
             catalog_size=len(ctx.prices.prices),
             catalog_age_h=round((time.time() - ctx.prices.fetched_at) / 3600, 1) if ctx.prices.fetched_at else None,
@@ -1749,6 +1753,22 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         except ValueError:
             return back("/admin/models#pricing", error="invalid")
         return back("/admin/models#pricing", "saved")
+
+    @app.post("/admin/price-mix")
+    async def price_mix_update(request: Request):
+        session, form = await require_post(request, "admin")
+        since = str(form.get("since", "")).strip()  # blank: the last 30 days again
+        if since:
+            try:
+                day = datetime.strptime(since, "%Y-%m-%d").date()
+            except ValueError:
+                return back("/admin/models#mix", error="invalid")
+            if day > datetime.now(UTC).date():
+                return back("/admin/models#mix", error="invalid")
+            since = day.isoformat()
+        store.set_tunables({"price_mix_since": since}, session.user.username)
+        ctx.reload()
+        return back("/admin/models#mix", "saved")
 
     @app.post("/admin/prices/refresh")
     async def prices_refresh(request: Request):

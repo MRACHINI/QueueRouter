@@ -559,14 +559,22 @@ def create_app(
         costs = token_cost(price, prompt, completion, cached, written)
         return sum(costs) if costs else 0.0
 
-    mix_read: dict = {"at": None, "mix": DEFAULT_MIX}
+    mix_read: dict = {"at": None, "since": "", "mix": DEFAULT_MIX}
+
+    def mix_due() -> bool:
+        """Read once a day, so names change rarely, and again when the day it counts from changes."""
+        at = mix_read["at"]
+        return at is None or mix_read["since"] != cfg().price_mix_since or time.monotonic() - at > MIX_REFRESH_S
+
+    def read_mix() -> tuple[float, float, float]:
+        since = cfg().price_mix_since
+        mix_read.update(at=time.monotonic(), since=since, mix=token_mix(*store.token_totals(MIX_DAYS, since)))
+        return mix_read["mix"]
 
     async def current_mix() -> tuple[float, float, float]:
-        """The token mix of the last days, for the prices in opencode names: read once a day, so names change rarely."""
-        now = time.monotonic()
-        if mix_read["at"] is None or now - mix_read["at"] > MIX_REFRESH_S:
-            mix_read.update(at=now, mix=token_mix(*await asyncio.to_thread(store.token_totals, MIX_DAYS)))
-        return mix_read["mix"]
+        """The token mix of the last days (from the day set on the Models page, when later), for the prices in
+        opencode names."""
+        return await asyncio.to_thread(read_mix) if mix_due() else mix_read["mix"]
 
     monthly = MonthlyUsage(cost_of)
 
@@ -1337,7 +1345,7 @@ def create_app(
         """The Models page's strength section: every model on a provider and every alias, its score and place."""
         keys = {f"{m}@{upstream}" for upstream, ids in models_by_upstream().items() for m in ids}
         names = sorted(keys | set(snapshot.aliases))
-        costs = order_costs(names, store.list_model_prices(), mix_read["mix"])
+        costs = order_costs(names, store.list_model_prices(), read_mix() if mix_due() else mix_read["mix"])
         order, info = strength_order(names, store.list_model_scores(), costs)
         rows = []
         for key, prefix in order:
