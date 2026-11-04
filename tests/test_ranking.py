@@ -42,6 +42,11 @@ def test_names_match_their_base_model():
     assert scores.score("Kimi K3.1 Pro", "agentic") is None  # that index isn't there
     order = ranking.numbered([("a", 10), ("b", 30), ("c", 30)], ["team"], ["z", "y"])
     assert order == [("team", "00"), ("b", "01"), ("c", "02"), ("a", "03"), ("y", "04"), ("z", "05")]
+    cheapest = {"c": 1, "z": 2}  # equal scores, and the unranked, cheapest first; unknown prices after
+    order = ranking.numbered(
+        [("a", 10), ("b", 30), ("c", 30)], ["Team", "alpha"], ["z", "y"], lambda n: (cheapest.get(n, 9), n)
+    )
+    assert order == [("alpha", "00"), ("Team", "00"), ("c", "01"), ("b", "02"), ("a", "03"), ("z", "04"), ("y", "05")]
     assert ranking.label("03", 45.1, "$0.20", "m|up") == "03|45.1|$0.20|m|up"
     assert ranking.label("04", 56, "", "GLM-4.6-Derestricted-v5") == "04|56.0|GLM-4.6-Derestricted-v5"
     assert ranking.label("00", None, "$?", "team → m") == "00|$?|team → m"
@@ -91,6 +96,30 @@ async def test_opencode_list_is_numbered_by_strength(make_stack):
         assert models["other-model"]["name"] == "03|$?|other-model|upstream"  # stays last, whatever its name
         page = (await c.get("/admin/models")).text
         assert "Strength order in opencode" in page and "Artificial Analysis" in page and "Thinking levels" in page
+
+
+async def test_equal_scores_go_cheapest_first_and_v1_models_keeps_that_order(make_stack):
+    stack = make_stack(bootstrap=OWNER, opencode_rank=True, models_cache_s=0)
+    stack.mock["extra_models"] = ["small-model", "other-model", "free-model"]
+    store = stack.app.state.store
+    for model in ("mock-model", "small-model"):
+        store.set_model_score(model, "t", 50)
+    store.set_model_price("mock-model", "t", None, 1.0, 2.0, 0.1)
+    store.set_model_price("small-model", "t", None, 0.5, 1.0, 0.05)
+    store.set_model_price("free-model", "t", None, 0.0, 0.0, 0.0)
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await add_chain(c, "smart", "mock-model", [], ["errors"])
+        models = (await c.get("/v1/opencode-config", headers=stack.headers)).json()["provider"]["queuerouter"]["models"]
+        assert list(models) == ["smart", "small-model", "mock-model", "free-model", "other-model"]
+        assert models["small-model"]["name"].startswith("01|50.0|") and models["mock-model"]["name"].startswith("02|")
+        assert models["other-model"]["name"] == "04|$?|other-model|upstream"  # no price: after the priced
+        listed = (await c.get("/v1/models", headers=stack.headers)).json()["data"]
+        assert [m["id"] for m in listed] == ["small-model", "mock-model", "free-model", "other-model", "smart"]
+        page = (await c.get("/admin/models")).text
+        rows = page[page.index('id="ranking"') :]
+        at = [rows.index(f"upstream|{m}") for m in ("small-model", "mock-model", "free-model", "other-model")]
+        assert at == sorted(at)
 
 
 async def test_an_alias_named_like_a_model_keeps_its_score_to_itself(make_stack):

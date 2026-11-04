@@ -156,7 +156,7 @@ async def test_paused_upstream_gets_no_traffic_and_models_merge(make_stack, make
         await login(c, stack.url)
         await add_upstream(c, "second", second_url)
         models = (await c.get("/v1/models", headers=stack.headers)).json()
-        assert [m["id"] for m in models["data"]] == ["mock-model@upstream", "mock-model@second"]  # each its own
+        assert [m["id"] for m in models["data"]] == ["mock-model@second", "mock-model@upstream"]  # each its own
 
         original = stack.app.state.store.list_upstreams()[0]
         csrf = csrf_of((await c.get("/admin/upstreams")).text)

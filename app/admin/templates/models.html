@@ -141,7 +141,9 @@ value wins; a plan's context cap still applies on top).</p>
 <h2 id="ranking">Strength order in opencode</h2>
 <p class="muted small">With <a href="/admin/settings">Settings → opencode → Order models by strength</a> on, the
 opencode model list is numbered: aliases first (<span class="mono">00</span>), then the strongest models, one entry per provider,
-with their score (<span class="mono">01|58.3|$0.200|model|Provider</span>), then models without a score. A model's score is yours
+with their score (<span class="mono">01|58.3|$0.200|model|Provider</span>), then models without a score; equal scores, and
+models without one, cheapest first (the price shown), then by name. <span class="mono">/v1/models</span> lists them in this
+order too, with aliases that have no score last, for apps that keep the list's order. A model's score is yours
 when you set one here (same scale as the index; it can also move an alias into the list), else the
 {{ ranking.index }} index, looked up by the model's custom name when it has one{% if not ranking.enabled %} · <strong>ordering is off</strong>{% endif %}. Variants such as
 fine-tunes get their base model's score (marked "from …").</p>

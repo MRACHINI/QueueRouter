@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import httpx
 
@@ -193,13 +193,19 @@ class Scores:
         return entry["scores"][index], entry["name"], found[1]
 
 
-def numbered(ranked: list[tuple[str, float]], aliases: list[str], unranked: list[str]) -> list[tuple[str, str]]:
-    """[(model or alias, its prefix)] in opencode order: aliases ("00"), the ranked strongest first (01, 02…,
-    ties by name), then the rest."""
+def numbered(
+    ranked: list[tuple[str, float]],
+    aliases: list[str],
+    unranked: list[str],
+    tie: Callable[[str], tuple] = lambda n: (n,),
+) -> list[tuple[str, str]]:
+    """[(model or alias, its prefix)] in opencode order: aliases ("00", by name), the ranked strongest first (01,
+    02…), then the rest; equal scores, and the rest, in ``tie``'s order (cheapest, then by name)."""
     width = max(2, len(str(len(ranked) + len(unranked))))
-    order = [(a, "0" * width) for a in sorted(aliases)]
-    strongest = [model for model, _ in sorted(ranked, key=lambda x: (-x[1], x[0]))]
-    return order + [(model, str(i).zfill(width)) for i, model in enumerate([*strongest, *sorted(unranked)], 1)]
+    order = [(a, "0" * width) for a in sorted(aliases, key=lambda a: (a.casefold(), a))]
+    strongest = [model for model, _ in sorted(ranked, key=lambda x: (-x[1], tie(x[0])))]
+    rest = sorted(unranked, key=tie)
+    return order + [(model, str(i).zfill(width)) for i, model in enumerate([*strongest, *rest], 1)]
 
 
 def label(prefix: str, score: float | None, price: str, name: str) -> str:

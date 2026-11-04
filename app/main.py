@@ -20,7 +20,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -85,6 +85,7 @@ from .pricing import (
     MIX_DAYS,
     Price,
     PriceCatalog,
+    blended_price,
     price_text,
     resolve,
     token_cost,
@@ -1247,12 +1248,30 @@ def create_app(
         score_attempt[0] = time.time()
         return bool(cfg().rank_key) and await scores.refresh(app.state.client, cfg().rank_key)
 
+    def order_costs(names: Iterable[str], overrides: dict, mix: tuple[float, float, float]) -> dict[str, float]:
+        """What each model ("model@upstream") or alias costs per million tokens of the usual token mix, the price
+        opencode shows, for putting equal scores cheapest first: a plan nothing extra; unknown isn't there."""
+        targets = [t for t in snapshot.upstreams.values() if t.usable]
+        entries = {(t.id, e["id"]): e for t in targets for e in catalogs.models(t.id, raw=True)}
+        costs = {}
+        for name in names:
+            alias = snapshot.aliases.get(name)
+            if alias and alias.council != "off":  # several calls: no price, as in opencode
+                continue
+            model, pin = split_pin(alias.target_model if alias else name)
+            ids = pin or (alias.upstream_ids if alias else ())
+            on = [t for t in targets if (not ids or t.id in ids) and (t.id, model) in entries]
+            if price := model_price(model, [(t, entries[(t.id, model)]) for t in on], overrides):
+                costs[name] = 0.0 if price.source == "plan" else blended_price(price, mix)
+        return costs
+
     def strength_order(
-        names: list[str], manual: dict[tuple[int, str], float]
+        names: list[str], manual: dict[tuple[int, str], float], costs: Mapping[str, float] | None = None
     ) -> tuple[list[tuple[str, str]], dict[str, dict]]:
         """opencode order of models and aliases ([(name, number prefix)]) and why ({name: score, source}): your
-        own score first, else the index, looked up by the custom name (fine-tunes get their base model's); aliases
-        without one come first. ``names``: "model@upstream" and alias names."""
+        own score first, else the index, looked up by the custom name (fine-tunes get their base model's); equal
+        scores, and models without one, cheapest first (``costs``), then by name; aliases without one come first.
+        ``names``: "model@upstream" and alias names."""
         index, info, ranked, first, rest = cfg().rank_index, {}, [], [], []
         for name in names:
             bare, pin = split_pin(name)
@@ -1271,7 +1290,11 @@ def create_app(
             else:
                 info[name] = {"score": None, "source": "", "inherited": False}
                 rest.append(name)
-        return ranking.numbered(ranked, first, rest), info
+
+        def tie(name: str) -> tuple:
+            return (costs or {}).get(name, math.inf), snapshot.names.name(name).casefold(), name
+
+        return ranking.numbered(ranked, first, rest, tie), info
 
     def index_book() -> tuple[ranking.Scores, str]:
         """The strength index in use: Artificial Analysis's own (with a key), else its scores as OpenRouter's
@@ -1313,7 +1336,9 @@ def create_app(
     def ranking_table() -> dict:
         """The Models page's strength section: every model on a provider and every alias, its score and place."""
         keys = {f"{m}@{upstream}" for upstream, ids in models_by_upstream().items() for m in ids}
-        order, info = strength_order(sorted(keys | set(snapshot.aliases)), store.list_model_scores())
+        names = sorted(keys | set(snapshot.aliases))
+        costs = order_costs(names, store.list_model_prices(), mix_read["mix"])
+        order, info = strength_order(names, store.list_model_scores(), costs)
         rows = []
         for key, prefix in order:
             model, pin = split_pin(key)
@@ -1935,9 +1960,10 @@ def create_app(
 
         offered_by = {m: [t.upstream.name for t, _ in pairs] for m, pairs in listed.items()}  # shown in opencode
         manual_thinking = await asyncio.to_thread(store.list_model_thinking) if with_thinking else {}
-        show_prices = cfg().opencode_price
-        overrides = await asyncio.to_thread(store.list_model_prices) if with_thinking or show_prices else {}  # current
-        mix = await current_mix() if show_prices else DEFAULT_MIX
+        show_prices, rank = cfg().opencode_price, cfg().opencode_rank
+        priced = with_thinking or show_prices or rank  # equal scores go cheapest first
+        overrides = await asyncio.to_thread(store.list_model_prices) if priced else {}  # current
+        mix = await current_mix() if show_prices or rank else DEFAULT_MIX
         shown: dict[str, str] = {}  # the price in each entry's name
         allowed = client.policy.allowed_models
         result: dict[str, dict] = {}
@@ -1998,9 +2024,10 @@ def create_app(
             if with_thinking and reads_images(target, pairs):
                 result[alias.name]["input"] = ["text", "image"]
         order, why = [(name, "") for name in result], {}
-        if cfg().opencode_rank:
+        if rank:
             # opencode's desktop app sorts by name, so the order travels in the names; its terminal keeps this order
-            order, why = strength_order(list(result), await asyncio.to_thread(store.list_model_scores))
+            scored = await asyncio.to_thread(store.list_model_scores)
+            order, why = strength_order(list(result), scored, order_costs(result, overrides, mix))
         return {
             public.get(name, name): {
                 **result[name],
@@ -2148,7 +2175,8 @@ def create_app(
     async def model_entries(client: ClientKey) -> list[dict] | JSONResponse:
         """Every offered model on every usable upstream (lists cached; doesn't use a slot), under its ID for apps,
         plus the aliases, limited to the client's allowed models. A model with a custom name gets QueueRouter's own
-        entry, so nothing of the provider's shows; the others keep the provider's."""
+        entry, so nothing of the provider's shows; the others keep the provider's. In opencode's order, for apps that
+        keep the list's: strongest first, equal scores cheapest first, then by name; aliases without a score last."""
         targets = [t for t in snapshot.upstreams.values() if t.usable]
         stale = [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s)]
         if stale:
@@ -2157,6 +2185,7 @@ def create_app(
         allowed = set(client.policy.allowed_models or ())
         manual_thinking = await asyncio.to_thread(store.list_model_thinking)
         merged: dict[str, dict] = {}
+        inner: dict[str, str] = {}  # "model@upstream" or an alias's name -> the ID in the list
         everything: dict[str, dict] = {}  # hidden models too: an alias may point at one
         for target in targets:
             upstream = target.upstream.name
@@ -2173,12 +2202,18 @@ def create_app(
                     merged[public] = own_entry(public, entry, levels, reads_images(real, pair))
                 else:
                     merged[public] = {**entry, "id": public}
+                inner[f"{real}@{upstream}"] = public
         if not merged and all(catalogs.ids(t.id) is None for t in targets):
             return error_response("no upstream returned a model list", 502, "upstream_error")
         for alias in snapshot.aliases.values():
             if not allowed or {alias.name, alias.target_model} & allowed:
                 merged[alias.name] = alias_entry(alias, everything.get(split_pin(alias.target_model)[0] or ""))
-        return list(merged.values())
+                inner[alias.name] = alias.name
+        scored = await asyncio.to_thread(store.list_model_scores)
+        overrides = await asyncio.to_thread(store.list_model_prices)
+        order, why = strength_order(list(inner), scored, order_costs(inner, overrides, await current_mix()))
+        listed = [merged[inner[name]] for name, _ in order if why[name]["source"] != "alias"]
+        return listed + [merged[name] for name, _ in order if why[name]["source"] == "alias"]  # no score: last
 
     @app.get("/v1/models")
     async def models(request: Request):

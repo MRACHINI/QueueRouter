@@ -436,7 +436,10 @@ Choose your model again in opencode once after updating to 0.57, since entries o
 
 Turn on **Settings → opencode → Order models by strength** and the opencode model list is numbered: your aliases
 first (`00|$0.200|smart|Synthetic`), then the strongest models with their score
-(`01|58.3|$0.200|GLM-4.7|Synthetic`), then models without a score (`12|$0.200|model|Synthetic`). Scores come from
+(`01|58.3|$0.200|GLM-4.7|Synthetic`), then models without a score (`12|$0.200|model|Synthetic`). Equal scores, and
+models without one, go cheapest first (by the price in the name; a plan counts as free, an unknown price last), then
+by name. `/v1/models` lists models in the same order, whether or not this is on, with aliases that have no score of
+yours last, so apps that keep the list's order (most show it as it comes) show the strongest first. Scores come from
 the [Artificial Analysis](https://artificialanalysis.ai/) index (intelligence, coding or agentic): as published in
 OpenRouter's public model list with no setup, or the full index with a free API key in Settings (read once a day), or
 from your own score per provider's model on the **Models** page, which wins. The index is searched by the model's
@@ -554,7 +557,7 @@ Traefik address doesn't.
 | `/v1/files`, `/v1/batches` | OpenAI-compatible Batch API (JSONL in, output/error files out, `completion_window` 24h) |
 | `POST /v1/messages` | **Anthropic Messages API** (Claude SDKs, Claude Code), translated to chat completions; streaming, tools, images, system messages inside `messages`, structured output; `/v1/messages/count_tokens` estimates |
 | `POST /v1/responses` | **OpenAI Responses API** (Agents SDK, newer clients); streaming, function tools, structured output, `previous_response_id` (kept encrypted 7 days; `store: false` keeps nothing) |
-| `GET /v1/models` | all upstreams' models under their IDs for apps (see [Model names](#model-names)) + aliases, filtered to the client's allowed models |
+| `GET /v1/models` | all upstreams' models under their IDs for apps (see [Model names](#model-names)) + aliases, filtered to the client's allowed models, strongest first (see [Models in strength order](#models-in-strength-order)) |
 | `GET /v1/models/{id}` | one model (aliases and `model@upstream` too); other `/v1/` GETs are refused unless listed in Settings → "GET paths passed to the provider" |
 | `GET /v1/queue` | queue depth, your client's queued/active, estimated wait |
 | `GET /v1/opencode-config` | generated opencode provider config for your key |

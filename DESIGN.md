@@ -1606,6 +1606,17 @@ v0.57.1: an alias named like a model's real ID (`claude-opus-5-5`) kept its scor
   too, so a model with that real ID took the alias's score, and clearing the model's deleted the alias's. A model
   no longer falls back to a for-every-provider score of an alias's name, and clearing it leaves that one alone.
 
+v0.58.0: equal scores go cheapest first, and /v1/models is in strength order.
+- Seen live: four DeepSeek V4.1 Flash entries all scored 32.5 (a fine-tune inherits its base's) and came out by
+  real ID; an app reading /v1/models showed it as built: provider by provider, each in its own list's order, then
+  aliases by name in byte order (`Telegram` before `claude-…`).
+- Order (the user's): strongest first; equal scores, and models without one, cheapest first, then by name (the custom
+  name, case-insensitive), then the internal key. The price is the one opencode shows: the blended price for the
+  token mix of the last 30 days (`order_costs`), a plan 0, unknown last. Aliases without a score of yours: first
+  in opencode (`00`, now by name case-insensitive), last in /v1/models; with one they rank like models.
+- /v1/models always uses it (the ordering switch only decides opencode's numbered names); the Models page's
+  strength table shows the same order.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
