@@ -73,7 +73,7 @@ class Stats:
         retries: int,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
-        client: str = "default",
+        client: str | None = "default",  # None: counted in the totals only (a refused key has no client)
     ) -> None:
         self.outcomes[outcome] += 1
         self.retries += retries
@@ -85,6 +85,8 @@ class Stats:
             self.upstream_hist.observe(upstream_ms / 1000)
         self.prompt_tokens += prompt_tokens or 0
         self.completion_tokens += completion_tokens or 0
+        if client is None:
+            return
         per_client = self.clients.setdefault(client, ClientStats())
         per_client.outcomes[outcome] += 1
         per_client.prompt_tokens += prompt_tokens or 0

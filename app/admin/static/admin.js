@@ -792,6 +792,8 @@ function liveRequests(root) {
     const realId = d.target_model || d.requested_model || d.model;
     if (realId) line("Model ID", copy(realId));
     if (d.priority) line("Priority", d.priority);
+    if (d.path) line("Path", d.path);
+    if (d.ip) line("Address", copy(d.ip));
     if (d.user_agent) line("App", copy(d.user_agent));
     if (d.sent_user_agent) line("Sent as", copy(d.sent_user_agent));
     if (d.tags) line("Tags", d.tags.split(",").map((t) => `#${t}`).join(" "));

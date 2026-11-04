@@ -31,7 +31,7 @@ from .. import cron as cron_mod
 from .. import jobs as jobs_mod
 from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
-from ..auth import AuthGuard, client_ip
+from ..auth import AuthGuard, client_ip, how_long, ignored_proxy
 from ..backup import MAX_UPLOAD_BYTES, RestoreError, backup_path, list_backups, make_archive, stage_restore
 from ..catalog import make_filter, parse_filter
 from ..compaction import MODES as COMPACT_MODES
@@ -102,6 +102,7 @@ REQUEST_LIST_COLUMNS = (
 )
 REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "id",
+    "path",
     "model",
     "target_model",
     "upstream",
@@ -155,6 +156,8 @@ MESSAGES = {
     "content_missing": "No logged content for that request (logging was off, or it expired).",
     "2fa_reset": "Two-factor sign-in was reset for that user; they sign in with their password "
     "and can set it up again.",
+    "unblocked": "Unblocked: requests from that address are let in again.",
+    "not_blocked": "That address isn't blocked any more.",
 }
 
 MAX_USERNAME = 100
@@ -348,7 +351,11 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
     "price_catalog_enabled": ("Usage", "Official price catalog", "Download reference prices from models.dev daily."),
     "allow_no_auth": ("Security", "Allow without key", "Only when no clients exist. Private networks only!"),
     "max_body_mb": ("Security", "Max request body (MB)", ""),
-    "auth_fail_limit": ("Security", "Auth failures per minute", "Before an IP is temporarily blocked."),
+    "auth_fail_limit": (
+        "Security",
+        "Auth failures per minute",
+        "Before an IP is temporarily blocked. Blocked addresses are on the Clients page.",
+    ),
     "auth_block_s": ("Security", "Block duration (s)", ""),
 }
 
@@ -382,6 +389,7 @@ class AdminContext:
     names: Callable[[], ModelNames]
     model_label: Callable[..., str]
     public_base: Callable[[Request], str]
+    guard: AuthGuard  # API keys: the addresses blocked for failed ones
 
 
 class NeedLogin(Exception):
@@ -398,7 +406,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     templates.env.filters["request_label"] = lambda r: ctx.names().of_request(
         r["model"], r["target_model"], r["upstream"]
     )
-    login_guard = AuthGuard(limit_per_minute=5, block_s=300)
+    login_guard = AuthGuard(limit_per_minute=5, block_s=300, what="admin sign-in")
     pending_2fa: dict[str, tuple[int, float, str]] = {}  # ticket -> (user id, expires, next)
     pending_setup: dict[str, tuple[str, float]] = {}  # session -> (new TOTP secret, expires)
     setup = {"token": None}
@@ -918,10 +926,23 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def clients(request: Request):
         session = require(request, "admin")
         live = ctx.live_state().get("clients", {})
+        blocks = [
+            {
+                "ip": ip,
+                "left": how_long(left),
+                "apps": block.apps,
+                "refused": block.refused,
+                "proxy": ignored_proxy(ip),
+            }
+            for ip, left, block in ctx.guard.blocks()
+        ]
         return page(
             request,
             "clients.html",
             session,
+            blocks=blocks,
+            guard=ctx.guard,
+            blocked_for=how_long(ctx.guard.block_s),
             clients=store.list_clients(),
             priorities=PRIORITIES,
             live=live,
@@ -1110,6 +1131,16 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             media_type="application/json",
             headers={"Content-Disposition": 'attachment; filename="opencode.json"'},
         )
+
+    @app.post("/admin/unblock")  # not under /admin/clients/: /admin/clients/{client_id} would take it
+    async def clients_unblock(request: Request):
+        """Lets an address blocked for failed keys in again (its apps get in at once once they have a working key)."""
+        session, form = await require_post(request, "admin")
+        ip = str(form.get("ip", ""))
+        if not ctx.guard.unblock(ip):
+            return back("/admin/clients", "not_blocked")
+        store.audit(session.user.username, "client.unblock", ip)
+        return back("/admin/clients", "unblocked")
 
     @app.post("/admin/clients/{client_id}/regenerate")
     async def clients_regenerate(client_id: int, request: Request):
@@ -1459,6 +1490,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             return JSONResponse({"error": {"message": "that request is gone", "code": 404}}, status_code=404)
         details = {key: row[key] for key in REQUEST_DETAILS}
         details["client_headers"] = _from_json(row["client_headers"])
+        if session.user.can("admin"):  # where it came from: for admins, like the blocked addresses
+            details["ip"] = row["ip"]
         may_read = session.user.can("admin") and session.user.can_view_content  # as the content page requires
         has_content = may_read and request_id in await asyncio.to_thread(store.content_ids, [request_id])
         return JSONResponse({**details, "has_content": has_content})

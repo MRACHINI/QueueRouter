@@ -49,6 +49,8 @@ class Snapshot:
     aliases: dict[str, Alias] = field(default_factory=dict)  # enabled aliases by name
     any_clients: bool = False  # any client at all, disabled and expired ones too ("allow without key" is off then)
     names: ModelNames = field(default_factory=ModelNames)
+    # key_hash -> (name, "disabled" / "expired"): named on the Requests page when such a key is refused
+    inactive_clients: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     @property
     def configured(self) -> bool:
@@ -73,9 +75,23 @@ def load_snapshot(store: Store) -> Snapshot:
     message = store.get_meta("maintenance_message") or ""
     aliases = {a.name: a for a in store.list_aliases() if a.enabled}
     mode = mode if mode in MODES else "running"
+    inactive = {
+        c.key_hash: (c.name, "disabled" if not c.enabled else "expired")
+        for c in every_client
+        if not c.enabled or c.expired
+    }
     names = ModelNames({t.id: t.upstream.name for t in upstreams.values()}, store.list_model_names())
     return Snapshot(
-        settings, clients, pools, upstreams, mode, message, aliases, any_clients=bool(every_client), names=names
+        settings,
+        clients,
+        pools,
+        upstreams,
+        mode,
+        message,
+        aliases,
+        any_clients=bool(every_client),
+        names=names,
+        inactive_clients=inactive,
     )
 
 

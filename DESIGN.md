@@ -1637,6 +1637,24 @@ v0.59.1: names work before a provider's model list is in.
   asks the provider again (same address and key; another fetch after an edit).
 - A model list that starts failing is logged once (`model_list_failed`, with the provider's reason, its key masked),
   and its return (`model_list_back`): before, the reason showed on the Upstreams page only while it lasted.
+v0.60.0: failed keys and blocked addresses show.
+- Seen live: the Claude app's connection test got 429 on /v1/models with a key made a minute before. The address was
+  blocked (10 failed keys in a minute, 5 minutes); the block is checked before the key, and nothing said so: no
+  log line, nothing on the Requests page, no way to lift it but a restart. Likely cause: apps on the same machine still
+  sending a key that New key had replaced.
+- A refused key goes on the Requests page (`refused`, 401, no client) with the app, the path, the address (admins
+  only) and why: no key, a key nobody has (mistyped or replaced), or a disabled or expired client's key, named
+  (`Snapshot.inactive_clients`). Never the key. The failure that starts a block says so. Bounded: an address gets at
+  most the limit of rows before it's blocked, and the 429s during a block aren't rows (they're counted).
+- `AuthGuard` keeps each block: until, since, the User-Agents that failed or were turned away (5 at most) and how
+  many were turned away. It logs `auth_blocked` when a block starts (the admin sign-in guard too, as
+  `"guard": "admin sign-in"`). The Clients page lists blocks with **Unblock** (`POST /admin/unblock`, audited
+  `client.unblock`; not under /admin/clients/, which `{client_id}` would take). When the blocked address is one whose
+  X-Forwarded-For wasn't believed, the page says it's the proxy and to set TRUSTED_PROXIES: then one app's wrong key
+  blocks every app.
+- Requests without a client count in the totals only (`Stats.record(client=None)`): no "default" row on the dashboard.
+- The block itself is unchanged: a valid key from a blocked address is still refused, or the block would tell a
+  guesser which key is right.
 
 ### Later (agreed, not scheduled)
 

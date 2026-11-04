@@ -6,6 +6,41 @@
 one again (each view is in the audit log). Renaming a client keeps its key and moves its history with it. Changes
 apply immediately.</p>
 
+{% if blocks %}
+<section class="card" id="blocked">
+  <h2>Blocked for failed keys</h2>
+  <p class="small muted">{{ guard.limit }} failed keys in a minute from one address block it for {{ blocked_for }}
+  (Settings → Security): every request from there gets 429, whatever key it sends. Each failed key is on the
+  <a href="/admin/requests?outcome=refused">Requests page</a> with the app and why: often an app still sending a key
+  that <em>New key</em> replaced.</p>
+  <div class="table-wrap">
+  <table class="cards">
+    <thead><tr><th>Address</th><th>Left</th><th>Apps seen</th><th>Turned away</th><th></th></tr></thead>
+    <tbody>
+    {% for b in blocks %}
+    <tr>
+      <td data-label="Address"><code>{{ b.ip }}</code>
+        {% if b.proxy %}<p class="notice err small">This is your reverse proxy's address: QueueRouter doesn't believe
+        the client addresses it passes on, so every app looks like it and one wrong key blocks them all. Add its
+        network to <code>TRUSTED_PROXIES</code>.</p>{% endif %}</td>
+      <td data-label="Left">{{ b.left }}</td>
+      <td data-label="Apps seen">{% for app in b.apps %}<div class="small wrap-any">{{ app }}</div>{% else %}<span class="muted">—</span>{% endfor %}</td>
+      <td data-label="Turned away">{{ b.refused }}</td>
+      <td>
+        <form method="post" action="/admin/unblock">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="ip" value="{{ b.ip }}">
+          <button type="submit" class="secondary">Unblock</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+
 <details class="card">
   <summary><strong>Connect opencode</strong> (one command: plugin and key)</summary>
   <p class="small muted" id="plugin-for"><em>Show</em> on a client below fills in its key.</p>

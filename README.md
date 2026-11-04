@@ -590,6 +590,14 @@ draining/maintenance (503), body too large (413), and prompts that clearly excee
 context (400 `context_length_exceeded`). An answer size the model can't give (`max_tokens`) is lowered, not refused.
 The API adapters also refuse what they can't translate (400). All of these refusals show on the Requests page.
 
+A refused key shows there too, with the app (User-Agent), the address and why: no key, a key nobody has
+(mistyped, or replaced by **New key**), or the key of a disabled or expired client. The key itself is never
+recorded. Too many failed keys from one address (10 a minute, under Settings → Security) block it for a while
+(5 minutes): every request from there gets 429 `auth_blocked`, even with a good key, so one app still sending a
+replaced key can lock out the other apps on the same machine. The Clients page lists blocked addresses, with the
+apps seen and how many requests were turned away, and **Unblock** lets one in again at once. The log says
+`auth_blocked` when a block starts.
+
 Responses also carry `X-QueueRouter-Model` (the model that actually answered, e.g. after a
 fallback); streams announce a fallback with an SSE comment.
 

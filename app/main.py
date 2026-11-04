@@ -49,7 +49,7 @@ from . import tools as tools_mod
 from .admin import AdminContext, mount_admin
 from .agents import Run, Runs, parse_tags, request_fingerprint, run_key
 from .alerts import Alerts
-from .auth import AuthGuard, client_ip, find_client, ip_in, presented_key
+from .auth import AuthGuard, client_ip, find_client, how_long, ip_in, presented_key
 from .backup import MAX_UPLOAD_BYTES, auto_backup
 from .bodylimit import BodyLimit
 from .catalog import Catalogs, fetch_models, parse_filter
@@ -97,7 +97,7 @@ from .sessions import session_key
 from .slots import LANE_NAMES, LANES, Candidate, SlotQueue
 from .state import MODES, Target, load_snapshot, open_store
 from .stats import Stats
-from .store import DataDirError
+from .store import DataDirError, hash_key
 from .upstream import (
     BUSY_STATUS,
     FAILURE_STATUS,
@@ -238,7 +238,7 @@ class RequestLog:
             f["retries"],
             f["prompt_tokens"],
             f["completion_tokens"],
-            client=f["client"] or "default",
+            client=f["client"],  # None: no client (a refused key)
         )
         stats.learn_ratio(f["target_model"] or f["model"], f.get("estimate"), f["prompt_tokens"])
         if f.get("ttft_ms") is not None and f["outcome"] == "done":
@@ -830,14 +830,16 @@ def create_app(
     def authenticate(request: Request) -> tuple[ClientKey | None, JSONResponse | None]:
         """The calling client, or an error response to return instead."""
         ip = client_ip(request, bootstrap.trusted_proxies)
+        user_agent = request.headers.get("user-agent", "")
         if remaining := guard.is_blocked(ip):
+            guard.refused(ip, user_agent)
             retry_after = {"Retry-After": str(int(remaining) + 1)}
             return None, error_response("too many failed authentication attempts", 429, "auth_blocked", **retry_after)
-        client = find_client(presented_key(request), snapshot.clients, cfg().allow_no_auth, snapshot.any_clients)
+        key = presented_key(request)
+        client = find_client(key, snapshot.clients, cfg().allow_no_auth, snapshot.any_clients)
         if client is None:
-            guard.fail(ip)
+            key_refused(request, ip, key, guard.fail(ip, user_agent))
             return None, error_response("invalid or missing API key", 401, "invalid_api_key")
-        user_agent = request.headers.get("user-agent", "")
         if not client.policy.allows_app(user_agent):
             # Recorded with the User-Agent that was used; the caller isn't told which one is expected.
             rlog = RequestLog(f"qr-{uuid.uuid4().hex[:12]}", request.method, request.url.path, ip)
@@ -849,6 +851,27 @@ def create_app(
             rlog.finish(stats, outcome="refused", status=403, error="app not allowed for this key (see User-Agent)")
             return None, error_response("this key can't be used from this app", 403, "app_not_allowed")
         return client, None
+
+    def key_refused(request: Request, ip: str, key: str | None, blocked: bool) -> None:
+        """A key that didn't get in, on the Requests page with the app and why (never the key itself): a key
+        replaced by New key that some app still sends shows which app. The caller is told only 401."""
+        hashed = hash_key(key) if key else ""
+        if not key:
+            reason = "no key (Authorization: Bearer, or x-api-key)"
+        elif inactive := snapshot.inactive_clients.get(hashed):
+            reason = f"the key of {inactive[0]}, which is {inactive[1]}"
+        elif known := snapshot.clients.get(hashed):
+            reason = f"the key of {known.name}, which is expired"  # since the configuration was loaded
+        else:
+            reason = "unknown key: mistyped, or replaced by New key"
+        if blocked:
+            reason += f"; {guard.limit} in a minute from this address: it's blocked for {how_long(guard.block_s)}"
+        rlog = RequestLog(f"qr-{uuid.uuid4().hex[:12]}", request.method, request.url.path, ip)
+        rlog.fields.update(
+            user_agent=request.headers.get("user-agent", "")[:300] or None,
+            client_headers=client_identity(request.headers, None),
+        )
+        rlog.finish(stats, outcome="refused", status=401, error=reason)
 
     def not_configured() -> JSONResponse | None:
         if not snapshot.configured:
@@ -1454,6 +1477,7 @@ def create_app(
             lambda: snapshot.names,
             model_label,
             lambda request: public_base(request),
+            guard,
         ),
     )
 
@@ -2139,10 +2163,12 @@ def create_app(
         if not token:
             return error_response("not found", 404, "not_found")
         ip = client_ip(request, bootstrap.trusted_proxies)
+        user_agent = request.headers.get("user-agent", "")
         if guard.is_blocked(ip):
+            guard.refused(ip, user_agent)
             return error_response("too many failed attempts", 429, "blocked")
         if not hmac.compare_digest(presented.encode(), token.encode()):
-            guard.fail(ip)
+            guard.fail(ip, user_agent)
             return error_response("invalid metrics token", 401, "invalid_api_key")
         jobs_now = await asyncio.to_thread(store.jobs_by_status)
         return Response(

@@ -147,7 +147,7 @@ async def test_rows_cost_and_details(make_stack):
 
         details = await c.get(f"/admin/api/requests/{row['id']}")
         assert details.status_code == 200 and details.json()["client_headers"] == {}
-        assert "ip" not in details.json() and "timeline" not in details.json()
+        assert details.json()["ip"] == "127.0.0.1" and "timeline" not in details.json()  # the address: admins
         assert (await c.get("/admin/api/requests/nope")).status_code == 404
 
 

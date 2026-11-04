@@ -5,9 +5,11 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import math
 import time
 from collections import deque
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 
 from fastapi import Request
 
@@ -93,32 +95,98 @@ def find_client(
     return client
 
 
+def ignored_proxy(ip: str) -> bool:
+    """``ip`` sent X-Forwarded-For that wasn't believed: a reverse proxy left out of TRUSTED_PROXIES."""
+    return ip in _warned
+
+
+def how_long(seconds: float) -> str:
+    """A block's length for people: "5 min", "40 s"."""
+    return f"{math.ceil(seconds / 60)} min" if seconds >= 60 else f"{math.ceil(seconds)} s"
+
+
+MAX_APPS = 5  # User-Agents kept per block
+
+
+@dataclass
+class Block:
+    """An address turned away after too many failed attempts, and what it tried."""
+
+    until: float  # monotonic
+    since: float  # wall clock
+    apps: list[str] = field(default_factory=list)  # the User-Agents that failed or were turned away (a few)
+    refused: int = 0  # requests turned away since
+
+
+def _note_app(apps: list[str], app: str) -> None:
+    app = app[:120]
+    if app and app not in apps and len(apps) < MAX_APPS:
+        apps.append(app)
+
+
 class AuthGuard:
     """Blocks an IP for a while after too many failed authentication attempts."""
 
-    def __init__(self, limit_per_minute: int, block_s: float) -> None:
+    def __init__(self, limit_per_minute: int, block_s: float, what: str = "api") -> None:
         self.limit = limit_per_minute
         self.block_s = block_s
-        self._failures: dict[str, deque[float]] = {}
-        self._blocked_until: dict[str, float] = {}
+        self.what = what  # in the log line: which door ("api", "admin sign-in")
+        self._failures: dict[str, deque[tuple[float, str]]] = {}
+        self._blocks: dict[str, Block] = {}
 
     def is_blocked(self, ip: str) -> float:
         """Seconds remaining on a block, or 0."""
-        until = self._blocked_until.get(ip, 0)
-        remaining = until - time.monotonic()
+        block = self._blocks.get(ip)
+        remaining = block.until - time.monotonic() if block else 0
         if remaining <= 0:
-            self._blocked_until.pop(ip, None)
+            self._blocks.pop(ip, None)
             return 0
         return remaining
 
-    def fail(self, ip: str) -> None:
+    def refused(self, ip: str, app: str = "") -> None:
+        """A request the block turned away."""
+        if block := self._blocks.get(ip):
+            block.refused += 1
+            _note_app(block.apps, app)
+
+    def fail(self, ip: str, app: str = "") -> bool:
+        """A failed attempt (from the app with this User-Agent); True when it starts a block."""
         now = time.monotonic()
         window = self._failures.setdefault(ip, deque())
-        window.append(now)
-        while window and window[0] < now - 60:
+        window.append((now, app))
+        while window and window[0][0] < now - 60:
             window.popleft()
-        if len(window) >= self.limit:
-            self._blocked_until[ip] = now + self.block_s
+        started = len(window) >= self.limit
+        if started:
+            apps: list[str] = []
+            for _, seen in window:
+                _note_app(apps, seen)
+            self._blocks[ip] = Block(now + self.block_s, time.time(), apps)
             window.clear()
+            log.warning(
+                json.dumps(
+                    {
+                        "event": "auth_blocked",
+                        "guard": self.what,
+                        "ip": ip,
+                        "failures": self.limit,
+                        "block_s": self.block_s,
+                        "apps": apps,
+                    }
+                )
+            )
         if len(self._failures) > 10_000:  # bound memory under a spray of source IPs
-            self._failures = {k: v for k, v in self._failures.items() if v and v[-1] > now - 60}
+            self._failures = {k: v for k, v in self._failures.items() if v and v[-1][0] > now - 60}
+            self._blocks = {k: b for k, b in self._blocks.items() if b.until > now}
+        return started
+
+    def unblock(self, ip: str) -> bool:
+        """Lifts a block, and forgets the failures counted towards the next one."""
+        self._failures.pop(ip, None)
+        return self._blocks.pop(ip, None) is not None
+
+    def blocks(self) -> list[tuple[str, float, Block]]:
+        """(address, seconds left, block) for each block still on, the newest first."""
+        now = time.monotonic()
+        self._blocks = {ip: b for ip, b in self._blocks.items() if b.until > now}
+        return sorted(((ip, b.until - now, b) for ip, b in self._blocks.items()), key=lambda t: -t[2].since)
