@@ -1,15 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{% if new %}New alias{% else %}Alias {{ a.name }}{% endif %}{% endblock %}
-{% macro picker(name, values, kind, placeholder, ordered=False) -%}
-<div class="picker" data-picker="{{ kind }}"{% if ordered %} data-ordered{% endif %}>
-  <input type="hidden" name="{{ name }}" value="{{ values | join(', ') if values is not string else values }}">
-  <div class="picker-box">
-    <span class="picker-chips"></span>
-    <input type="search" class="picker-search" placeholder="{{ placeholder }}" autocomplete="off" aria-label="{{ placeholder }}">
-  </div>
-  <ul class="picker-menu" role="listbox" hidden></ul>
-</div>
-{%- endmacro %}
+{% from "picker.html" import picker %}
 {% block content %}
 <p class="small"><a href="/admin/models">← Models &amp; aliases</a></p>
 <h1>{% if new %}New alias{% else %}Alias <code>{{ a.name }}</code>{% endif %}</h1>

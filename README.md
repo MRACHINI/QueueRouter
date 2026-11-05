@@ -87,8 +87,11 @@ from a **web admin UI**.
 - **Choose which models each upstream offers** (Upstreams > "N models"): untick models to hide them from
   opencode, `/v1/models`, the Models page and the Playground; aliases can still use them. A switch decides
   whether models the provider adds later appear automatically.
-- **Per-client policies**: allowed models, requests/tokens per minute and per day (delay or
-  reject), max queued / active, queue and total timeouts, retry budget.
+- **Groups (plans) of clients**: a group sets which models and aliases its clients may use (or every model, new
+  ones included) and their limits; each client is in one, chosen when it's made, and a change reaches all of
+  them at once. A limit set on a client itself wins over its group's (Clients page > Groups).
+- **Per-client policies**: requests/tokens per minute and per day (delay or reject), max queued / active, queue
+  and total timeouts, retry budget, allowed apps, tags; blank takes the group's.
 - **Operating modes**: running, paused, draining (ends by itself on the next start), maintenance.
 - **Updates clients don't notice**: running requests finish and new ones wait at a small gate in front of
   QueueRouter while it restarts (see [Update](#update)).
@@ -423,7 +426,7 @@ and output sizes, its thinking levels (`reasoning.supported_efforts`) and whethe
 (`architecture.input_modalities`), and nothing else of the provider's. A model without one keeps the provider's
 entry, under its ID for apps. Aliases show their target's context size, not the target.
 
-The real ID is what's stored and sent to the provider, so aliases, a client's allowed models and saved model
+The real ID is what's stored and sent to the provider, so aliases, a group's models and saved model
 choices keep working, and it's one click away on the Requests page. Apps may still send it. On one provider, a real
 ID wins over a name, and of two models given the same name the first by real ID keeps it; one named like an alias
 keeps its real ID too. The Models page points these out.
@@ -562,7 +565,7 @@ Traefik address doesn't.
 | `/v1/files`, `/v1/batches` | OpenAI-compatible Batch API (JSONL in, output/error files out, `completion_window` 24h) |
 | `POST /v1/messages` | **Anthropic Messages API** (Claude SDKs, Claude Code), translated to chat completions; streaming, tools, images, system messages inside `messages`, structured output; `/v1/messages/count_tokens` estimates |
 | `POST /v1/responses` | **OpenAI Responses API** (Agents SDK, newer clients); streaming, function tools, structured output, `previous_response_id` (kept encrypted 7 days; `store: false` keeps nothing) |
-| `GET /v1/models` | all upstreams' models under their IDs for apps (see [Model names](#model-names)) + aliases, filtered to the client's allowed models, strongest first (see [Models in strength order](#models-in-strength-order)) |
+| `GET /v1/models` | all upstreams' models under their IDs for apps (see [Model names](#model-names)) + aliases, filtered to the models of the client's group, strongest first (see [Models in strength order](#models-in-strength-order)) |
 | `GET /v1/models/{id}` | one model (aliases and `model@upstream` too); other `/v1/` GETs are refused unless listed in Settings → "GET paths passed to the provider" |
 | `GET /v1/queue` | queue depth, your client's queued/active, estimated wait |
 | `GET /v1/opencode-config` | generated opencode provider config for your key |

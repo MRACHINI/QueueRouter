@@ -49,11 +49,31 @@ def chat(tag, **extra):
 
 
 async def set_policy(c, stack, **values):
-    client = next(x for x in stack.app.state.store.list_clients() if x.name == "client1")
+    """client1's limits; ``allowed_models`` puts it in a group with those models, as the admin would."""
+    store = stack.app.state.store
+    client = next(x for x in store.list_clients() if x.name == "client1")
     csrf = csrf_of((await c.get("/admin/clients")).text)
+    if "allowed_models" in values:
+        group_id = await set_group(c, stack, "client1-models", models=values.pop("allowed_models"))
+        form = {"csrf": csrf, "name": client.name, "priority": client.priority, "enabled": "on", "group_id": group_id}
+        r = await c.post(f"/admin/clients/{client.id}", data=form)
+        assert "m=saved" in r.headers["location"], r.headers["location"]
     form = {"csrf": csrf, "on_limit": "delay", **{k: str(v) for k, v in values.items()}}
     r = await c.post(f"/admin/clients/{client.id}/policy", data=form)
     assert "m=saved" in r.headers["location"], r.headers["location"]
+
+
+async def set_group(c, stack, name, models="", **values) -> int:
+    """Makes or changes the group ``name`` through its editor (no models = every model); returns its id."""
+    store = stack.app.state.store
+    existing = next((g for g in store.list_groups() if g.name == name), None)
+    csrf = csrf_of((await c.get("/admin/clients")).text)
+    form = {"csrf": csrf, "name": name, "models": models, **{k: str(v) for k, v in values.items()}}
+    if not models:
+        form["every_model"] = "on"
+    r = await c.post(f"/admin/groups/{existing.id}" if existing else "/admin/groups", data=form)
+    assert r.status_code == 303 and ("m=saved" in r.headers["location"] or "m=created" in r.headers["location"])
+    return next(g.id for g in store.list_groups() if g.name == name)
 
 
 async def set_mode(c, mode, message=""):

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}{% if new %}New group{% else %}Group {{ g.name }}{% endif %}{% endblock %}
+{% from "picker.html" import picker %}
+{% from "limits.html" import limit_fields %}
+{% block content %}
+<p class="small"><a href="/admin/clients#groups">← Clients</a></p>
+<h1>{% if new %}New group{% else %}Group {{ g.name }}{% endif %}</h1>
+<p class="muted small">Every client is in one group. The group sets its clients' models and their limits; a limit
+set on a client itself wins over the group's. Changes apply to all its clients at once (opencode picks up a changed
+model list within a minute).</p>
+<script type="application/json" id="model-choices">{{ choices | tojson }}</script>
+
+<form method="post" action="{% if new %}/admin/groups{% else %}/admin/groups/{{ g.id }}{% endif %}" class="alias-editor">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+
+  <fieldset class="card">
+    <legend>Group</legend>
+    <label>Name <input name="name" value="{{ g.name }}" required maxlength="64" placeholder="e.g. Coding" autocomplete="off"></label>
+    <label>Notes <input name="notes" value="{{ g.notes }}" maxlength="500" placeholder="optional"></label>
+    {% if not new %}<p class="small muted">{% if members %}Clients: {{ members | join(", ") }}{% else %}No clients in this group.{% endif %}</p>{% endif %}
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>Models</legend>
+    <label class="check"><input type="checkbox" name="every_model" data-every-model {% if every %}checked{% endif %}> Every model and alias, new ones included</label>
+    <div data-model-list>
+      <label>Only these models and aliases {{ picker("models", p.allowed_models, "multi", "Add a model or alias…") }}</label>
+      <small class="muted">An alias allows the alias; a model also allows the aliases that send to it. When several
+      providers offer a model, <code>model@provider</code> allows it on that provider only. A model no provider lists
+      now stays in the list and works again when it's back.</small>
+    </div>
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>Limits</legend>
+    <div class="grid tight">{{ limit_fields(p) }}</div>
+    <p class="small muted">Blank = no limit (or the global default). Monthly quotas count per client: each client
+    gets these numbers. A <em>run</em> is one agent task: <code>X-Run-Id</code> if the app sends it, otherwise the
+    conversation.</p>
+  </fieldset>
+
+  <div class="row">
+    <button type="submit">{% if new %}Add group{% else %}Save{% endif %}</button>
+    <a href="/admin/clients#groups">Cancel</a>
+  </div>
+</form>
+
+{% if not new %}
+<form method="post" action="/admin/groups/{{ g.id }}/delete" class="row" data-confirm="Delete group {{ g.name }}?">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" class="danger"{% if members %} disabled title="Move its clients to another group first"{% endif %}>Delete group</button>
+</form>
+{% endif %}
+{% endblock %}

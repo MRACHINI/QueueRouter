@@ -1,0 +1,43 @@
+{#- The limits a client or a group sets (config.GROUP_LIMITS). For a client, `g` is its group's policy: a blank field
+    takes the group's value, shown greyed in it; for a group, `g` is none. -#}
+
+{% macro number(p, g, name, label, minimum, step=none, off="") -%}
+{%- set theirs = g[name] if g is not none else none -%}
+<label>{{ label }} <input type="number" name="{{ name }}" min="{{ minimum }}"{% if step %} step="{{ step }}"{% endif %} value="{{ p[name] if p[name] is not none else '' }}"{% if theirs is not none %} placeholder="group: {{ theirs }}"{% elif off %} placeholder="{{ off }}"{% endif %}></label>
+{%- endmacro %}
+
+{% macro choice(p, g, name, label, options) -%}
+<label>{{ label }}
+  <select name="{{ name }}">
+    {%- if g is not none %}
+    <option value=""{% if not p[name] %} selected{% endif %}>as the group: {{ options[g[name] or (options | first)] }}</option>
+    {%- endif %}
+    {%- for value, text in options.items() %}
+    <option value="{{ value }}"{% if p[name] == value or (g is none and not p[name] and loop.first) %} selected{% endif %}>{{ text }}</option>
+    {%- endfor %}
+  </select></label>
+{%- endmacro %}
+
+{% macro limit_fields(p, g=none) -%}
+{{ number(p, g, "rpm", "Requests / min", 1) }}
+{{ number(p, g, "rpd", "Requests / day", 1) }}
+{{ number(p, g, "tpm", "Tokens / min", 1) }}
+{{ number(p, g, "tpd", "Tokens / day", 1) }}
+{{ choice(p, g, "on_limit", "At the limit", {"delay": "delay (wait in queue)", "reject": "reject (429)"}) }}
+{{ number(p, g, "max_queued", "Max queued", 0) }}
+{{ number(p, g, "max_active", "Max active", 1) }}
+{{ number(p, g, "queue_timeout_s", "Queue timeout (s)", 1, "any") }}
+{{ number(p, g, "total_timeout_s", "Total timeout (s)", 1, "any") }}
+{{ number(p, g, "max_retries", "Max retries", -1) }}
+{{ number(p, g, "run_max_tokens", "Run: max tokens", 1) }}
+{{ number(p, g, "run_max_requests", "Run: max requests", 1) }}
+{{ number(p, g, "run_max_minutes", "Run: max minutes", 0.1, "any") }}
+{{ number(p, g, "month_requests", "Month: max requests", 1) }}
+{{ number(p, g, "month_tokens", "Month: max tokens", 1) }}
+{{ number(p, g, "month_cost_usd", "Month: max cost (USD)", 0.01, "any") }}
+{{ number(p, g, "loop_threshold", "Loop: same request ×N", 2, off="off") }}
+{{ choice(p, g, "loop_action", "On a loop", {"warn": "log a warning", "reject": "reject (429)"}) }}
+{%- set example = '{"defaults": {"temperature": 0.6}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}' %}
+<label class="span-all">Parameter rules <small class="muted">JSON: defaults / overrides / clamps / strip — applied after the alias's rules{% if g is not none %}; blank = the group's{% endif %}</small>
+  <textarea name="params" rows="2" class="rules" placeholder="{{ 'group: ' ~ g.params if g is not none and g.params else example }}">{{ p.params }}</textarea></label>
+{%- endmacro %}

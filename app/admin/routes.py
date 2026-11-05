@@ -35,7 +35,16 @@ from ..auth import AuthGuard, client_ip, how_long, ignored_proxy
 from ..backup import MAX_UPLOAD_BYTES, RestoreError, backup_path, list_backups, make_archive, stage_restore
 from ..catalog import make_filter, parse_filter
 from ..compaction import MODES as COMPACT_MODES
-from ..config import ON_LIMIT, PRIORITIES, SECRET_TUNABLES, TUNABLES, Bootstrap, ClientPolicy, Settings
+from ..config import (
+    GROUP_LIMITS,
+    ON_LIMIT,
+    PRIORITIES,
+    SECRET_TUNABLES,
+    TUNABLES,
+    Bootstrap,
+    ClientPolicy,
+    Settings,
+)
 from ..council import MAX_MEMBERS as COUNCIL_MAX
 from ..council import MIN_MEMBERS as COUNCIL_MIN
 from ..council import MODES as COUNCIL_MODES
@@ -158,6 +167,9 @@ MESSAGES = {
     "and can set it up again.",
     "unblocked": "Unblocked: requests from that address are let in again.",
     "not_blocked": "That address isn't blocked any more.",
+    "group_in_use": "Clients are still in that group; move them to another group first.",
+    "group_last": "Every client is in a group, so the last group can't be deleted.",
+    "group_models": "Pick at least one model or alias, or tick Every model.",
 }
 
 MAX_USERNAME = 100
@@ -926,6 +938,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def clients(request: Request):
         session = require(request, "admin")
         live = ctx.live_state().get("clients", {})
+        every_client = store.list_clients()
+        groups = store.list_groups()
         blocks = [
             {
                 "ip": ip,
@@ -943,11 +957,15 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             blocks=blocks,
             guard=ctx.guard,
             blocked_for=how_long(ctx.guard.block_s),
-            clients=store.list_clients(),
+            clients=every_client,
+            groups=groups,
+            group_of={g.id: g for g in groups},
+            members={g.id: [c.name for c in every_client if c.group_id == g.id] for g in groups},
+            own_limits=_own_limits,
             priorities=PRIORITIES,
             live=live,
             plugin=plugin_install_commands(ctx.public_base(request)),
-            month={c.name: ctx.month_usage(c.name) for c in store.list_clients()},
+            month={c.name: ctx.month_usage(c.name) for c in every_client},
             now=time.time(),
             content_days=store.get_tunables().get("content_log_days", Settings().content_log_days),
             content_kb=store.get_tunables().get("content_log_max_kb", Settings().content_log_max_kb),
@@ -972,9 +990,12 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 priority=priority,
                 notes=str(form.get("notes", ""))[:500],
                 expires_at=expires_at,
+                group_id=_group_field(form, store),
             )
         except sqlite3.IntegrityError:
             return back("/admin/clients", error="exists")
+        except ValueError:
+            return back("/admin/clients", error="invalid")
         ctx.reload()
         return show_new_key(request, session, name, key, regenerated=False)
 
@@ -993,6 +1014,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 if not CLIENT_NAME.fullmatch(name) or name == "anonymous":
                     raise ValueError("name")
                 fields["name"] = name
+            if form.get("group_id"):
+                fields["group_id"] = _group_field(form, store)
             store.update_client(client_id, session.user.username, **fields)
         except sqlite3.IntegrityError:
             return back("/admin/clients", error="exists")
@@ -1022,36 +1045,11 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             current = next((c.policy for c in store.list_clients() if c.id == client_id), None)
             if current is None:
                 raise KeyError(client_id)
-            models = tuple(
-                m.strip() for m in str(form.get("allowed_models", "")).replace("\n", ",").split(",") if m.strip()
-            )
-            on_limit = str(form.get("on_limit", "delay"))
-            if on_limit not in ON_LIMIT:
-                raise ValueError("on_limit")
-            policy = ClientPolicy(
-                allowed_models=models,
+            policy = ClientPolicy(  # its models come from its group
                 user_agents=_user_agents(form),
                 **_ua_fields(form),
-                rpm=_opt(form, "rpm", int, 1),
-                rpd=_opt(form, "rpd", int, 1),
-                tpm=_opt(form, "tpm", int, 1),
-                tpd=_opt(form, "tpd", int, 1),
-                on_limit=on_limit,
-                max_queued=_opt(form, "max_queued", int, 0),
-                max_active=_opt(form, "max_active", int, 1),
-                queue_timeout_s=_opt(form, "queue_timeout_s", float, 1),
-                total_timeout_s=_opt(form, "total_timeout_s", float, 1),
-                max_retries=_opt(form, "max_retries", int, -1),
-                params=_rules_text(form),
                 tags=",".join(parse_tags(str(form.get("tags", "")))),
-                run_max_tokens=_opt(form, "run_max_tokens", int, 1),
-                run_max_requests=_opt(form, "run_max_requests", int, 1),
-                run_max_minutes=_opt(form, "run_max_minutes", float, 0.1),
-                loop_threshold=_opt(form, "loop_threshold", int, 2),
-                month_requests=_opt(form, "month_requests", int, 1),
-                month_tokens=_opt(form, "month_tokens", int, 1),
-                month_cost_usd=_opt(form, "month_cost_usd", float, 0.01),
-                loop_action="reject" if form.get("loop_action") == "reject" else "warn",
+                **_limits(form),  # blank: the group's
                 log_content=current.log_content,  # set with its own form (below)
                 log_content_until=current.log_content_until,
             )
@@ -1158,6 +1156,103 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         store.delete_client(client_id, session.user.username)
         ctx.reload()
         return back("/admin/clients", "deleted")
+
+    # -- client groups -------------------------------------------------------------------
+
+    def group_page(request: Request, session: AdminSession, group, error: str | None = None) -> HTMLResponse:
+        members = [c.name for c in store.list_clients() if group.id is not None and c.group_id == group.id]
+        return page(
+            request,
+            "group_edit.html",
+            session,
+            g=group,
+            p=group.policy,
+            new=group.id is None,
+            every=group.every,
+            members=members,
+            error=error,
+            choices=ctx.model_choices(),
+        )
+
+    def group_fields(form: dict) -> dict:
+        """A group's name, notes and policy from its editor (ValueError / RulesError when something is wrong)."""
+        name = str(form.get("name", "")).strip()
+        if not GROUP_NAME.fullmatch(name):
+            raise ValueError("name")
+        every = form.get("every_model") == "on"
+        models = () if every else tuple(dict.fromkeys(_items(form, "models")))
+        if not every and not models:
+            raise ValueError("group_models")
+        policy = ClientPolicy(allowed_models=models, **_limits(form))
+        return {"name": name, "notes": str(form.get("notes", "")).strip()[:500], "policy": policy}
+
+    def group_from_form(form: dict, group_id: int | None = None) -> SimpleNamespace:
+        """What was submitted, to show the editor again after an error (nothing is saved)."""
+        raw = {name: str(form.get(name, "")).strip() or None for name in GROUP_LIMITS}
+        raw.update(on_limit=str(form.get("on_limit", "")), loop_action=str(form.get("loop_action", "")))
+        raw["params"] = str(form.get("params", ""))
+        return SimpleNamespace(
+            id=group_id,
+            name=str(form.get("name", "")).strip(),
+            notes=str(form.get("notes", "")),
+            policy=SimpleNamespace(allowed_models=_items(form, "models"), **raw),
+            every=form.get("every_model") == "on",
+        )
+
+    def group_error(exc: Exception) -> str:
+        if isinstance(exc, RulesError):
+            return MESSAGES["rules_invalid"]
+        if isinstance(exc, sqlite3.IntegrityError):
+            return MESSAGES["exists"]
+        return MESSAGES.get(str(exc), MESSAGES["invalid"])
+
+    @app.get("/admin/groups/new")
+    async def group_new(request: Request):
+        session = require(request, "admin")
+        empty = SimpleNamespace(id=None, name="", notes="", policy=ClientPolicy(), every=False)
+        return group_page(request, session, empty)
+
+    @app.post("/admin/groups")
+    async def groups_create(request: Request):
+        session, form = await require_post(request, "admin")
+        try:
+            fields = group_fields(form)
+            store.create_group(fields["name"], session.user.username, fields["policy"], fields["notes"])
+        except (RulesError, ValueError, sqlite3.IntegrityError) as exc:
+            return group_page(request, session, group_from_form(form), group_error(exc))
+        return back("/admin/clients#groups", "created")
+
+    @app.get("/admin/groups/{group_id}")
+    async def group_edit(group_id: int, request: Request):
+        session = require(request, "admin")
+        group = next((g for g in store.list_groups() if g.id == group_id), None)
+        if group is None:
+            return back("/admin/clients", error="invalid")
+        shown = SimpleNamespace(**vars(group), every=not group.policy.allowed_models)
+        return group_page(request, session, shown)
+
+    @app.post("/admin/groups/{group_id}")
+    async def groups_update(group_id: int, request: Request):
+        session, form = await require_post(request, "admin")
+        try:
+            store.update_group(group_id, session.user.username, **group_fields(form))
+        except KeyError:
+            return back("/admin/clients", error="invalid")
+        except (RulesError, ValueError, sqlite3.IntegrityError) as exc:
+            return group_page(request, session, group_from_form(form, group_id), group_error(exc))
+        ctx.reload()  # its clients get the change at once
+        return back("/admin/clients#groups", "saved")
+
+    @app.post("/admin/groups/{group_id}/delete")
+    async def groups_delete(group_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        try:
+            store.delete_group(group_id, session.user.username)
+        except KeyError:
+            return back("/admin/clients", error="invalid")
+        except ValueError as exc:
+            return back("/admin/clients#groups", error=str(exc))
+        return back("/admin/clients#groups", "deleted")
 
     # -- upstreams and limit pools -------------------------------------------------------
 
@@ -2323,6 +2418,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 
 
 CLIENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+GROUP_NAME = re.compile(r"[^\x00-\x1f\x7f]{1,64}")  # shown on pages only: any text
 ALIAS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 URL = re.compile(r"https?://[^\s/?#]+(/[^\s?#]*)?")
 WEBHOOK_URL = re.compile(r"https?://[^\s/?#]+\S*")
@@ -2379,6 +2475,56 @@ def _expiry_date(timestamp: float | None) -> str:
     if not timestamp:
         return ""
     return datetime.fromtimestamp(timestamp - 1, UTC).strftime("%Y-%m-%d")
+
+
+def _items(form: dict, name: str) -> list[str]:
+    """A comma- (or line-) separated list from a form."""
+    return [item.strip() for item in str(form.get(name, "")).replace("\n", ",").split(",") if item.strip()]
+
+
+def _limits(form: dict) -> dict:
+    """The limits a client or a group sets (config.GROUP_LIMITS). Blank = not set: for a client the group's, for a
+    group none (or the global default)."""
+    on_limit, loop_action = str(form.get("on_limit", "")), str(form.get("loop_action", ""))
+    if on_limit not in ("", *ON_LIMIT) or loop_action not in ("", "warn", "reject"):
+        raise ValueError("on_limit")
+    return {
+        "rpm": _opt(form, "rpm", int, 1),
+        "rpd": _opt(form, "rpd", int, 1),
+        "tpm": _opt(form, "tpm", int, 1),
+        "tpd": _opt(form, "tpd", int, 1),
+        "on_limit": on_limit,
+        "max_queued": _opt(form, "max_queued", int, 0),
+        "max_active": _opt(form, "max_active", int, 1),
+        "queue_timeout_s": _opt(form, "queue_timeout_s", float, 1),
+        "total_timeout_s": _opt(form, "total_timeout_s", float, 1),
+        "max_retries": _opt(form, "max_retries", int, -1),
+        "params": _rules_text(form),
+        "run_max_tokens": _opt(form, "run_max_tokens", int, 1),
+        "run_max_requests": _opt(form, "run_max_requests", int, 1),
+        "run_max_minutes": _opt(form, "run_max_minutes", float, 0.1),
+        "loop_threshold": _opt(form, "loop_threshold", int, 2),
+        "loop_action": loop_action,
+        "month_requests": _opt(form, "month_requests", int, 1),
+        "month_tokens": _opt(form, "month_tokens", int, 1),
+        "month_cost_usd": _opt(form, "month_cost_usd", float, 0.01),
+    }
+
+
+def _own_limits(policy: ClientPolicy) -> bool:
+    """Whether a client or group sets any limit itself."""
+    return any(getattr(policy, name) not in (None, "") for name in GROUP_LIMITS)
+
+
+def _group_field(form: dict, store: Store) -> int | None:
+    """The group picked in a client form (None: none picked, the first group); ValueError for one that doesn't exist."""
+    raw = str(form.get("group_id", "")).strip()
+    if not raw:
+        return None
+    group_id = int(raw)
+    if group_id not in {g.id for g in store.list_groups()}:
+        raise ValueError("group")
+    return group_id
 
 
 def _user_agents(form: dict) -> tuple[str, ...]:

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Clients{% endblock %}
+{% from "limits.html" import limit_fields %}
 {% block content %}
 <h1>Clients</h1>
 <p class="muted">Each app (opencode, scripts, n8n…) gets its own key. Keys are kept encrypted: <em>Show</em> displays
@@ -53,10 +54,12 @@ apply immediately.</p>
   <tbody>
   {% for c in clients %}
   {% set busy = live.get(c.name, {"active": 0, "queued": 0}) %}
+  {% set group = group_of.get(c.group_id) %}
   <tr>
     <td data-label="Client">
       <strong>{{ c.name }}</strong>
       <span class="badge {{ c.priority }}">{{ c.priority }}</span>
+      {% if group %}<a class="badge" href="/admin/groups/{{ group.id }}" title="Its group: models and limits">{{ group.name }}</a>{% endif %}
       {% if not c.enabled %}<span class="badge">disabled</span>{% endif %}
       {% if c.expired %}<span class="badge high">expired</span>{% endif %}
       {% if c.notes %}<div class="small muted">{{ c.notes }}</div>{% endif %}
@@ -78,6 +81,10 @@ apply immediately.</p>
         <input name="name" value="{{ c.name }}" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" aria-label="Name" title="Name (renaming keeps the key; its history moves with it)" autocomplete="off">
         <select name="priority" aria-label="Priority">
           {% for p in priorities %}<option value="{{ p }}" {% if p == c.priority %}selected{% endif %}>{{ p }}</option>{% endfor %}
+        </select>
+        <select name="group_id" aria-label="Group" title="Group: its models and limits">
+          {% if not group %}<option value="" selected>no group</option>{% endif %}
+          {% for g in groups %}<option value="{{ g.id }}" {% if g.id == c.group_id %}selected{% endif %}>{{ g.name }}</option>{% endfor %}
         </select>
         <label class="check"><input type="checkbox" name="enabled" {% if c.enabled %}checked{% endif %}> enabled</label>
         <input type="date" name="expires" value="{{ c.expires_at | expiry_date }}" aria-label="Expires" title="Expires (optional)">
@@ -103,11 +110,11 @@ apply immediately.</p>
     <td colspan="5" data-label="">
         {% set p = c.policy %}
         <details class="policy">
-          <summary class="small">Limits{% if p.allowed_models or p.user_agents or p.ua_mode != "keep" or p.rate_limited or p.max_queued is not none or p.max_active is not none or p.total_timeout_s or p.queue_timeout_s or p.max_retries is not none or p.params or p.tags or p.run_max_tokens or p.run_max_requests or p.run_max_minutes or p.loop_threshold or p.month_requests or p.month_tokens or p.month_cost_usd %} <span class="badge">set</span>{% endif %}</summary>
+          <summary class="small">Limits{% if p.user_agents or p.ua_mode != "keep" or p.tags or own_limits(p) %} <span class="badge">set</span>{% endif %}</summary>
           <form method="post" action="/admin/clients/{{ c.id }}/policy" class="grid tight">
             <input type="hidden" name="csrf" value="{{ csrf }}">
-            <label class="span-all">Allowed models <small class="muted">comma-separated; empty = all</small>
-              <input name="allowed_models" value="{{ p.allowed_models | join(', ') }}"></label>
+            <p class="small muted span-all">Models: {% if group %}from its group, <a href="/admin/groups/{{ group.id }}">{{ group.name }}</a>
+              ({% if group.policy.allowed_models %}{{ group.policy.allowed_models | length }} picked{% else %}every model{% endif %}){% else %}every model (no group){% endif %}.</p>
             <label class="span-all">Allowed apps <small class="muted">User-Agent starts with, comma-separated; empty = any app.
               The Requests page shows each request's User-Agent.</small>
               <input name="user_agents" value="{{ p.user_agents | join(', ') }}" placeholder="myapp/, telegramgrouphelper/"></label>
@@ -119,39 +126,12 @@ apply immediately.</p>
               </select></label>
             <label class="span-all">User-Agent template <small class="muted">for "template": {original} {client} {priority} {model} {upstream} {version}</small>
               <input name="ua_template" value="{{ p.ua_template }}" placeholder="{original} via queuerouter/{version} (client={client}; priority={priority})"></label>
-            <label>Requests / min <input type="number" name="rpm" min="1" value="{{ p.rpm if p.rpm is not none else '' }}"></label>
-            <label>Requests / day <input type="number" name="rpd" min="1" value="{{ p.rpd if p.rpd is not none else '' }}"></label>
-            <label>Tokens / min <input type="number" name="tpm" min="1" value="{{ p.tpm if p.tpm is not none else '' }}"></label>
-            <label>Tokens / day <input type="number" name="tpd" min="1" value="{{ p.tpd if p.tpd is not none else '' }}"></label>
-            <label>At the limit
-              <select name="on_limit">
-                <option value="delay" {% if p.on_limit == "delay" %}selected{% endif %}>delay (wait in queue)</option>
-                <option value="reject" {% if p.on_limit == "reject" %}selected{% endif %}>reject (429)</option>
-              </select></label>
-            <label>Max queued <input type="number" name="max_queued" min="0" value="{{ p.max_queued if p.max_queued is not none else '' }}"></label>
-            <label>Max active <input type="number" name="max_active" min="1" value="{{ p.max_active if p.max_active is not none else '' }}"></label>
-            <label>Queue timeout (s) <input type="number" step="any" name="queue_timeout_s" min="1" value="{{ p.queue_timeout_s if p.queue_timeout_s is not none else '' }}"></label>
-            <label>Total timeout (s) <input type="number" step="any" name="total_timeout_s" min="1" value="{{ p.total_timeout_s if p.total_timeout_s is not none else '' }}"></label>
-            <label>Max retries <input type="number" name="max_retries" min="-1" value="{{ p.max_retries if p.max_retries is not none else '' }}"></label>
             <label>Default tags <input name="tags" value="{{ p.tags }}" placeholder="e.g. coding, opencode"></label>
-            <label>Run: max tokens <input type="number" name="run_max_tokens" min="1" value="{{ p.run_max_tokens if p.run_max_tokens is not none else '' }}"></label>
-            <label>Run: max requests <input type="number" name="run_max_requests" min="1" value="{{ p.run_max_requests if p.run_max_requests is not none else '' }}"></label>
-            <label>Run: max minutes <input type="number" step="any" name="run_max_minutes" min="0.1" value="{{ p.run_max_minutes if p.run_max_minutes is not none else '' }}"></label>
-            <label>Month: max requests <input type="number" name="month_requests" min="1" value="{{ p.month_requests if p.month_requests is not none else '' }}"></label>
-            <label>Month: max tokens <input type="number" name="month_tokens" min="1" value="{{ p.month_tokens if p.month_tokens is not none else '' }}"></label>
-            <label>Month: max cost (USD) <input type="number" step="any" name="month_cost_usd" min="0.01" value="{{ p.month_cost_usd if p.month_cost_usd is not none else '' }}"></label>
+            {{ limit_fields(p, group.policy if group else none) }}
             {% set m = month.get(c.name) %}{% if m %}<p class="small muted span-all">This month (UTC): {{ "{:,}".format(m.requests) }} requests · {{ "{:,}".format(m.tokens) }} tokens · ${{ "%.2f" | format(m.cost) }} at official prices. Over a monthly quota, requests get 429 until the month ends.</p>{% endif %}
-            <label>Loop: same request ×N <input type="number" name="loop_threshold" min="2" value="{{ p.loop_threshold if p.loop_threshold is not none else '' }}" placeholder="off"></label>
-            <label>On a loop
-              <select name="loop_action">
-                <option value="warn" {% if p.loop_action != 'reject' %}selected{% endif %}>log a warning</option>
-                <option value="reject" {% if p.loop_action == 'reject' %}selected{% endif %}>reject (429)</option>
-              </select></label>
-            <label class="span-all">Parameter rules <small class="muted">JSON: defaults / overrides / clamps / strip — applied after the alias's rules</small>
-              <textarea name="params" rows="2" class="rules" placeholder='{"defaults": {"temperature": 0.6}, "clamps": {"max_tokens": {"max": 8192}}, "strip": ["logit_bias"]}'>{{ p.params }}</textarea></label>
             <div class="align-end"><button type="submit" class="secondary">Save limits</button></div>
           </form>
-          <p class="small muted">Blank = no limit / global default. Rate limits count started requests and finished tokens over rolling windows. A <em>run</em> is one agent task: <code>X-Run-Id</code> if the app sends it, otherwise the conversation.</p>
+          <p class="small muted">Blank = the group's value (shown greyed), else no limit or the global default; a value here wins over the group's for this client. Rate limits count started requests and finished tokens over rolling windows. A <em>run</em> is one agent task: <code>X-Run-Id</code> if the app sends it, otherwise the conversation.</p>
         </details>
         <details class="policy">
           <summary class="small">Content logging{% if p.logs_content(now) %} <span class="badge high">on</span>{% endif %}</summary>
@@ -177,6 +157,28 @@ apply immediately.</p>
 </table>
 </div>
 
+<h2 id="groups">Groups</h2>
+<p class="muted small">A group sets the models of its clients and their limits (a plan). Every client is in one; a
+limit set on the client itself wins over its group's.</p>
+<p><a class="button" href="/admin/groups/new">Add group</a></p>
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Group</th><th>Models</th><th>Limits</th><th>Clients</th><th></th></tr></thead>
+  <tbody>
+  {% for g in groups %}
+  <tr>
+    <td data-label="Group"><a href="/admin/groups/{{ g.id }}"><strong>{{ g.name }}</strong></a>
+      {% if g.notes %}<div class="small muted">{{ g.notes }}</div>{% endif %}</td>
+    <td data-label="Models" class="small">{% if g.policy.allowed_models %}{% for m in g.policy.allowed_models[:5] %}<code>{{ m | model_label }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% if g.policy.allowed_models | length > 5 %} <span class="muted">and {{ g.policy.allowed_models | length - 5 }} more</span>{% endif %}{% else %}every model{% endif %}</td>
+    <td data-label="Limits">{% if own_limits(g.policy) %}<span class="badge">set</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td data-label="Clients" class="small">{% for name in members[g.id] %}{{ name }}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">none</span>{% endfor %}</td>
+    <td data-label=""><a class="button secondary" href="/admin/groups/{{ g.id }}">Edit</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
 <h2>Add client</h2>
 <form method="post" action="/admin/clients" class="card grid">
   <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -185,6 +187,10 @@ apply immediately.</p>
   <label>Priority
     <select name="priority">{% for p in priorities %}<option value="{{ p }}" {% if p == "normal" %}selected{% endif %}>{{ p }}</option>{% endfor %}</select>
     <small class="muted">high goes first; waiting requests age upwards</small></label>
+  <label>Group
+    {% set first_group = groups | map(attribute="id") | min %}
+    <select name="group_id">{% for g in groups %}<option value="{{ g.id }}" {% if g.id == first_group %}selected{% endif %}>{{ g.name }}</option>{% endfor %}</select>
+    <small class="muted">its models and limits</small></label>
   <label>Expires <input type="date" name="expires"><small class="muted">optional</small></label>
   <label>Notes <input name="notes" maxlength="500" placeholder="optional"></label>
   <div class="align-end"><button type="submit">Create client</button></div>

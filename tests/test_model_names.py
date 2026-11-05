@@ -9,6 +9,7 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 
+from app.config import ClientPolicy
 from app.main import stopped_at
 from app.names import EVERY, ModelNames, app_id, public_ids
 from app.pricing import (
@@ -150,7 +151,7 @@ def test_a_proxys_via_header_stays_here():
 
 def test_settings_made_before_become_ones_for_every_provider(tmp_path):
     store = Store(str(tmp_path / "old.db"), Fernet(Fernet.generate_key()))
-    for version, script in enumerate(MIGRATIONS[:-1], 1):
+    for version, script in enumerate(MIGRATIONS[:35], 1):  # before 36: per provider
         store._db.executescript(f"BEGIN;\n{script}\nPRAGMA user_version={version};\nCOMMIT;")
     store._db.execute("INSERT INTO model_prices (model, input, output, updated_at) VALUES ('m', 1, 2, 0)")
     store._db.execute("INSERT INTO model_scores (model, score, updated_at) VALUES ('m', 50, 0)")
@@ -208,16 +209,14 @@ async def test_opencode_lists_each_provider_and_requests_go_there(make_stack, ma
 
 
 async def test_a_client_limited_to_a_model_sees_it_on_each_provider(make_stack, make_mock):
-    import dataclasses
-
     stack = make_stack(bootstrap=OWNER, models_cache_s=0)
     stack.mock["extra_models"] = ["other-model"]
     store = stack.app.state.store
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await two_providers(c, stack, make_mock)
         client = store.list_clients()[0]
-        limited = dataclasses.replace(client.policy, allowed_models=("mock-model",))
-        store.update_client(client.id, "t", policy=limited)
+        limited = store.create_group("limited", "t", ClientPolicy(allowed_models=("mock-model",)))
+        store.update_client(client.id, "t", group_id=limited)
         stack.app.state.reload()
         assert sorted(await opencode(c, stack)) == ["mock-model@second", "mock-model@upstream"]
         body = chat("hi", model="mock-model@second")
@@ -276,8 +275,6 @@ def test_ids_for_apps():
 
 
 async def test_apps_know_models_by_their_names(make_stack, make_mock):
-    import dataclasses
-
     stack = make_stack(bootstrap=OWNER, models_cache_s=0)
     tune = {
         "id": "hf:zai/secret-tune",
@@ -339,8 +336,8 @@ async def test_apps_know_models_by_their_names(make_stack, make_mock):
         assert models["Secret-Tune"]["name"] == "$?|Secret Tune|upstream"
 
         client = store.list_clients()[0]
-        limited = dataclasses.replace(client.policy, allowed_models=("Secret-Tune",))
-        store.update_client(client.id, "t", policy=limited)
+        limited = store.create_group("limited", "t", ClientPolicy(allowed_models=("Secret-Tune",)))
+        store.update_client(client.id, "t", group_id=limited)
         stack.app.state.reload()
         assert [m["id"] for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]] == ["Secret-Tune"]
         assert list(await opencode(c, stack)) == ["Secret-Tune"]

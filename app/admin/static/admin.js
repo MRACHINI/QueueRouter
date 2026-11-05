@@ -123,6 +123,12 @@ document.addEventListener("DOMContentLoaded", () => {
       if (embeddings) embeddings.value = option.dataset.embeddings || "";
     });
   });
+  document.querySelectorAll("[data-every-model]").forEach((box) => {
+    const list = box.closest("fieldset").querySelector("[data-model-list]");
+    const sync = () => { list.hidden = box.checked; };
+    box.addEventListener("change", sync);
+    sync();
+  });
   document.querySelectorAll("[data-pool-select]").forEach((select) => {
     const form = select.closest("form");
     const sync = () => form.querySelectorAll("[data-new-pool]").forEach((el) => {

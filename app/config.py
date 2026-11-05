@@ -13,7 +13,7 @@ import ipaddress
 import json
 import math
 import os
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import NamedTuple
 
 PRIORITIES = ("high", "normal", "low")
@@ -29,9 +29,10 @@ ON_LIMIT = ("delay", "reject")
 
 @dataclass(frozen=True)
 class ClientPolicy:
-    """Per-client limits. ``None`` / empty = no limit (or the global default)."""
+    """Per-client limits, and a client group's (``with_group``). ``None`` / empty = not set: the group's value, else
+    no limit (or the global default)."""
 
-    allowed_models: tuple[str, ...] = ()  # empty = every model
+    allowed_models: tuple[str, ...] = ()  # empty = every model (set by the client's group)
     user_agents: tuple[str, ...] = ()  # allowed apps: User-Agent prefixes (empty = any app)
     ua_mode: str = "keep"  # outgoing User-Agent to providers: keep | remove | template
     ua_template: str = ""  # with ua_mode=template: e.g. "{original} via queuerouter/{version}"
@@ -39,7 +40,7 @@ class ClientPolicy:
     rpd: int | None = None  # requests per day (rolling 24 h)
     tpm: int | None = None  # tokens per minute
     tpd: int | None = None  # tokens per day
-    on_limit: str = "delay"  # delay = wait in the queue until allowed; reject = 429 + Retry-After
+    on_limit: str = ""  # delay (the default) = wait in the queue until allowed; reject = 429 + Retry-After
     max_queued: int | None = None  # requests waiting at once (beyond -> 429)
     max_active: int | None = None  # requests in flight at once
     queue_timeout_s: float | None = None  # overrides the global max queue wait
@@ -51,7 +52,7 @@ class ClientPolicy:
     run_max_requests: int | None = None
     run_max_minutes: float | None = None
     loop_threshold: int | None = None  # the same request this many times within 5 min = a loop
-    loop_action: str = "warn"  # warn (log it) | reject (429)
+    loop_action: str = ""  # warn (the default: log it) | reject (429)
     month_requests: int | None = None  # per calendar month (UTC); beyond -> 429 until the next month
     month_tokens: int | None = None
     month_cost_usd: float | None = None  # at official prices (Usage page)
@@ -85,6 +86,40 @@ class ClientPolicy:
     @property
     def rate_limited(self) -> bool:
         return any(v is not None for v in (self.rpm, self.rpd, self.tpm, self.tpd))
+
+
+# What a client group sets besides its models: each one the group's unless the client has its own. Allowed apps, the
+# outgoing User-Agent, tags and content logging belong to one key, so they are the client's only.
+GROUP_LIMITS = (
+    "rpm",
+    "rpd",
+    "tpm",
+    "tpd",
+    "on_limit",
+    "max_queued",
+    "max_active",
+    "queue_timeout_s",
+    "total_timeout_s",
+    "max_retries",
+    "params",
+    "run_max_tokens",
+    "run_max_requests",
+    "run_max_minutes",
+    "loop_threshold",
+    "loop_action",
+    "month_requests",
+    "month_tokens",
+    "month_cost_usd",
+)
+
+
+def with_group(own: ClientPolicy, group: ClientPolicy | None) -> ClientPolicy:
+    """What a client's requests get: its group's models, and each limit its own where it has one (None and "" =
+    not set), else the group's. Monthly quotas count per client: each gets the group's numbers."""
+    if group is None:
+        return own
+    inherited = {name: getattr(group, name) for name in GROUP_LIMITS if getattr(own, name) in (None, "")}
+    return replace(own, allowed_models=group.allowed_models, **inherited)
 
 
 @dataclass(frozen=True)

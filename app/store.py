@@ -505,6 +505,36 @@ MIGRATIONS: list[str] = [
     ALTER TABLE requests ADD COLUMN cache_write_tokens INTEGER;
     ALTER TABLE usage_daily ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
     """,
+    # 38: client groups, with the models and limits of their clients (config.with_group). A client's own model list
+    # becomes a group (clients with the same list share one, named after the first), the others go in "All models",
+    # and a client's "delay" and "warn" (the defaults) go, so the group's apply: nobody's access or limits change
+    """
+    CREATE TABLE client_groups (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        policy TEXT NOT NULL DEFAULT '{}',
+        notes TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL
+    );
+    ALTER TABLE clients ADD COLUMN group_id INTEGER REFERENCES client_groups(id);
+    INSERT INTO client_groups (name, created_at) VALUES ('All models', CAST(strftime('%s', 'now') AS REAL));
+    INSERT INTO client_groups (name, policy, created_at)
+        SELECT MIN(name), json_object('allowed_models', json(json_extract(policy, '$.allowed_models'))),
+            CAST(strftime('%s', 'now') AS REAL)
+        FROM clients
+        WHERE json_valid(policy) AND json_array_length(policy, '$.allowed_models') > 0
+        GROUP BY json_extract(policy, '$.allowed_models');
+    UPDATE clients SET group_id = (
+        SELECT g.id FROM client_groups g
+        WHERE g.policy = json_object('allowed_models', json(json_extract(clients.policy, '$.allowed_models')))
+    ) WHERE json_valid(policy) AND json_array_length(policy, '$.allowed_models') > 0;
+    UPDATE clients SET group_id = (SELECT id FROM client_groups WHERE name = 'All models') WHERE group_id IS NULL;
+    UPDATE clients SET policy = json_remove(policy, '$.allowed_models') WHERE json_valid(policy);
+    UPDATE clients SET policy = json_remove(policy, '$.on_limit')
+        WHERE json_valid(policy) AND json_extract(policy, '$.on_limit') = 'delay';
+    UPDATE clients SET policy = json_remove(policy, '$.loop_action')
+        WHERE json_valid(policy) AND json_extract(policy, '$.loop_action') = 'warn';
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -626,12 +656,24 @@ class Client:
     expires_at: float | None
     notes: str
     created_at: float
-    policy: ClientPolicy = ClientPolicy()
+    policy: ClientPolicy = ClientPolicy()  # its own: the group's apply where it has none (config.with_group)
     key_kept: bool = False  # its key can be shown again (made or renewed since 0.42; older ones: only the hash)
+    group_id: int | None = None
 
     @property
     def expired(self) -> bool:
         return self.expires_at is not None and self.expires_at <= time.time()
+
+
+@dataclass(frozen=True)
+class Group:
+    """Clients with the same models and limits (a plan). Every client is in one."""
+
+    id: int
+    name: str
+    policy: ClientPolicy  # allowed_models (empty = every model, new ones too) and the limits its clients get
+    notes: str
+    created_at: float
 
 
 @dataclass(frozen=True)
@@ -936,8 +978,8 @@ class Store:
                 summary["upstream"] = seed.upstream_url
             for p in parsed:
                 db.execute(
-                    "INSERT INTO clients (name, key_hash, key_prefix, key_secret, priority, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO clients (name, key_hash, key_prefix, key_secret, priority, created_at, group_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, (SELECT MIN(id) FROM client_groups))",
                     (p.name, hash_key(p.key), p.key[:6], self.encrypt(p.key), p.priority, time.time()),
                 )
                 summary["clients"].append(p.name)
@@ -1148,24 +1190,38 @@ class Store:
                 r["created_at"],
                 ClientPolicy.from_json(r["policy"]),
                 r["key_secret"] is not None,
+                r["group_id"],
             )
             for r in self.query("SELECT * FROM clients ORDER BY name")
         ]
 
     def create_client(
-        self, name: str, actor: str, priority: str = "normal", notes: str = "", expires_at: float | None = None
+        self,
+        name: str,
+        actor: str,
+        priority: str = "normal",
+        notes: str = "",
+        expires_at: float | None = None,
+        group_id: int | None = None,
     ) -> str:
-        """Create a client and return its new key (hashed to check requests, encrypted to show it again)."""
+        """Create a client and return its new key (hashed to check requests, encrypted to show it again). It goes in
+        ``group_id``, else the first group."""
         if priority not in PRIORITIES:
             raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
         key = new_client_key()
         with self.tx() as db:
+            group = db.execute(
+                "SELECT id, name FROM client_groups WHERE id = COALESCE(?, (SELECT MIN(id) FROM client_groups))",
+                (group_id,),
+            ).fetchone()
+            if group is None:
+                raise ValueError("no such group")
             db.execute(
-                "INSERT INTO clients (name, key_hash, key_prefix, key_secret, priority, notes, expires_at, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (name, hash_key(key), key[:6], self.encrypt(key), priority, notes, expires_at, time.time()),
+                "INSERT INTO clients (name, key_hash, key_prefix, key_secret, priority, notes, expires_at, created_at, "
+                "group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, hash_key(key), key[:6], self.encrypt(key), priority, notes, expires_at, time.time(), group[0]),
             )
-        self.audit(actor, "client.create", name, {"priority": priority})
+        self.audit(actor, "client.create", name, {"priority": priority, "group": group[1]})
         return key
 
     def update_client(self, client_id: int, actor: str, **fields: object) -> None:
@@ -1179,7 +1235,8 @@ class Store:
             fields["policy"] = fields["policy"].to_json()
         # renamed first (fails if the name is taken), then its jobs, files, schedules... move with it, so a failed
         # rename never hands its data to the client that already has that name
-        self._update("clients", client_id, {"name", "priority", "enabled", "expires_at", "notes", "policy"}, fields)
+        allowed = {"name", "priority", "enabled", "expires_at", "notes", "policy", "group_id"}
+        self._update("clients", client_id, allowed, fields)  # a group that doesn't exist: IntegrityError
         if old is not None:
             new = fields["name"]
             with self.tx() as db:
@@ -1233,6 +1290,42 @@ class Store:
                 db.execute("UPDATE requests SET timeline = NULL WHERE client = ?", (row["name"],))  # its excerpts
             db.execute("DELETE FROM clients WHERE id = ?", (client_id,))
         self.audit(actor, "client.delete", str(client_id), {"name": row["name"] if row else None, "removed": removed})
+
+    # -- client groups -------------------------------------------------------------------
+
+    def list_groups(self) -> list[Group]:
+        return [
+            Group(r["id"], r["name"], ClientPolicy.from_json(r["policy"]), r["notes"], r["created_at"])
+            for r in self.query("SELECT * FROM client_groups ORDER BY name COLLATE NOCASE")
+        ]
+
+    def create_group(self, name: str, actor: str, policy: ClientPolicy, notes: str = "") -> int:
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT INTO client_groups (name, policy, notes, created_at) VALUES (?, ?, ?, ?)",
+                (name, policy.to_json(), notes, time.time()),
+            )
+        self.audit(actor, "group.create", name, {"policy": policy.to_json()})
+        return cur.lastrowid
+
+    def update_group(self, group_id: int, actor: str, **fields: object) -> None:
+        if isinstance(fields.get("policy"), ClientPolicy):
+            fields["policy"] = fields["policy"].to_json()
+        self._update("client_groups", group_id, {"name", "policy", "notes"}, fields)
+        self.audit(actor, "group.update", str(group_id), fields)
+
+    def delete_group(self, group_id: int, actor: str) -> None:
+        """Only a group no client is in, and never the last one: every client is in a group."""
+        with self.tx() as db:
+            row = db.execute("SELECT name FROM client_groups WHERE id = ?", (group_id,)).fetchone()
+            if row is None:
+                raise KeyError(group_id)
+            if db.execute("SELECT 1 FROM clients WHERE group_id = ? LIMIT 1", (group_id,)).fetchone():
+                raise ValueError("group_in_use")
+            if db.execute("SELECT COUNT(*) FROM client_groups").fetchone()[0] <= 1:
+                raise ValueError("group_last")
+            db.execute("DELETE FROM client_groups WHERE id = ?", (group_id,))
+        self.audit(actor, "group.delete", row["name"])
 
     # -- request log and usage -----------------------------------------------------------
 

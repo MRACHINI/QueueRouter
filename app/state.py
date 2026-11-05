@@ -10,7 +10,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from .config import Bootstrap, ClientKey, Settings
+from .config import Bootstrap, ClientKey, Settings, with_group
 from .names import ModelNames
 from .store import Alias, Pool, Store, Upstream
 
@@ -66,8 +66,11 @@ def load_snapshot(store: Store) -> Snapshot:
         if u.pool_id in pools
     }
     every_client = store.list_clients()
-    clients = {
-        c.key_hash: ClientKey(c.name, c.key_hash, c.priority, c.policy, c.expires_at)
+    groups = {g.id: g.policy for g in store.list_groups()}
+    clients = {  # each with its group's models and limits, its own where set
+        c.key_hash: ClientKey(
+            c.name, c.key_hash, c.priority, with_group(c.policy, groups.get(c.group_id)), c.expires_at
+        )
         for c in every_client
         if c.enabled and not c.expired
     }

@@ -115,6 +115,7 @@ snapshot swapped atomically, no restart).
 | `upstreams` | name, base_url, api_key (encrypted), limit_pool, weight, enabled, paused, models (cached list), circuit settings |
 | `clients` | name, key_hash, key_prefix (for display), enabled, priority, expires_at, notes |
 | `client_policies` | client, allowed_models (list or `*`), rpm, rpd, tpm, tpd, on_limit (`delay`/`reject`), max_queued, max_active, max_retries, queue_timeout_s, total_timeout_s, nonstream_keepalive, max_body_mb, allow_priority_raise, log_content, params (defaults/overrides/clamps/strip JSON), default_tags |
+| `client_groups` | name, policy (allowed models, empty = every model, and the limits its clients get; v0.61.0), notes. Each client has a `group_id` |
 | `aliases` | alias, chain (ordered list of {model, upstreams?}), fallback_on (unavailable / errors / context / wait / refused), refusal settings, structured-repair settings, params JSON, enabled |
 | `models` | upstream, model, display_name, native_context (fetched), context_override (manual), max_output_tokens, slot_cost (default 1), raw upstream metadata JSON, hidden, enabled |
 | `jobs` | id, client, batch_id, status, priority, request JSON, run_at, deadline, idle_only, callback_url, attempts, result JSON (encrypted), error, tags, created/started/finished_at |
@@ -290,7 +291,7 @@ Configured per client in the UI (with global defaults):
 | Policy | Behaviour |
 |---|---|
 | **Priority** | high / normal / low lane; `X-QueueRouter-Priority` header may **lower** it per request (raise only if `allow_priority_raise`) |
-| **Allowed models** | list of models and/or aliases, or `*`. Others → 403. `/v1/models` only lists allowed ones |
+| **Allowed models** | the client's group's: list of models and/or aliases, or every model. Others → 403. `/v1/models` only lists allowed ones |
 | **Rate limits** | RPM, RPD, TPM, TPD (any can be empty). Token limits use actual usage after completion; a request is admitted if the window still has budget |
 | **On limit** | `delay` (default): request waits in queue until the window allows; `reject`: 429 with `Retry-After` |
 | **max_queued / max_active** | caps on waiting / in-flight requests for this client |
@@ -1655,6 +1656,27 @@ v0.60.0: failed keys and blocked addresses show.
 - Requests without a client count in the totals only (`Stats.record(client=None)`): no "default" row on the dashboard.
 - The block itself is unchanged: a valid key from a blocked address is still refused, or the block would tell a
   guesser which key is right.
+v0.61.0: groups (plans) of clients.
+- Asked for: plans, each with chosen models, a client put in one when it's made, and one that includes everything.
+  The user's choices: named Group (Plan already means an ArliAI subscription on Upstreams and Usage); groups replace
+  each client's allowed-models box; a group sets limits too, and a client's own value wins.
+- `client_groups` (migration 38): a name, a `ClientPolicy` (allowed_models, empty = every model and alias, new ones
+  included; the limits) and notes; `clients.group_id`. Every client is in one: a new one in the group picked when
+  it's made (the first group by default, as ACCESS_KEYS' clients on a first start). A group in use, or the last
+  one, can't be deleted.
+- `config.with_group` makes what the snapshot holds per key: the group's models always; each of `GROUP_LIMITS` the
+  client's where set (None or "" = not set), else the group's. Allowed apps, the outgoing User-Agent, tags and
+  content logging stay the client's: they're about one key. So every check (403, /v1/models, the opencode config
+  and plugin, rate limits, quotas) reads one policy as before, and a group's change reaches its clients with the
+  reload. `on_limit` and `loop_action` default to "" (delay / warn) so a client can say "as the group".
+- A client can't lift a group's limit for itself (no third state per box): it sets a bigger number, or goes in
+  another group. Monthly quotas count per client: each gets the group's numbers, not a shared pool.
+- The upgrade: "All models" (every model, no limits) holds the clients without a list; each distinct list becomes
+  a group named after its first client, shared by the clients with the same list. The clients' lists, and their
+  "delay" / "warn" (the defaults then), are removed from their own policy. Nobody's access or limits change.
+- Pages: a Groups list on the Clients page (models, limits set, its clients); a group editor with the alias editor's
+  model picker (`picker.html`, now shared) and the limits (`limits.html`, shared with the client's Limits form,
+  where a blank box shows the group's value greyed); a Group dropdown on each client and in Add client.
 
 ### Later (agreed, not scheduled)
 
