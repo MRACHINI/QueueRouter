@@ -25,8 +25,9 @@ model list within a minute).</p>
     <label class="check"><input type="checkbox" name="every_model" data-every-model {% if every %}checked{% endif %}> Every model and alias, new ones included</label>
     <div data-model-list>
       <label>Only these models and aliases {{ picker("models", p.allowed_models, "multi", "Add a model or alias…") }}</label>
-      <small class="muted">An alias allows the alias; a model also allows the aliases that send to it. When several
-      providers offer a model, <code>model@provider</code> allows it on that provider only. A model no provider lists
+      <small class="muted">Each one allows only itself: an alias the alias, a model the model, not the aliases that
+      send to it. <code>model@provider</code> allows a model on that provider only; it's how to pick a model that
+      several providers offer, or one with an alias's name (the name alone is the alias). A model no provider lists
       now stays in the list and works again when it's back.</small>
     </div>
   </fieldset>

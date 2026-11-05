@@ -291,7 +291,7 @@ Configured per client in the UI (with global defaults):
 | Policy | Behaviour |
 |---|---|
 | **Priority** | high / normal / low lane; `X-QueueRouter-Priority` header may **lower** it per request (raise only if `allow_priority_raise`) |
-| **Allowed models** | the client's group's: list of models and/or aliases, or every model. Others → 403. `/v1/models` only lists allowed ones |
+| **Allowed models** | the client's group's: list of models and/or aliases, or every model; each entry allows only itself (an alias not its target, a model not its aliases; `model@provider` for one provider or a model with an alias's name). Others → 403. `/v1/models` only lists allowed ones |
 | **Rate limits** | RPM, RPD, TPM, TPD (any can be empty). Token limits use actual usage after completion; a request is admitted if the window still has budget |
 | **On limit** | `delay` (default): request waits in queue until the window allows; `reject`: 429 with `Retry-After` |
 | **max_queued / max_active** | caps on waiting / in-flight requests for this client |
@@ -1681,6 +1681,19 @@ v0.61.1: the image ships again.
 - v0.61.0's image was never published: the scan before the push found CVE-2026-109518 (HIGH, apt and libapt-pkg7.0
   3.0.3, fixed in 3.0.4) in the pinned python:3.14-slim. The base moves to the current python:3.14-slim (Debian
   13.7, apt 3.0.4), the one the tests ran on. Nothing else changed.
+v0.62.0: each entry of a group's list allows only itself.
+- Seen: a group with one model (DeepSeek V4.1 Flash 1017 on Synthetic) showed the seven aliases sending to it in
+  opencode; a group with the aliases claude-opus-5-5 and others showed the Claude provider's own claude-opus-5-5
+  too, and let requests for it (`claude-opus-5-5@Claude`) through. The user's rule: an alias allows the alias only,
+  a model the model only.
+- `model_allowed` (opencode config, /v1/models, retrieve model) and serve's check: an alias by its name, never by
+  its target (the old "a model also allows the aliases that send to it" is gone); a model by its ID for apps, the
+  real ID with its provider, or the real ID alone unless an alias has that name. A bare name is the alias's, as in
+  requests and IDs for apps (`names.public_ids`): the model needs its provider.
+- The picker offers `model@provider` for a model an alias's name hides, even on one provider, so it can still be
+  picked (the alias editor too).
+- The upgrade changes no list: a group that relied on a model to reach its aliases loses them until they're added
+  (putting them in would undo what was asked for).
 
 ### Later (agreed, not scheduled)
 

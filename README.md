@@ -89,7 +89,8 @@ from a **web admin UI**.
   whether models the provider adds later appear automatically.
 - **Groups (plans) of clients**: a group sets which models and aliases its clients may use (or every model, new
   ones included) and their limits; each client is in one, chosen when it's made, and a change reaches all of
-  them at once. A limit set on a client itself wins over its group's (Clients page > Groups).
+  them at once. Each model or alias picked allows only itself: an alias not the model it sends to, a model not
+  the aliases sending to it. A limit set on a client itself wins over its group's (Clients page > Groups).
 - **Per-client policies**: requests/tokens per minute and per day (delay or reject), max queued / active, queue
   and total timeouts, retry budget, allowed apps, tags; blank takes the group's.
 - **Operating modes**: running, paused, draining (ends by itself on the next start), maintenance.

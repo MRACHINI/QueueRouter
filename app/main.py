@@ -20,7 +20,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Collection, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -886,15 +886,20 @@ def create_app(
             return error_response(message, 503, snapshot.mode, **{"Retry-After": retry})
         return None
 
-    def policy_refusal(
-        client: ClientKey, model: str | None, target: str | None = None, asked: str | None = None
-    ) -> JSONResponse | None:
+    def model_allowed(allowed: Collection[str], real: str, upstream: str, public: str) -> bool:
+        """Whether a group's list (empty = every model) lets in ``real`` on ``upstream``: by its ID for apps, the real
+        ID with its provider, or the real ID alone unless an alias has that name (a bare name is the alias's, as in
+        requests: the model then needs its provider). A model doesn't bring the aliases that send to it."""
+        if not allowed or public in allowed or f"{real}@{upstream}" in allowed:
+            return True
+        return real in allowed and real not in snapshot.aliases
+
+    def policy_refusal(client: ClientKey, model: str | None, allowed_by: set[str | None]) -> JSONResponse | None:
         """Admission checks from the client's policy (the only place QueueRouter itself says no).
-        For an alias, allowing either the alias or its target model is enough; for a model's ID for apps (``asked``),
-        that ID or the real one."""
+        ``allowed_by``: the entries of the group's list that let the request in (see serve)."""
         policy = client.policy
-        if policy.allowed_models and not {model, target, asked} & set(policy.allowed_models):
-            return error_response(f"model '{asked or model}' is not allowed for this key", 403, "model_not_allowed")
+        if policy.allowed_models and not allowed_by & set(policy.allowed_models):
+            return error_response(f"model '{model}' is not allowed for this key", 403, "model_not_allowed")
         if policy.max_queued is not None and queue.client_queued(client.name) >= policy.max_queued:
             return error_response(
                 "too many queued requests for this key", 429, "client_queue_full", **{"Retry-After": "5"}
@@ -1194,8 +1199,9 @@ def create_app(
                 )
         for row in rows.values():
             row["label"] = snapshot.names.label_on(row["id"], row["upstreams"])
-        for pinned in per_upstream.values():
-            if len(pinned) > 1:  # offered by several upstreams: let a choice name one of them
+        for model_id, pinned in per_upstream.items():
+            # offered by several upstreams, or an alias has its name (the bare choice is the alias): a choice names one
+            if len(pinned) > 1 or model_id in snapshot.aliases:
                 rows.update({p["id"]: p for p in pinned})
         for alias in snapshot.aliases.values():
             rows[alias.name] = {
@@ -2013,7 +2019,7 @@ def create_app(
             for target, entry in served[model_id]:  # one entry per provider: you choose which serves it
                 key = f"{model_id}@{target.upstream.name}"
                 public[key] = app_id(model_id, target.upstream.name)
-                if allowed and model_id not in allowed and key not in allowed and public[key] not in allowed:
+                if not model_allowed(allowed, model_id, target.upstream.name, public[key]):
                     continue
                 pair = [(target, entry)]
                 limits = limits_on(model_id, [target])
@@ -2029,7 +2035,7 @@ def create_app(
                 if with_thinking and reads_images(model_id, pair):
                     result[key]["input"] = ["text", "image"]
         for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
-            if allowed and alias.name not in allowed and alias.target_model not in allowed:
+            if allowed and alias.name not in allowed:  # by its own name: the model it sends to doesn't bring it
                 continue
             target, pin = split_pin(alias.target_model)  # "model@upstream" pins it like the upstream ticks
             ids = pin or alias.upstream_ids
@@ -2236,7 +2242,7 @@ def create_app(
                 entry = context_sizes.apply(real, target.id, model)
                 everything.setdefault(real, entry)
                 public = ids.of.get((upstream, real))
-                if public is None or allowed and not {public, real, f"{real}@{upstream}"} & allowed:
+                if public is None or not model_allowed(allowed, real, upstream, public):
                     continue  # hidden there, or not this client's
                 if (target.id, real) in snapshot.names.custom:
                     pair = [(target, model)]
@@ -2248,7 +2254,7 @@ def create_app(
         if not merged and all(catalogs.ids(t.id) is None for t in targets):
             return error_response("no upstream returned a model list", 502, "upstream_error")
         for alias in snapshot.aliases.values():
-            if not allowed or {alias.name, alias.target_model} & allowed:
+            if not allowed or alias.name in allowed:
                 merged[alias.name] = alias_entry(alias, everything.get(split_pin(alias.target_model)[0] or ""))
                 inner[alias.name] = alias.name
         scored = await asyncio.to_thread(store.list_model_scores)
@@ -2281,7 +2287,9 @@ def create_app(
             return data
         bare, pin = split_pin(model_id)
         found = next((m for m in data if m["id"] == model_id), None)
-        if found is None and pin and (not client.policy.allowed_models or bare in client.policy.allowed_models):
+        allowed = client.policy.allowed_models  # a bare name an alias has is the alias's, as in model_allowed
+        lets_in = not allowed or model_id in allowed or (bare in allowed and bare not in snapshot.aliases)
+        if found is None and pin and lets_in:
             found = next(({**m, "id": model_id} for m in catalogs.models(pin[0]) if m["id"] == bare), None)
         if found is None:
             return error_response(f"The model '{model_id}' does not exist", 404, "model_not_found")
@@ -3871,9 +3879,15 @@ def create_app(
                     f"model '{model}' is offered by several providers: use one of {choices}", 400, "model_ambiguous"
                 )
             )
+        # The group's list lets in an alias by its name only, not the model it sends to; a model by its ID for apps,
+        # the real one with its provider, or the real one alone unless an alias has that name (then it's the alias's)
+        if alias:
+            allowed_by = {alias.name}
+        else:
+            allowed_by = {model, asked} | ({bare_target} if bare_target not in snapshot.aliases else set())
         # QueueRouter's own requests (council members, judge, summaries) serve a request already admitted: the
         # client's model list and queue limits apply to that request, not to the models working on it
-        if not internal and (refusal := policy_refusal(client, model, bare_target, asked)):
+        if not internal and (refusal := policy_refusal(client, asked or model, allowed_by)):
             return refused(refusal)
         no_fallbacks = not (alias and alias.fallbacks)  # with fallbacks, a missing target just moves on
         checked = cfg().unknown_model_check and no_fallbacks and not target_pin  # a pinned upstream decides

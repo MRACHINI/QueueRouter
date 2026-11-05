@@ -8,6 +8,8 @@ from cryptography.fernet import Fernet
 from app.config import ClientPolicy, with_group
 from app.store import MIGRATIONS, Store
 from tests.test_admin import OWNER, csrf_of, login
+from tests.test_aliases import add_alias
+from tests.test_model_names import opencode, two_providers
 from tests.test_policies import chat, set_group, set_policy
 
 
@@ -85,6 +87,43 @@ async def test_a_groups_models_and_limits_reach_its_clients_at_once(make_stack):
         await set_group(c, stack, "client1-models")  # every model, new ones too; no limits
         assert "mock-model" in [m["id"] for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]]
         assert store.list_groups()[1].policy == ClientPolicy()
+
+
+async def test_each_model_or_alias_in_a_group_allows_only_itself(make_stack, make_mock):
+    """Seen: a group with one model showed every alias sending to it in opencode, and one with the alias
+    claude-opus-5-5 showed (and let through) the Claude provider's own claude-opus-5-5 too."""
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["extra_models"] = ["other-model"]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        second, _ = await two_providers(c, stack, make_mock)
+        second["extra_models"] = ["smart"]  # a real model with an alias's name
+        await add_alias(c, "smart", "other-model")
+        await add_alias(c, "fast", "other-model")
+
+        def ask(model):
+            return c.post("/v1/chat/completions", headers=stack.headers, json=chat("hi", model=model))
+
+        await set_policy(c, stack, allowed_models="other-model")  # a model: not the aliases sending to it
+        assert list(await opencode(c, stack)) == ["other-model"]
+        assert (await ask("other-model")).status_code == 200
+        assert (await ask("fast")).status_code == 403
+
+        await set_policy(c, stack, allowed_models="smart")  # an alias's name: the alias, not the model named so
+        assert list(await opencode(c, stack)) == ["smart"]
+        assert [m["id"] for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]] == ["smart"]
+        assert (await ask("smart")).status_code == 200
+        for other in ("smart@second", "other-model"):
+            assert (await ask(other)).status_code == 403, other
+        assert second["served"] == 0
+
+        await set_policy(c, stack, allowed_models="smart@second")  # that model, on its provider
+        assert list(await opencode(c, stack)) == ["smart@second"]
+        assert (await ask("smart@second")).status_code == 200 and second["served"] == 1
+        assert (await ask("smart")).status_code == 403
+        assert (await c.get("/v1/models/smart@second", headers=stack.headers)).status_code == 200
+
+        editor = (await c.get("/admin/groups/new")).text  # the picker offers the model the alias's name hides
+        assert '"id": "smart@second"' in editor and '"id": "smart"' in editor
 
 
 async def test_creating_editing_and_deleting_groups(make_stack):
