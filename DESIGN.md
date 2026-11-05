@@ -1677,6 +1677,10 @@ v0.61.0: groups (plans) of clients.
 - Pages: a Groups list on the Clients page (models, limits set, its clients); a group editor with the alias editor's
   model picker (`picker.html`, now shared) and the limits (`limits.html`, shared with the client's Limits form,
   where a blank box shows the group's value greyed); a Group dropdown on each client and in Add client.
+v0.61.1: the image ships again.
+- v0.61.0's image was never published: the scan before the push found CVE-2026-109518 (HIGH, apt and libapt-pkg7.0
+  3.0.3, fixed in 3.0.4) in the pinned python:3.14-slim. The base moves to the current python:3.14-slim (Debian
+  13.7, apt 3.0.4), the one the tests ran on. Nothing else changed.
 
 ### Later (agreed, not scheduled)
 
