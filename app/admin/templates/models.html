@@ -89,6 +89,11 @@ and opencode is told it (so it compacts in time). It comes from the provider's m
 say, QueueRouter <strong>learns</strong> it from the provider's own "too long" error. Set it here by hand to fill a gap
 or correct a wrong value: on a row for that provider only, in this form for every provider that offers the model (a row's own
 value wins; a plan's context cap still applies on top).</p>
+<p class="muted small"><strong>Output</strong> is the longest answer: opencode is told it, and a bigger answer size an
+app asks for (Claude Code asks 128,000 for Opus) is lowered to it before sending. It comes from, first known first:
+yours, <em>learned</em> (the provider refused a bigger answer size and said its limit; the request was sent again at
+once), its list, models.dev (that provider's own figure when models.dev lists it, else the model maker's, else the
+median of the providers selling it); else <em>default</em>, 16,384 or half the context.</p>
 <form method="post" action="/admin/model-limits" class="card row wrap">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input name="model" required list="model-ids" placeholder="model id" aria-label="Model" class="grow">
@@ -102,15 +107,17 @@ value wins; a plan's context cap still applies on top).</p>
     {% if unknown %}<span class="badge">{{ unknown | length }} unknown</span>{% endif %}</summary>
   <div class="table-wrap">
   <table class="cards">
-    <thead><tr><th>Model</th><th>In use</th><th>Details</th><th>Manual</th></tr></thead>
+    <thead><tr><th>Model</th><th>In use</th><th>Output</th><th>Details</th><th>Manual</th></tr></thead>
     <tbody>
     {% for c in contexts %}
     <tr>
       <td data-label="Model" class="mono small wrap-any">{{ c.label }}{% if c.every %} <span class="badge">every provider</span>{% endif %}</td>
       <td data-label="In use">{{ "{:,}".format(c.context) if c.context else ("—" if c.every else "unknown") }}</td>
+      <td data-label="Output">{% if c.every %}—{% elif c.output %}{{ "{:,}".format(c.output) }}
+        <span class="small muted">{{ c.output_source }}</span>{% else %}unknown{% endif %}</td>
       <td data-label="Details" class="small">
         {% if not c.every %}{% if c.reported %}reports {{ "{:,}".format(c.reported) }}{% else %}<span class="muted">not reported</span>{% endif %}
-        {% if c.learned %}· <strong>learned {{ "{:,}".format(c.learned) }}</strong>
+        {% if c.learned or c.learned_output %}· <strong>learned{% if c.learned %} {{ "{:,}".format(c.learned) }}{% endif %}{% if c.learned_output %}{{ "," if c.learned }} output {{ "{:,}".format(c.learned_output) }}{% endif %}</strong>
           <form method="post" action="/admin/model-limits/forget" class="inline">
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <input type="hidden" name="upstream_id" value="{{ c.upstream_id }}">
@@ -130,7 +137,7 @@ value wins; a plan's context cap still applies on top).</p>
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="4" class="muted">No models loaded yet.</td></tr>
+    <tr><td colspan="5" class="muted">No models loaded yet.</td></tr>
     {% endfor %}
     </tbody>
   </table>

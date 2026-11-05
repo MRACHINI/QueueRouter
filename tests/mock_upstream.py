@@ -241,6 +241,16 @@ def create_mock(limit: int = 2) -> FastAPI:
         if limit and (always or len(json.dumps(body.get("messages") or [])) / 4 > limit):
             state.setdefault("overflowed", []).append(body.get("model"))
             return _overflow(limit, style)
+        # Output limits set by a test: state["output_limits"][model] = tokens refuses a bigger answer size, as OpenAI.
+        most = (state.get("output_limits") or {}).get(body.get("model"))
+        asked = body.get("max_completion_tokens") or body.get("max_tokens")
+        if most and isinstance(asked, int) and asked > most:
+            state.setdefault("output_refused", []).append(asked)
+            message = (
+                f"max_tokens is too large: {asked}. This model supports at most {most} completion tokens, "
+                f"whereas you provided {asked}."
+            )
+            return JSONResponse({"error": {"message": message, "type": "invalid_request_error"}}, status_code=400)
         # Summary requests (compaction): answer "summary <n>" and remember what was asked.
         first = (body.get("messages") or [{}])[0]
         if str(first.get("content", "")).startswith("You compact the history"):

@@ -7,6 +7,9 @@ catalog opencode uses), matched by model name, with manual overrides from the ad
 2. a manually chosen models.dev reference (``provider/model``), else
 3. automatic match: the model creator's own API price ("official"), or the median across
    providers when the creator doesn't sell it (open-weight models).
+
+The same catalog gives output sizes for models whose provider's list doesn't say (``PriceCatalog.output``):
+that provider's own figure when models.dev lists the provider, else the creator's, else the median.
 """
 
 from __future__ import annotations
@@ -18,7 +21,9 @@ import re
 import statistics
 import tempfile
 import time
+import urllib.parse
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -54,6 +59,15 @@ OFFICIAL = (
     "perplexity",
 )
 _DATE_SUFFIX = re.compile(r"[-_:](\d{4}|\d{6}|\d{8}|\d{4}-\d{2}-\d{2})$")
+# Providers models.dev lists without an API address (apps use their own SDKs), by the host of their API.
+OWN_API_HOSTS = {
+    "api.anthropic.com": "anthropic",
+    "api.openai.com": "openai",
+    "api.groq.com": "groq",
+    "generativelanguage.googleapis.com": "google",
+    "api.mistral.ai": "mistral",
+    "api.deepinfra.com": "deepinfra",
+}
 
 
 @dataclass(frozen=True)
@@ -87,10 +101,16 @@ def _usable(cost: list[float]) -> bool:
 
 
 class PriceCatalog:
+    """models.dev's prices, and its output sizes (``outputs``) with each provider's API address (``apis``)."""
+
     def __init__(self, path: str | None = None) -> None:
         self.path = path
         self.prices: dict[str, list[float]] = {}  # "provider/model" -> [input, output, cache_read]
         self.index: dict[str, list[str]] = {}
+        self.outputs: dict[str, int] = {}  # "provider/model" -> the longest answer, where below its context
+        self.output_index: dict[str, list[str]] = {}
+        self.apis: dict[str, str] = {}  # provider -> its OpenAI-compatible address
+        self._found: dict[tuple, Any] = {}  # output() and provider_of(), worked out once per catalog
         self.fetched_at = 0.0
 
     # -- loading ---------------------------------------------------------------------------
@@ -112,12 +132,35 @@ class PriceCatalog:
                 ]
         return prices
 
-    def use(self, prices: dict[str, list[float]], fetched_at: float) -> None:
+    @staticmethod
+    def slim_sizes(raw: dict) -> dict:
+        """Output sizes (only those below the model's context: one as big as the context says nothing) and the
+        providers' API addresses."""
+        outputs: dict[str, int] = {}
+        apis: dict[str, str] = {}
+        for provider_id, provider in raw.items():
+            if isinstance(provider.get("api"), str):
+                apis[provider_id] = provider["api"]
+            for model_id, model in (provider.get("models") or {}).items():
+                limit = model.get("limit") if isinstance(model.get("limit"), dict) else {}
+                output, context = limit.get("output"), limit.get("context")
+                if isinstance(output, int) and output > 0 and not (isinstance(context, int) and output >= context):
+                    outputs[f"{provider_id}/{model_id}"] = output
+        return {"outputs": outputs, "apis": apis}
+
+    def use(self, prices: dict[str, list[float]], fetched_at: float, sizes: dict | None = None) -> None:
         self.prices, self.fetched_at = prices, fetched_at
         index: dict[str, list[str]] = {}
         for ref in prices:
             index.setdefault(_norm(ref.split("/", 1)[1]), []).append(ref)
         self.index = index
+        if sizes is not None:
+            self.outputs, self.apis = dict(sizes.get("outputs") or {}), dict(sizes.get("apis") or {})
+            output_index: dict[str, list[str]] = {}
+            for ref in self.outputs:
+                output_index.setdefault(_norm(ref.split("/", 1)[1]), []).append(ref)
+            self.output_index = output_index
+        self._found = {}
 
     def load_file(self) -> bool:
         if not self.path or not os.path.exists(self.path):
@@ -125,7 +168,9 @@ class PriceCatalog:
         try:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
-            self.use(data["prices"], float(data["fetched_at"]))
+            # a file from before output sizes were kept: used, and fetched again soon (counts as stale)
+            fetched_at = float(data["fetched_at"]) if "sizes" in data else 0.0
+            self.use(data["prices"], fetched_at, data.get("sizes"))
             return True
         except (OSError, ValueError, KeyError) as exc:
             log.warning(json.dumps({"event": "price_catalog_unreadable", "error": repr(exc)[:200]}))
@@ -139,13 +184,14 @@ class PriceCatalog:
         try:
             response = await client.get(CATALOG_URL, headers={"User-Agent": USER_AGENT}, timeout=60)
             response.raise_for_status()
-            prices = self.slim(response.json())
-        except (httpx.HTTPError, ValueError) as exc:
+            raw = response.json()
+            prices, sizes = self.slim(raw), self.slim_sizes(raw)
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
             log.warning(json.dumps({"event": "price_catalog_refresh_failed", "error": repr(exc)[:200]}))
             return False
         if not prices:
             return False
-        self.use(prices, time.time())
+        self.use(prices, time.time(), sizes)
         if self.path:
             self._save()
         log.info(json.dumps({"event": "price_catalog_refreshed", "models": len(prices)}))
@@ -155,7 +201,8 @@ class PriceCatalog:
         directory = os.path.dirname(self.path) or "."
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".prices-", suffix=".json")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"fetched_at": self.fetched_at, "prices": self.prices}, f)
+            sizes = {"outputs": self.outputs, "apis": self.apis}
+            json.dump({"fetched_at": self.fetched_at, "prices": self.prices, "sizes": sizes}, f)
         os.replace(tmp, self.path)
 
     # -- lookups ---------------------------------------------------------------------------
@@ -187,6 +234,56 @@ class PriceCatalog:
                 statistics.median(c[2] for c in costs),
                 source=f"median of {len(refs)} provider{'s' if len(refs) > 1 else ''}",
             )
+        return None
+
+    def provider_of(self, base_url: str) -> str | None:
+        """The models.dev provider an upstream's address belongs to: the one with exactly that API address, else the
+        only one on that host, else one models.dev lists without an address (it has its own API)."""
+        key = ("provider", base_url)
+        if key not in self._found:
+            parts = urllib.parse.urlsplit(base_url)
+            host, path = (parts.hostname or "").lower(), parts.path.rstrip("/")
+            same = [
+                (provider, urllib.parse.urlsplit(api).path.rstrip("/"))
+                for provider, api in self.apis.items()
+                if (urllib.parse.urlsplit(api).hostname or "").lower() == host
+            ]
+            exact = [provider for provider, api_path in same if api_path == path]
+            if len(exact) == 1:
+                self._found[key] = exact[0]
+            elif len(same) == 1:
+                self._found[key] = same[0][0]
+            else:
+                self._found[key] = OWN_API_HOSTS.get(host) if not same else None
+        return self._found[key]
+
+    def output(self, model_id: str, provider: str | None = None, name: str | None = None) -> tuple[int, str] | None:
+        """The longest answer models.dev gives for a model, and whose figure it is: that provider's own for the
+        model, else (by its custom ``name`` if it has one) the creator's, else the median of the providers stating
+        one. None when models.dev has none."""
+        key = ("output", model_id, provider, name)
+        if key not in self._found:
+            self._found[key] = self._output(model_id, provider, name)
+        return self._found[key]
+
+    def _output(self, model_id: str, provider: str | None, name: str | None) -> tuple[int, str] | None:
+        if provider:
+            if (own := self.outputs.get(f"{provider}/{model_id}")) is not None:
+                return own, provider
+            for k in candidate_keys(model_id):
+                mine = [r for r in self.output_index.get(k, []) if r.split("/", 1)[0] == provider]
+                if mine:
+                    return self.outputs[min(mine, key=len)], provider
+        variants = [self.output_index.get(k, []) for k in candidate_keys(name or model_id)]
+        for maker in OFFICIAL:
+            for refs in variants:
+                official = [r for r in refs if r.split("/", 1)[0] == maker]
+                if official:
+                    return self.outputs[min(official, key=len)], maker
+        for refs in variants:
+            if refs:
+                size = int(statistics.median(self.outputs[r] for r in refs))
+                return size, f"median of {len(refs)} provider{'s' if len(refs) > 1 else ''}"
         return None
 
     def references(self, limit_to_official: bool = True) -> list[str]:

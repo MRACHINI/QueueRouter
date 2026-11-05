@@ -58,13 +58,13 @@ from .compaction import Plans
 from .compaction import compact as compact_request
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
 from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
-from .limits import OVERFLOW_STATUS, ModelLimits, error_message, overflow_body, overflow_of
+from .limits import OVERFLOW_STATUS, ModelLimits, error_message, output_limit_of, overflow_body, overflow_of
 from .names import EVERY, SEPARATOR, PublicIds, providers, public_ids
 from .opencode import (
     DEFAULT_OUTPUT,
-    OUTPUT_KEYS,
     PLUGIN_HEADER,
     PLUGIN_PATH,
+    listed_output,
     model_limits,
     plugin_fingerprint,
     plugin_source,
@@ -927,27 +927,51 @@ def create_app(
             if target is None:
                 continue
             entry = next((m for m in catalogs.models(target.id, raw=True) if m["id"] == model), None)
-            known = model_limits(context_sizes.apply(model or "", target.id, entry), [target.pool.context_cap])
+            known = model_limits(sized(model or "", target, entry), [target.pool.context_cap])
             if known is None:
                 return None  # one candidate with unknown context: don't guess
             contexts.append(known["context"])
         return min(contexts) if contexts else None
 
     def model_output(model: str | None, candidates: tuple[Candidate, ...]) -> int | None:
-        """The longest answer the model gives, when every upstream it may go to says (its model list, or the Models
-        page): the smallest of them. None when one doesn't say."""
+        """The longest answer the model gives, when it's known for every upstream it may go to (see sized): the
+        smallest of them. None when one isn't known."""
         sizes = []
         for candidate in candidates:
             target = snapshot.upstreams.get(candidate.upstream_id)
             if target is None:
                 continue
             entry = next((m for m in catalogs.models(target.id, raw=True) if m["id"] == model), None)
-            entry = context_sizes.apply(model or "", target.id, entry) or {}
-            size = next((v for k in OUTPUT_KEYS if isinstance(v := entry.get(k), int) and v > 0), None)
+            size = listed_output(sized(model or "", target, entry))
             if size is None:
                 return None
             sizes.append(size)
         return min(sizes) if sizes else None
+
+    def output_source(model: str, target: Target, entry: dict | None) -> tuple[int | None, str]:
+        """The longest answer ``model`` gives on ``target`` and where that comes from, first known first: yours (the
+        Models page), learned from the provider refusing a bigger one, its model list, models.dev."""
+        key = (target.id, model)
+        manual = context_sizes.manual_for(model, target.id)
+        if manual and manual.output:
+            return manual.output, "yours"
+        if key in context_sizes.learned_output:
+            return context_sizes.learned_output[key], "learned"
+        if (listed := listed_output(entry)) is not None:
+            return listed, "its list"
+        provider = prices.provider_of(target.upstream.base_url)  # the catalog the prices come from
+        if found := prices.output(model, provider, snapshot.names.custom.get(key)):
+            return found[0], f"models.dev: {found[1]}"
+        return None, ""
+
+    def sized(model: str, target: Target, entry: dict | None) -> dict | None:
+        """``entry`` (a model list item, None when not listed) with the sizes QueueRouter knows beyond it: yours and
+        the learned ones (context_sizes), and the output size in use as ``max_output_tokens`` (output_source)."""
+        merged = context_sizes.apply(model, target.id, entry)
+        output, _ = output_source(model, target, entry)
+        if output is not None and (merged or {}).get("max_output_tokens") != output:  # the key every reader knows
+            merged = {**(merged or {"id": model}), "max_output_tokens": output}
+        return merged
 
     def candidates_for(model: str | None, only: tuple[int, ...] = (), raw: bool = False) -> tuple[Candidate, ...]:
         """Usable upstreams for ``model``: those that list it, or all of them if none does
@@ -1236,13 +1260,14 @@ def create_app(
 
     def context_table() -> list[dict]:
         """One row per model on a provider: what it reports, what was learned from its errors, the plan cap, your
-        size and the one in use (None = unknown); plus one row for a size set for every provider. For the Models
-        page."""
+        size and the one in use (None = unknown), and the output size in use with where it comes from; plus one row
+        for a size set for every provider. For the Models page."""
         entries: dict[tuple[int, str], dict] = {}
         for target in snapshot.upstreams.values():
             for model in catalogs.models(target.id):
                 entries[(target.id, model["id"])] = model
-        keys = set(entries) | {k for k in context_sizes.learned if k[0] in snapshot.upstreams}
+        learned = set(context_sizes.learned) | set(context_sizes.learned_output)
+        keys = set(entries) | {k for k in learned if k[0] in snapshot.upstreams}
         keys |= {k for k in context_sizes.manual if k[0] == EVERY or k[0] in snapshot.upstreams}
         rows = []
         for upstream_id, model_id in keys:
@@ -1251,7 +1276,8 @@ def create_app(
             entry = entries.get((upstream_id, model_id))
             reported = model_limits(entry, []) if entry else None
             caps = [target.pool.context_cap] if target else []
-            used = model_limits(context_sizes.apply(model_id, upstream_id, entry), caps) if target else None
+            used = model_limits(sized(model_id, target, entry), caps) if target else None
+            output, source = output_source(model_id, target, entry) if target else (None, "")
             rows.append(
                 {
                     "model": model_id,
@@ -1259,9 +1285,12 @@ def create_app(
                     "label": snapshot.names.label(model_id, name),
                     "reported": reported["context"] if reported else None,
                     "learned": context_sizes.learned.get((upstream_id, model_id)),
+                    "learned_output": context_sizes.learned_output.get((upstream_id, model_id)),
                     "cap": target.pool.context_cap if target else None,
                     "manual": context_sizes.manual.get((upstream_id, model_id)),
                     "context": used["context"] if used else None,
+                    "output": used["output"] if used else output,  # what opencode is told (unknown: the default)
+                    "output_source": source if output is not None else "default",
                     "every": target is None,
                 }
             )
@@ -1753,6 +1782,25 @@ def create_app(
                                 retries += 1
                                 yield Backoff(0, retries, f"HTTP 404 on {target.upstream.name}, failing over")
                                 break
+                        if status in OVERFLOW_STATUS and requested_size(adm.body):
+                            # an answer size the provider refuses, naming the most it gives: noted, and the request
+                            # goes again at once on this slot asking for that much (each time less: it ends)
+                            try:
+                                content = await response.aread()
+                            except httpx.HTTPError:
+                                content = b""
+                            finally:
+                                await response.aclose()
+                            most, message = output_limit_of(status, content)
+                            if most is not None and (lowered := lowered_output(adm.body, most)) is not None:
+                                adm.body, asked = lowered
+                                await learn_output(target, model, most, message)
+                                adm.rlog.fields["error"] = (
+                                    f"{target.upstream.name} gives at most {most} output tokens: asked for {asked}, "
+                                    f"sent again with {most}"
+                                )
+                                continue
+                            response = Replay(response, content, complete=True)
                         if status not in FAILURE_STATUS:
                             circuits.success(target.id)
                             verdict = True
@@ -1816,6 +1864,18 @@ def create_app(
             return
         message = " ".join((error_message(content) or "").split()) or "(no error text)"
         rlog.fields["error"] = f"HTTP {status} from {target.upstream.name}: {message}"[:500]
+
+    async def learn_output(target: Target, model: str, most: int, message: str) -> None:
+        """The most a provider says ``model`` answers (refusing a bigger answer size): kept, so opencode is told it
+        and answer sizes asked for later are lowered to it before they're sent."""
+        key = (target.id, model)
+        if not model or context_sizes.learned_output.get(key) == most:
+            return
+        context_sizes.learned_output[key] = most
+        await asyncio.to_thread(store.learn_model_output, target.id, model, most, message)
+        log.info(
+            json.dumps({"event": "output_learned", "upstream": target.upstream.name, "model": model, "output": most})
+        )
 
     async def check_overflow(adm: Admission, event: Got, model: str) -> tuple[Got, bool]:
         """A provider's "prompt too long" error: remember the limit it states (so the next request is
@@ -1987,8 +2047,7 @@ def create_app(
             known = [
                 lim
                 for t in on
-                if t.id in entries
-                and (lim := model_limits(context_sizes.apply(model_id, t.id, entries[t.id]), [t.pool.context_cap]))
+                if t.id in entries and (lim := model_limits(sized(model_id, t, entries[t.id]), [t.pool.context_cap]))
             ]
             if not known:
                 return None
@@ -2239,7 +2298,7 @@ def create_app(
             upstream = target.upstream.name
             for model in catalogs.models(target.id, raw=True):
                 real = model["id"]
-                entry = context_sizes.apply(real, target.id, model)
+                entry = sized(real, target, model)
                 everything.setdefault(real, entry)
                 public = ids.of.get((upstream, real))
                 if public is None or not model_allowed(allowed, real, upstream, public):
@@ -4468,6 +4527,29 @@ def repair_structured(adm: Admission, content: bytes) -> tuple[bytes, str | None
     if verdict == "repaired":
         return json.dumps(reply, ensure_ascii=False).encode(), verdict
     return content, verdict
+
+
+def requested_size(body: bytes) -> int:
+    """The answer size a JSON request body asks for (0: none)."""
+    try:
+        payload = json.loads(body) if body else None
+    except ValueError:
+        return 0
+    return requested_output(payload) if isinstance(payload, dict) else 0
+
+
+def lowered_output(body: bytes, most: int) -> tuple[bytes, int] | None:
+    """``body`` asking for an answer of at most ``most`` tokens, and what it asked for; None when it asked no more."""
+    try:
+        payload = json.loads(body) if body else None
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or (asked := requested_output(payload)) <= most:
+        return None
+    for key in ("max_completion_tokens", "max_tokens"):
+        if isinstance(payload.get(key), int) and payload[key] > most:
+            payload[key] = most
+    return json.dumps(payload).encode(), asked
 
 
 def body_model(body: bytes) -> str:

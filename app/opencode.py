@@ -31,7 +31,8 @@ CONTEXT_KEYS = (
     "context_window",
     "max_input_tokens",
 )  # Groq, Anthropic
-OUTPUT_KEYS = ("max_output_tokens", "max_completion_tokens", "max_tokens")  # last: Anthropic
+# max_output_length: Synthetic; max_tokens (last): Anthropic
+OUTPUT_KEYS = ("max_output_tokens", "max_completion_tokens", "max_output_length", "max_tokens")
 
 # The login command only hands opencode the key from $QUEUEROUTER_KEY (opencode runs it without a
 # shell and stores whatever it prints). Windows has no `sh`, hence a PowerShell variant.
@@ -56,6 +57,17 @@ LOGIN_COMMANDS = {
 }
 
 
+def listed_output(entry: dict | None) -> int | None:
+    """The longest answer a model list item gives: under one of OUTPUT_KEYS, else OpenRouter's
+    ``top_provider.max_completion_tokens``. None when it doesn't say."""
+    entry = entry or {}
+    size = next((v for k in OUTPUT_KEYS if isinstance(v := entry.get(k), int) and v > 0), None)
+    top = entry.get("top_provider")
+    if size is None and isinstance(top, dict) and isinstance(top.get("max_completion_tokens"), int):
+        size = top["max_completion_tokens"] if top["max_completion_tokens"] > 0 else None
+    return size
+
+
 def model_limits(entry: dict | None, caps: Iterable[int | None]) -> dict[str, int] | None:
     """opencode ``limit`` for a model: its own context (capped by the plans of the pools that
     serve it) and output size. None when the context size isn't known."""
@@ -70,10 +82,7 @@ def model_limits(entry: dict | None, caps: Iterable[int | None]) -> dict[str, in
         context = min([context, *known_caps]) if context else min(known_caps)
     if not context:
         return None
-    output = next(
-        (v for k in OUTPUT_KEYS if isinstance(v := (entry or {}).get(k), int) and v > 0),
-        min(DEFAULT_OUTPUT, context // 2),
-    )
+    output = listed_output(entry) or min(DEFAULT_OUTPUT, context // 2)
     return {"context": context, "output": min(output, context)}
 
 

@@ -58,6 +58,12 @@ from a **web admin UI**.
   provider's own "too long" error when it doesn't say (NVIDIA, Gemini...), or set by hand on the Models
   page. Requests are checked before queuing, opencode is told the size, and every provider's overflow
   error is rewritten into the standard `context_length_exceeded` form that opencode compacts on.
+- **Output sizes** (the longest answer): from the provider's model list (Synthetic's `max_output_length`
+  and OpenRouter's `top_provider` too), else models.dev (that provider's own figure, else the model maker's,
+  else the median of the providers selling it), **learned** when a provider refuses a bigger answer size and
+  says its limit (the request is sent again at once asking for that much), or set by hand. opencode is told
+  it, and a bigger size an app asks for (Claude Code: 128,000 for Opus) is lowered before sending. The
+  Models page shows each model's size and where it comes from.
 - **Compaction** (per alias): when a conversation is too big for the model it goes to, QueueRouter shrinks
   it before sending — from ~80% of the model's context down to ~50%: old tool outputs keep their start and
   end, then old middle messages are dropped. The system prompt, the task, the current message and the

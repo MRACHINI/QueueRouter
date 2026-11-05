@@ -1694,6 +1694,29 @@ v0.62.0: each entry of a group's list allows only itself.
   picked (the alias editor too).
 - The upgrade changes no list: a group that relied on a model to reach its aliases loses them until they're added
   (putting them in would undo what was asked for).
+v0.63.0: output sizes are found for each model.
+- Seen: Synthetic lists every model's output (65,536) as `max_output_length`, which QueueRouter didn't read, and
+  Refuseless lists none; both got the default 16,384 (or half the context), so opencode asked for no more, thinking
+  models ended with `length` sooner, and Claude Code's 128,000 for an Opus alias went to Synthetic unlowered.
+- `opencode.listed_output`: `max_output_tokens`, `max_completion_tokens`, `max_output_length` (Synthetic),
+  `max_tokens` (Anthropic), else OpenRouter's `top_provider.max_completion_tokens`.
+- `main.output_source`, first known first: yours (Models page) > learned > the list > models.dev > none (the
+  default for opencode; a request isn't lowered). `sized` puts the one in use in the entry as `max_output_tokens`, so
+  opencode's limits, the answer-size lowering (`model_output` → `fit_output`) and /v1/models entries all read it.
+- models.dev: the price catalog (already fetched daily) now also keeps `limit.output` where it's below the model's
+  context (one as big as the context says nothing) and each provider's `api` address. `PriceCatalog.provider_of`
+  maps an upstream to a models.dev provider: that exact address, else the only provider on the host, else a host
+  models.dev lists without an address (Anthropic, OpenAI, Groq, Google, Mistral, DeepInfra). `output`: that
+  provider's figure for the model, else the maker's (OFFICIAL, as for prices, by the custom name if any), else the
+  median of the providers stating one. A catalog file from before is used and fetched again (counts as stale).
+- Learned: `attempts` reads a 400/413/422 when the request asked for an answer size; `limits.output_limit_of` finds
+  the limit in the provider's words (OpenAI "supports at most N completion tokens", Anthropic "> N, which is the
+  maximum allowed number of output tokens", DeepSeek "valid range of max_tokens is [1, N]", Groq "must be less than
+  or equal to `N`", and similar), never in a "prompt too long" error (`overflow_of` first). Below what was asked, it
+  is kept per upstream and model (`model_limits` learned row, `output` column; Forget clears both sizes) and the
+  request goes again at once on the same slot asking for that much, with a note on the Requests page. Each resend
+  asks for less, so it ends. A provider that silently cuts answers can't be detected: an answer cut below the size
+  asked isn't used (providers count thinking differently, so a too-small size could be learned).
 
 ### Later (agreed, not scheduled)
 

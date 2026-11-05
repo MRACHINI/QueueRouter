@@ -1520,6 +1520,16 @@ class Store:
                 (upstream_id, model, context, note[:300], time.time()),
             )
 
+    def learn_model_output(self, upstream_id: int, model: str, output: int, note: str) -> None:
+        """An output size read from the provider refusing a bigger answer size (beside a learned context)."""
+        with self.tx() as db:
+            db.execute(
+                "INSERT INTO model_limits (upstream_id, model, source, output, note, updated_at) "
+                "VALUES (?, ?, 'learned', ?, ?, ?) ON CONFLICT(upstream_id, model, source) DO UPDATE SET "
+                "output = excluded.output, note = excluded.note, updated_at = excluded.updated_at",
+                (upstream_id, model, output, note[:300], time.time()),
+            )
+
     def forget_learned_limit(self, upstream_id: int, model: str, actor: str) -> None:
         with self.tx() as db:
             db.execute(

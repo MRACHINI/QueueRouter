@@ -6,6 +6,8 @@ sources fill the gap:
             per upstream + model, the first time a request is too big;
   manual  - set per provider and model on the Models page (also corrects a wrong reported value).
 Manual wins over learned, learned over what the model list says; plan caps still apply on top.
+Output sizes the same way: learned from a provider refusing the answer size asked for ("supports at most N
+completion tokens"), or set by hand.
 
 Every provider words its overflow error differently; they are rewritten into OpenAI's form
 (400, ``context_length_exceeded``, "This model's maximum context length is N tokens"), which
@@ -89,6 +91,40 @@ def overflow_of(status: int, content: bytes) -> tuple[bool, int | None, str]:
     return True, None, message
 
 
+# A provider refusing the answer size asked for, with the most it gives (not "the prompt doesn't fit").
+_OUTPUT_LIMIT_PATTERNS = (
+    re.compile(r"supports at most (\d[\d,]*) completion tokens", re.I),  # OpenAI
+    re.compile(r"> (\d[\d,]*), which is the maximum allowed number of output tokens", re.I),  # Anthropic
+    re.compile(r"valid range of max_tokens is \[\d+, ?(\d[\d,]*)\]", re.I),  # DeepSeek
+    re.compile(  # Groq: "max_tokens must be less than or equal to `32768`"
+        r"max_(?:completion_|output_|new_)?tokens[`'\"]?\s+(?:must|should|has to) be "
+        r"(?:less than or equal to|<=|at most|no (?:more|greater|larger) than|smaller than or equal to"
+        r"|between \d+ and) [`'\"]?(\d[\d,]*)",
+        re.I,
+    ),
+    re.compile(
+        r"(?:maximum|max) (?:number of )?(?:output|completion) tokens (?:allowed )?(?:is|of):? [`'\"]?(\d[\d,]*)", re.I
+    ),
+)
+MIN_OUTPUT = 256
+
+
+def output_limit_of(status: int, content: bytes) -> tuple[int | None, str]:
+    """(the most the provider says the model answers, its message) when it refused the answer size asked for; None
+    for any other error. A "prompt too long" error is never one, even when it names ``max_tokens``."""
+    if status not in OVERFLOW_STATUS:
+        return None, ""
+    overflow, _, message = overflow_of(status, content)
+    if overflow:
+        return None, message
+    for pattern in _OUTPUT_LIMIT_PATTERNS:
+        if match := pattern.search(message):
+            value = int(match.group(1).replace(",", ""))
+            if MIN_OUTPUT <= value <= MAX_CONTEXT:
+                return value, message
+    return None, message
+
+
 def overflow_body(model: str, context: int | None, needed: int | None = None, detail: str = "") -> bytes:
     """The standard OpenAI-style overflow error."""
     if context:
@@ -121,15 +157,20 @@ class ModelLimits:
     def __init__(self) -> None:
         self.manual: dict[tuple[int, str], Limit] = {}
         self.learned: dict[tuple[int, str], int] = {}
+        self.learned_output: dict[tuple[int, str], int] = {}  # from a provider refusing an answer size
 
     def load(self, rows: list[dict]) -> None:
-        manual, learned = {}, {}
+        manual, learned, learned_output = {}, {}, {}
         for row in rows:
+            key = (row["upstream_id"], row["model"])
             if row["source"] == "manual":
-                manual[(row["upstream_id"], row["model"])] = Limit(row["context"], row["output"])
-            elif row["context"]:
-                learned[(row["upstream_id"], row["model"])] = row["context"]
-        self.manual, self.learned = manual, learned
+                manual[key] = Limit(row["context"], row["output"])
+                continue
+            if row["context"]:
+                learned[key] = row["context"]
+            if row["output"]:
+                learned_output[key] = row["output"]
+        self.manual, self.learned, self.learned_output = manual, learned, learned_output
 
     def manual_for(self, model: str, upstream_id: int) -> Limit | None:
         return self.manual.get((upstream_id, model)) or self.manual.get((EVERY, model))
@@ -138,11 +179,14 @@ class ModelLimits:
         """``entry`` (a /v1/models item) with known limits filled in; unchanged if none."""
         manual = self.manual_for(model, upstream_id)
         learned = self.learned.get((upstream_id, model))
-        if not manual and not learned:
+        learned_output = self.learned_output.get((upstream_id, model))
+        if not manual and not learned and not learned_output:
             return entry
         merged = dict(entry or {"id": model})
         if learned:
             merged["context_length"] = learned
+        if learned_output:
+            merged["max_output_tokens"] = learned_output
         if manual and manual.context:
             merged["context_length"] = manual.context
         if manual and manual.output:
