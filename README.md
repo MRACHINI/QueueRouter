@@ -32,6 +32,13 @@ from a **web admin UI**.
   keeps failing, can't fit the prompt, or (opt-in) refuses — detected from content-policy errors,
   `finish_reason: content_filter` or a reply opening with a refusal. The request is resent
   unchanged.
+- **Answer checks** (opt-in per alias): a checker model you pick reads each plain-text answer
+  before the app gets it, with your instructions, the user's last message and the answer (not the
+  rest of the conversation), and replies PASS or FAIL with a reason. A failed answer never reaches
+  the app: the same request goes to the alias's next model, and the Requests page says why (the
+  discarded answer and the check are rows of their own, so their cost counts). Answers that call
+  tools, and the last model's, aren't checked; a checked answer arrives whole once it passes, not
+  word by word. A checker that fails or takes over two minutes lets the answer through.
 - **Sticky routing**: with several upstreams, a conversation returns to the upstream that served
   it, so its prompt cache stays warm.
 - **Provider quotas handled sensibly**: a provider's 429 message is shown (stream notes, errors, the
@@ -609,7 +616,8 @@ apps seen and how many requests were turned away, and **Unblock** lets one in ag
 `auth_blocked` when a block starts.
 
 Responses also carry `X-QueueRouter-Model` (the model that actually answered, e.g. after a
-fallback); streams announce a fallback with an SSE comment.
+fallback); streams announce a fallback with an SSE comment. Under a row, the Requests page says why a request
+fell back and what an alias's answer check said.
 
 ## Development
 

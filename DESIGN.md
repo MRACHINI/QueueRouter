@@ -1717,6 +1717,29 @@ v0.63.0: output sizes are found for each model.
   request goes again at once on the same slot asking for that much, with a note on the Requests page. Each resend
   asks for less, so it ends. A provider that silently cuts answers can't be detected: an answer cut below the size
   asked isn't used (providers count thinking differently, so a too-small size could be learned).
+v0.64.0: answer checks per alias.
+- Asked for: a second model reviews an answer and decides whether the request goes to the fallback model. Opt-in per
+  alias (Answer check: on, checker model, instructions; needs instructions and a fallback). Only plain-text answers
+  of chat completions from apps (the API adapters included), never QueueRouter's own requests (so a checker that is
+  itself a checking alias isn't checked), never the last model's answer (nothing is left to fall back to).
+- `chained` → `check_answer`: `fallback.hold_answer` reads the whole answer before any of it goes out (a sent answer
+  can't be taken back, so tokens can't be checked as they stream), with `Checking` events for keep-alives (SSE
+  comments; pings for Claude apps). A tool call seen in the stream releases what was held at once and the rest
+  streams as it comes, unchecked; so does an answer still running when the key's time is up. Once all of it is read
+  the attempt is closed, freeing its slot (a checker on the same one-slot provider would otherwise wait for itself).
+- The checker (`answer_check`): one `internal_completion` (queued, counted, a row with role "answer check" under
+  the request) with the instructions, the user's last message (its middle left out past 12,000 characters) and the
+  answer's text (40,000), never the rest of the conversation, tool output or thinking. It answers PASS or "FAIL:
+  reason"; the verdict is read from its first line, else its last, thinking tags dropped. FAIL: the request moves
+  on as a fallback (`check: reason`). An error, a reply that can't be read, or no verdict within two minutes (or the
+  key's time left) lets the answer through, noted. With "refused" on, the whole held answer is checked for a
+  refusal first (no checker call).
+- A failed (or refused) answer is a row of its own (role "failed answer check" / "refused") with its tokens and the
+  provider's times taken as it came, so usage, quotas, limits and run budgets count what it cost.
+- Requests: `fallback` (every fallback of the request, which only the live log had) and `answer_check` (per checked
+  model: passed / failed with the reason / not checked and why) are stored and shown under the row; the trace page
+  lists the check's rows. A held stream keeps its real provider times (`Replay.sniffer`); what the app waits for
+  (`ttft_ms`) ends when the checked answer goes out.
 
 ### Later (agreed, not scheduled)
 

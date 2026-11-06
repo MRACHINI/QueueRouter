@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 
 from . import (
     __version__,
+    answer_check,
     anthropic_api,
     claude,
     content_log,
@@ -57,7 +58,7 @@ from .circuit import Circuits
 from .compaction import Plans
 from .compaction import compact as compact_request
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
-from .fallback import Replay, is_policy_error, is_refusal_text, message_text, sniff_stream
+from .fallback import Replay, hold_answer, is_policy_error, is_refusal_text, message_text, sniff_stream
 from .limits import OVERFLOW_STATUS, ModelLimits, error_message, output_limit_of, overflow_body, overflow_of
 from .names import EVERY, SEPARATOR, PublicIds, providers, public_ids
 from .opencode import (
@@ -203,7 +204,8 @@ class RequestLog:
             "cache_write_tokens": None,  # of the prompt tokens, written to the provider's cache (Claude: billed extra)
             "finish_reason": None,
             "stopped": None,  # cancelled: how far it had got ("in queue", "mid-answer"...)
-            "fallback": None,
+            "fallback": None,  # why it moved on to the alias's next model ("a -> b (reason)"; several: "; ")
+            "answer_check": None,  # what the alias's answer check said, per model checked (app/answer_check.py)
             "tags": None,
             "run": None,
             "target_model": None,
@@ -257,6 +259,12 @@ def note_backoff(rlog: RequestLog, event: Backoff) -> None:
     rlog.fields["backoff_ms"] = (rlog.fields["backoff_ms"] or 0) + round(event.delay * 1000)
 
 
+def add_note(rlog: RequestLog, field: str, note: str) -> None:
+    """``note`` after what ``field`` already says (a request that falls back twice, or is checked twice)."""
+    current = rlog.fields.get(field)
+    rlog.fields[field] = f"{current}; {note}" if current else note
+
+
 @dataclass
 class Admission:
     """Everything needed to queue and send one request."""
@@ -283,9 +291,19 @@ class Admission:
     # [first enqueued at, its seq, seconds waited in the queue so far]: shared by the fallback steps (replace()
     # copies the list's reference), so a step queues where the request first did and its waits add up
     place: list = dataclasses.field(default_factory=list)
+    check: Check | None = None  # the alias checks plain-text answers (app/answer_check.py)
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
+
+
+@dataclass(frozen=True)
+class Check:
+    """An alias's answer check: who checks, how, and as which client (the check is made as that client)."""
+
+    model: str
+    instructions: str
+    client: ClientKey
 
 
 @dataclass(frozen=True)
@@ -306,6 +324,13 @@ class FellBack:
     from_model: str
     to_model: str
     reason: str
+
+
+@dataclass
+class Checking:
+    """An answer is held back while it comes or is checked: a keep-alive is due (``note``: say what's happening)."""
+
+    note: str | None = None
 
 
 # Events from the attempt loop to the response writers.
@@ -1916,7 +1941,7 @@ def create_app(
             nxt = None if last else steps[index + 1].model
 
             def fall(reason: str, step=step, nxt=nxt):
-                adm.rlog.fields["fallback"] = f"{step.model} -> {nxt} ({reason})"
+                add_note(adm.rlog, "fallback", f"{step.model} -> {nxt} ({reason})")
                 return FellBack(step.model, nxt, reason)
 
             if (
@@ -1973,6 +1998,23 @@ def create_app(
                             yield fall(f"HTTP {status}")
                             moved_on = True
                             break
+                        if status == 200 and adm.check is not None:  # held back whole, then checked
+                            result: tuple = (None, "")
+                            checks = check_answer(adm, step, event, events, triggers)
+                            async with contextlib.aclosing(checks) as items:
+                                async for item in items:
+                                    if isinstance(item, Checking):
+                                        yield item
+                                    else:
+                                        result = item
+                            held = None  # passed on, or closed by check_answer
+                            passed, why = result
+                            if passed is not None:
+                                yield passed
+                                return
+                            yield fall(why)
+                            moved_on = True
+                            break
                         if "refused" in triggers:
                             if 400 <= status < 500:
                                 content = await response.aread()
@@ -2009,6 +2051,160 @@ def create_app(
                 raise
             if not moved_on:
                 return
+
+    async def check_answer(
+        adm: Admission, step: Step, got: Got, events: AsyncIterator, triggers: frozenset[str]
+    ) -> AsyncIterator[Checking | tuple[Got | None, str]]:
+        """An alias's answer check (app/answer_check.py): the answer is held back whole while it comes, then its
+        checker reads it. Yields ``Checking`` while waiting, then (the ``Got`` to pass on, "") or (None, why it
+        failed: the next model's turn). An answer that calls tools, or that still runs when the key's time is up,
+        is passed on at once, unchecked. Once all of it is read, ``events`` (the attempt) is closed so its slot is
+        free meanwhile, for the checker's request too."""
+        stream = bool(adm.rlog.fields["stream"])
+        timed = UsageSniffer() if stream else None  # the answer's real times, as it comes (the app sees it later)
+        held = None
+        try:
+            reads = hold_answer(
+                got.response,
+                stream,
+                keepalive_s(),
+                adm.deadline,
+                (lambda chunk: timed.feed(chunk, time.monotonic())) if timed else None,
+            )
+            async with contextlib.aclosing(reads) as items:
+                async for item in items:
+                    if item is None:
+                        yield Checking()
+                    else:
+                        held = item
+        except httpx.HTTPError as exc:  # broke off before any of it was passed on: the next model can still answer
+            await got.response.aclose()
+            if "errors" not in triggers:
+                raise
+            yield None, f"answer broke off: {type(exc).__name__}"
+            return
+        replay = held.replay
+        replay.sniffer = timed
+        if held.acting or not held.whole:
+            if not held.acting:
+                add_note(adm.rlog, "answer_check", f"{step.model}: not checked (no time left)")
+            yield Got(replay, got.target), ""
+            return
+        await events.aclose()  # all of it is read: the slot is free
+        answered = time.monotonic()
+        try:
+            if "refused" in triggers and is_refusal_text(held.text, held.finish):
+                note_discarded(adm, step, held, timed, answered, "refused")
+                await replay.aclose()
+                yield None, "refused"
+                return
+            check = adm.check
+            limit = answer_check.TIMEOUT_S
+            if adm.deadline is not None:
+                limit = min(limit, adm.deadline - answered)
+            if limit < 1:
+                add_note(adm.rlog, "answer_check", f"{step.model}: not checked (no time left)")
+                yield Got(replay, got.target), ""
+                return
+            adm.rlog.fields["stage"] = "checking"
+            yield Checking(f"checking the answer of {step.model}")
+            payload = answer_check.check_payload(check.model, check.instructions, step.body, held.text)
+            task = asyncio.ensure_future(
+                internal_completion(
+                    check.client,
+                    payload,
+                    LANE_NAMES[adm.lane],
+                    tag="check",
+                    origin=adm.headers,
+                    role="answer check",
+                    parent=adm.request_id,
+                )
+            )
+            started = time.monotonic()
+            try:
+                while not task.done() and (left := started + limit - time.monotonic()) > 0:
+                    await asyncio.wait({task}, timeout=min(keepalive_s(), left))
+                    if not task.done():
+                        yield Checking()
+            finally:
+                if not task.done():
+                    task.cancel()  # its own request ends too (its slot freed), as a cancelled one
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await task
+            if task.cancelled():
+                passed, reason = None, f"the checker took over {round(limit)} s"
+            elif (body := task.result()) is None:
+                passed, reason = None, "the checker's request failed"
+            else:
+                passed, reason = answer_check.verdict_of(body)
+            seconds = f"{time.monotonic() - started:.1f} s"
+            if passed is None:
+                add_note(adm.rlog, "answer_check", f"{step.model}: not checked ({reason}), passed on")
+                log.warning(json.dumps({"event": "check_failed", "client": adm.client, "reason": reason}))
+            elif passed:
+                add_note(adm.rlog, "answer_check", f"{step.model}: passed ({seconds})")
+            else:
+                add_note(adm.rlog, "answer_check", f"{step.model}: failed ({seconds}): {reason}")
+                note_discarded(adm, step, held, timed, answered, "failed answer check", f"failed: {reason}")
+                await replay.aclose()
+                yield None, f"check: {reason}"
+                return
+        except BaseException:
+            await replay.aclose()
+            raise
+        finally:
+            adm.rlog.fields["stage"] = None
+        yield Got(replay, got.target), ""
+
+    def note_discarded(
+        adm: Admission,
+        step: Step,
+        held,
+        timed: UsageSniffer | None,
+        answered: float,
+        role: str,
+        check: str | None = None,
+    ) -> None:
+        """An answer the app never got (it failed the check, or refused): a row of its own under the request on
+        the Requests page, so what it cost counts (usage, the client's limits and quotas, its run's budget).
+        ``answered``: when all of it had come (monotonic)."""
+        main = adm.rlog
+        if timed is not None:
+            tokens = timed.prompt_tokens, timed.completion_tokens, timed.cached_tokens, timed.cache_write_tokens
+            timings = timed.timings(main.sent_at)
+        else:
+            tokens, timings = usage_from_body(held.replay.prefix), {}
+        prompt, completion, cached, written = tokens
+        row = RequestLog(f"qr-{uuid.uuid4().hex[:12]}", main.fields["method"], main.fields["path"], main.fields["ip"])
+        row.started = main.started + (time.monotonic() - answered)  # its total time ends when it had all come
+        kept = ("client", "priority", "session", "model", "upstream", "stream", "position", "queue_ms", "retries")
+        kept += ("tags", "run", "user_agent", "sent_user_agent", "client_headers", "headers_ms")
+        row.fields.update({key: main.fields[key] for key in kept})
+        row.fields.update(
+            target_model=step.model,
+            compaction=step.compaction,
+            estimate=step.estimate,
+            role=role,
+            parent=main.fields["id"],
+            answer_check=check,
+        )
+        granted = _granted_at(main)
+        row.finish(
+            stats,
+            outcome="done",
+            status=200,
+            upstream_ms=round((answered - granted) * 1000) if granted else None,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            cached_tokens=cached,
+            cache_write_tokens=written,
+            finish_reason=held.finish,
+            **timings,
+        )
+        used = (prompt or 0) + (completion or 0)
+        limiter.record_tokens(adm.client, used)
+        if adm.run is not None:
+            runs.note_tokens(adm.run, used)
 
     # -- routes ----------------------------------------------------------------------------
 
@@ -3975,6 +4171,10 @@ def create_app(
         # The chain: the requested model (or the alias's target), then the alias's fallbacks.
         chain = [target_model, *(alias.fallbacks if alias else ())]
         triggers = frozenset(alias.fallback_on) if alias and alias.fallbacks else frozenset()
+        check = None  # the alias's answer check: chat completions from apps (not QueueRouter's own requests)
+        if alias and alias.check_answers and alias.fallbacks and alias.check_instructions.strip():
+            if not internal and path == "chat/completions" and isinstance(payload, dict):
+                check = Check(alias.check_model or alias.target_model, alias.check_instructions, client)
         param_changes = []
         strip_usage = False  # usage asked for here, not by the app: its chunk is left out of the app's stream
         if isinstance(payload, dict):
@@ -4171,6 +4371,7 @@ def create_app(
             run,
             log_request=body if keep_content else None,
             strip_usage=strip_usage,
+            check=check,
         )
         if rlog.fields["stream"]:
             return StreamingResponse(
@@ -4287,6 +4488,8 @@ def create_app(
                 async for event in events:
                     if isinstance(event, FellBack):
                         yield f": {event.from_model} {one_line(event.reason)}; trying {event.to_model}\n\n".encode()
+                    elif isinstance(event, Checking):  # the answer is held back: show the stream is alive
+                        yield f": {one_line(event.note)}\n\n".encode() if event.note else KEEPALIVE
                     elif isinstance(event, Queued):
                         note = (
                             f": queued id={adm.request_id} position={event.position} "
@@ -4329,6 +4532,9 @@ def create_app(
                         sse = response.headers.get("content-type", "").startswith("text/event-stream")
                         between = True  # what the app got so far ends with a whole event
                         idle = keepalive_s() if sse else None
+                        unfed = None  # an answer held back for its check was timed as it came: not again now
+                        if (timed := getattr(response, "sniffer", None)) is not None:
+                            sniffer, unfed = timed, response.prefix
                         try:
                             async with contextlib.aclosing(
                                 within(response.aiter_bytes(), adm.deadline, idle)
@@ -4338,7 +4544,10 @@ def create_app(
                                         if between:
                                             yield KEEPALIVE
                                         continue
-                                    sniffer.feed(chunk, time.monotonic())
+                                    if chunk is unfed:
+                                        unfed = None
+                                    else:
+                                        sniffer.feed(chunk, time.monotonic())
                                     if rlog.fields["ttft_ms"] is None:
                                         rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
                                     if captured is not None and len(captured) < CONTENT_CAPTURE_MAX:

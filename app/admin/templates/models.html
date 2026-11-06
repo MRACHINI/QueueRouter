@@ -25,8 +25,9 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
       {% if a.compact != "off" %}<span class="badge" title="Conversations too big for the model are shrunk">{{ a.compact }}{% if a.compact_model %} with {{ a.compact_model }}{% endif %}</span>{% endif %}
       {% if a.virtual_context %}<span class="badge" title="Context size told to apps">{{ "{:,}".format(a.virtual_context) }} context</span>{% endif %}
       {% if a.council != "off" %}<span class="badge" title="Members: {{ a.council_members | map('model_label') | join(', ') }}">council {{ a.council }} ({{ a.council_members | length }}){% if a.council_search %} + web search{% endif %}</span>{% endif %}
+      {% if a.check_answers %}<span class="badge" title="Checker: {{ (a.check_model or a.target_model) | model_label }}">checks answers</span>{% endif %}
       {% if a.params %}<span class="badge" title="{{ a.params }}">rules</span>{% endif %}
-      {% if a.compact == "off" and not a.virtual_context and a.council == "off" and not a.params %}<span class="muted">—</span>{% endif %}</td>
+      {% if a.compact == "off" and not a.virtual_context and a.council == "off" and not a.params and not a.check_answers %}<span class="muted">—</span>{% endif %}</td>
     <td data-label=""><div class="row wrap">
       <a class="button secondary" href="/admin/aliases/{{ a.id }}">Edit</a>
       <form method="post" action="/admin/aliases/{{ a.id }}/delete" data-confirm="Delete alias {{ a.name }}? Apps using it will get errors.">

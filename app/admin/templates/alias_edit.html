@@ -39,6 +39,20 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
   </fieldset>
 
   <fieldset class="card">
+    <legend>Answer check</legend>
+    <label class="check"><input type="checkbox" name="check_answers" {% if a.check_answers %}checked{% endif %}>
+      A checker model reads each plain-text answer before the app gets it</label>
+    <label>Checker model {{ picker("check_model", a.check_model, "single", "blank = the target model") }}
+      <small class="muted">Prefer a small, fast model, ideally on another provider (it uses a slot).</small></label>
+    <label>Instructions <textarea name="check_instructions" rows="4" maxlength="4000" placeholder="e.g. Fail the answer if it refuses, lectures, or doesn't do what was asked. Fail it if it isn't in the user's language.">{{ a.check_instructions }}</textarea>
+      <small class="muted">The checker sees these, the user's last message and the answer, not the rest of the
+      conversation, and answers PASS or FAIL with a reason. FAIL: the same request goes to the next fallback model
+      (needs one), and the Requests page says why. Answers that call tools aren't checked, nor is the last model's
+      answer (nothing is left to fall back to). A checked answer reaches the app all at once once it's checked, not
+      word by word; if the checker fails or takes over two minutes, the answer goes through.</small></label>
+  </fieldset>
+
+  <fieldset class="card">
     <legend>Compaction</legend>
     <label>Mode <select name="compact">
       {% for m in compact_modes %}<option value="{{ m }}" {% if a.compact == m %}selected{% endif %}>{{ m }}</option>{% endfor %}

@@ -7,7 +7,8 @@ An alias can list backup models. The request moves to the next one when (per ali
   refused     - the model declined: a content-policy error, finish_reason "content_filter", or a
                 reply that opens with a refusal ("I can't help with ..."). For streams the first
                 ~200 characters are held back to check, then released (or the model is switched).
-The request itself is resent unchanged; nothing is rephrased.
+The request itself is resent unchanged; nothing is rephrased. An alias that checks answers (app/answer_check.py)
+holds back a whole plain-text answer instead (``hold_answer``), and moves on when its checker fails it.
 """
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 
 import httpx
 
@@ -132,6 +134,8 @@ class Replay:
         self._pump = pump
         self.status_code = response.status_code
         self.headers = response.headers
+        self.prefix = prefix
+        self.sniffer = None  # a UsageSniffer that already saw ``prefix`` as it came (its times are the real ones)
 
     async def aread(self) -> bytes:
         if self._complete:
@@ -202,3 +206,89 @@ async def sniff_stream(response: httpx.Response) -> tuple[bool, Replay]:
         raise
     refused = not acting and is_refusal_text(text, finish)
     return refused, Replay(response, b"".join(buffered), None if ended else pump.chunks(), complete=ended, pump=pump)
+
+
+@dataclass
+class Held:
+    """An answer read before any of it was passed on (``hold_answer``)."""
+
+    replay: Replay
+    text: str = ""
+    finish: str | None = None
+    acting: bool = False  # it calls tools: passed on as it comes, unchecked
+    whole: bool = True  # all of it was read (False: handed on early, as it calls tools or time ran out)
+
+
+def answer_of(body: bytes) -> tuple[str, str | None, bool]:
+    """(text, finish_reason, calls tools?) of a non-streamed chat completion."""
+    try:
+        choice = (json.loads(body).get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+    except (ValueError, AttributeError, IndexError):
+        return "", None, False
+    acting = bool(message.get("tool_calls") or message.get("function_call"))
+    text = message.get("content")
+    return (text if isinstance(text, str) else ""), choice.get("finish_reason"), acting
+
+
+async def hold_answer(
+    response: httpx.Response,
+    stream: bool,
+    idle: float,
+    deadline: float | None,
+    feed: Callable[[bytes], None] | None = None,
+) -> AsyncIterator[Held | None]:
+    """Read a whole answer before any of it is passed on: ``None`` whenever nothing came for ``idle`` seconds (the
+    caller's cue for a keep-alive), then one ``Held``. A stream that turns out to call tools, or still runs at the
+    monotonic ``deadline``, is handed on at once, the unread rest following as it comes. ``feed`` sees each chunk
+    of a stream as it arrives."""
+    if not stream:
+        content = await response.aread()
+        text, finish, acting = answer_of(content)
+        yield Held(Replay(response, content, complete=True), text, finish, acting)
+        return
+    pump = Pump(response)
+    buffered: list[bytes] = []
+    pending = b""
+    text: list[str] = []
+    finish: str | None = None
+    ended = acting = False
+    try:  # the result is handed over below, outside: closing this generator then mustn't stop the pump it uses
+        while not (ended or acting):
+            wait = idle
+            if deadline is not None and (wait := min(idle, deadline - time.monotonic())) <= 0:
+                break
+            try:
+                chunk = await pump.get(wait)
+            except TimeoutError:
+                yield None
+                continue
+            if chunk is None:
+                ended = True
+                break
+            if feed is not None:
+                feed(chunk)
+            buffered.append(chunk)
+            pending += chunk
+            *lines, pending = pending.split(b"\n")
+            for line in lines:
+                if not line.startswith(b"data:") or line.strip() == b"data: [DONE]":
+                    continue
+                try:
+                    choice = (json.loads(line[5:]).get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
+                except (ValueError, AttributeError, IndexError):
+                    continue
+                if delta.get("tool_calls") or delta.get("function_call"):
+                    acting = True
+                if isinstance(delta.get("content"), str):
+                    text.append(delta["content"])
+                elif isinstance(choice.get("text"), str):
+                    text.append(choice["text"])
+                finish = choice.get("finish_reason") or finish
+    except BaseException:  # stopped while reading: don't leave the reader task behind
+        pump.stop()
+        raise
+    rest = None if ended else pump.chunks()
+    replay = Replay(response, b"".join(buffered), rest, complete=ended, pump=pump)
+    yield Held(replay, "".join(text), finish, acting, whole=ended)

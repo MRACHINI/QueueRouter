@@ -7,9 +7,13 @@
   <time data-ts="{{ r.ts }}">{{ r.ts | int }}</time> · {{ r.outcome }} {{ r.status }}
   {% if r.total_ms %}· {{ "{:,}".format(r.total_ms) }} ms{% endif %}</p>
 {% if r.council %}<p><span class="badge">{{ r.council }}</span></p>{% endif %}
+{% if r.fallback %}<p class="small">fell back: {{ r.fallback }}</p>{% endif %}
+{% if r.answer_check %}<p class="small">answer check: {{ r.answer_check }}</p>{% endif %}
 {% if r.error %}<p class="small muted">error: {{ r.error }}</p>{% endif %}
 
+{% if timeline or r.council %}
 <h2>Timeline</h2>
+{% endif %}
 {% if timeline %}
 <div class="table-wrap">
 <table class="cards">
@@ -23,7 +27,7 @@
 </div>
 <p class="small muted">Tasks, search queries, page addresses and the orchestrator's notes are shown here only for clients
 with content logging on (Clients page); the app saw them live in its thinking.</p>
-{% else %}
+{% elif r.council %}
 <p class="muted">No timeline recorded for this request.</p>
 {% endif %}
 

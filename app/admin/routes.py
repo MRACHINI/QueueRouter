@@ -96,6 +96,8 @@ ALIAS_ERRORS = {  # what was wrong in the alias editor
     "virtual_context": "Context told to apps: from 1,024 to 100,000,000 tokens, or blank.",
     "council": "Unknown council setting.",
     "council_members": "A council needs 1 to 64 members.",
+    "check": "Checking answers needs instructions and at least one fallback model (a failed answer goes to the "
+    "next model).",
     "council_search_max": "Searches per member: 1 to 10.",
     "council_search_results": "Results per search: 1 to 10.",
     "orch_rounds": "Orchestrator rounds: 1 to 30.",
@@ -107,7 +109,7 @@ LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes /
 REQUEST_LIST_COLUMNS = (
     "id, ts, client, priority, model, target_model, upstream, status, outcome, retries, queue_ms, ttft_ms, "
     "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, finish_reason, stopped, "
-    "compaction, council, role, parent"
+    "compaction, council, role, parent, answer_check"
 )
 REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "id",
@@ -133,6 +135,8 @@ REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "council",
     "role",
     "parent",
+    "fallback",
+    "answer_check",
 )
 HERE = os.path.dirname(__file__)
 
@@ -1937,6 +1941,13 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             raise ValueError("council_members")
         if council != "off" and len(members) < COUNCIL_MIN:
             raise ValueError("council_members")
+        check_answers = form.get("check_answers") == "on"
+        check_model = str(form.get("check_model", "")).strip()
+        check_instructions = str(form.get("check_instructions", "")).strip()
+        if len(check_model) > 200 or len(check_instructions) > 4000:
+            raise ValueError("check")
+        if check_answers and not (check_instructions and fallbacks):
+            raise ValueError("check")
         return {
             "target_model": target,
             "upstream_ids": upstream_ids,
@@ -1962,6 +1973,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "council_roles": "\n".join(
                 line.strip() for line in str(form.get("council_roles", "")).splitlines() if line.strip()
             )[:8000],
+            "check_answers": check_answers,
+            "check_model": check_model,
+            "check_instructions": check_instructions,
         }
 
     def alias_from_form(form: dict, existing=None) -> SimpleNamespace:
@@ -1995,6 +2009,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             orch_tasks=str(form.get("orch_tasks", "8")),
             orch_seconds=str(form.get("orch_seconds", "300")),
             council_roles=str(form.get("council_roles", "")),
+            check_answers=form.get("check_answers") == "on",
+            check_model=str(form.get("check_model", "")).strip(),
+            check_instructions=str(form.get("check_instructions", "")),
             enabled=form.get("enabled") == "on" if existing else True,
         )
 
@@ -2031,7 +2048,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             fallback_on=DEFAULT_TRIGGERS, compact="off", compact_model="", virtual_context=None, council="off",
             council_members=[], council_judge="", council_when="planning", council_instructions="",
             council_search=False, council_search_max=3, council_search_results=5, council_fetch=False,
-            orch_rounds=6, orch_tasks=8, orch_seconds=300, council_roles="", enabled=True,
+            orch_rounds=6, orch_tasks=8, orch_seconds=300, council_roles="", check_answers=False, check_model="",
+            check_instructions="", enabled=True,
         )  # fmt: skip
         return alias_page(request, session, empty)
 

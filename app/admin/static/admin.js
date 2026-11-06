@@ -771,6 +771,7 @@ function liveRequests(root) {
     const marks = [];
     if (r.council) marks.push("council");
     if (r.compaction) marks.push("compacted");
+    if (r.answer_check) marks.push(r.answer_check.includes("failed") ? "check failed" : "checked");
     if (r.role) marks.push(r.role);
     const cell = td("Model", "");
     cell.title = [r.label, ...marks].join(" · ");
@@ -805,6 +806,8 @@ function liveRequests(root) {
     if (d.tags) line("Tags", d.tags.split(",").map((t) => `#${t}`).join(" "));
     if (d.council) line("Council", d.council);
     if (d.compaction) line("Compacted", d.compaction);
+    if (d.fallback) line("Fell back", d.fallback);
+    if (d.answer_check) line("Answer check", d.answer_check);
     if (d.role) line("Made by QueueRouter", d.role);
     if (d.parent) {
       const link = el("a", "mono", d.parent);
@@ -833,7 +836,7 @@ function liveRequests(root) {
     for (const [name, value] of Object.entries(ids)) line(name, copy(String(value)));
     const links = [];
     if (d.has_content) links.push(["Content", `/admin/requests/${d.id}/content`]);
-    if (d.council) links.push(["Trace", `/admin/requests/${d.id}/trace`]);
+    if (d.council || d.answer_check) links.push(["Trace", `/admin/requests/${d.id}/trace`]);
     if (links.length) {
       const row = el("div", "links");
       for (const [name, href] of links) {
@@ -900,7 +903,8 @@ function liveRequests(root) {
     // waiting for its conversation's summary, or for its council's members and judge
     const waiting = r.stage === "compacting" || r.stage === "council";
     const queued = r.stage === "queued" || waiting;
-    const status = waiting ? `${r.stage}…` : queued ? `queued${r.position ? ` #${r.position}` : ""}` : "running";
+    const shown = waiting || r.stage === "checking"; // its answer is being checked (alias answer check)
+    const status = shown ? `${r.stage}…` : queued ? `queued${r.position ? ` #${r.position}` : ""}` : "running";
     const outcome = text("Outcome", status);
     if (r.retries) outcome.append(el("span", "muted", ` ↻${r.retries}`));
     const queue = td("Queue ms", "num", milliseconds(queued ? r.elapsed_ms : r.queue_ms));

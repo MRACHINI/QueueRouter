@@ -535,6 +535,15 @@ MIGRATIONS: list[str] = [
     UPDATE clients SET policy = json_remove(policy, '$.loop_action')
         WHERE json_valid(policy) AND json_extract(policy, '$.loop_action') = 'warn';
     """,
+    # 39: answer checks per alias (a checker model and its instructions; app/answer_check.py), and per request
+    # why it moved to a fallback model and what the checks said
+    """
+    ALTER TABLE aliases ADD COLUMN check_answers INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE aliases ADD COLUMN check_model TEXT NOT NULL DEFAULT '';
+    ALTER TABLE aliases ADD COLUMN check_instructions TEXT NOT NULL DEFAULT '';
+    ALTER TABLE requests ADD COLUMN fallback TEXT;
+    ALTER TABLE requests ADD COLUMN answer_check TEXT;
+    """,
 ]
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -592,6 +601,8 @@ REQUEST_COLUMNS = (
     "tokens_per_s",
     "stall_ms",
     "backoff_ms",
+    "fallback",
+    "answer_check",
 )
 
 
@@ -717,6 +728,9 @@ class Alias:
     orch_tasks: int = 8  # ...member tasks...
     orch_seconds: int = 300  # ...and time
     council_roles: str = ""  # "member = role: instructions" per line (app/council.py parse_roles)
+    check_answers: bool = False  # a checker model reads plain-text answers first (app/answer_check.py)
+    check_model: str = ""  # blank = the target model
+    check_instructions: str = ""
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -1671,6 +1685,9 @@ class Store:
                 r["orch_tasks"] or 8,
                 r["orch_seconds"] or 300,
                 r["council_roles"] or "",
+                bool(r["check_answers"]),
+                r["check_model"] or "",
+                r["check_instructions"] or "",
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1701,14 +1718,18 @@ class Store:
         orch_tasks: int = 8,
         orch_seconds: int = 300,
         council_roles: str = "",
+        check_answers: bool = False,
+        check_model: str = "",
+        check_instructions: str = "",
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
                 "INSERT INTO aliases (name, target_model, upstream_ids, notes, params, fallbacks, fallback_on, "
                 "compact, compact_model, virtual_context, council, council_members, council_judge, council_when, "
                 "council_instructions, council_search, council_search_max, council_search_results, council_fetch, "
-                "orch_rounds, orch_tasks, orch_seconds, council_roles, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "orch_rounds, orch_tasks, orch_seconds, council_roles, check_answers, check_model, "
+                "check_instructions, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     target_model,
@@ -1733,6 +1754,9 @@ class Store:
                     orch_tasks,
                     orch_seconds,
                     council_roles,
+                    int(check_answers),
+                    check_model,
+                    check_instructions,
                     time.time(),
                 ),
             )
@@ -1766,6 +1790,9 @@ class Store:
             "orch_tasks",
             "orch_seconds",
             "council_roles",
+            "check_answers",
+            "check_model",
+            "check_instructions",
         }
         self._update("aliases", alias_id, allowed, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)

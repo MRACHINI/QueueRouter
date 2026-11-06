@@ -251,8 +251,24 @@ def create_mock(limit: int = 2) -> FastAPI:
                 f"whereas you provided {asked}."
             )
             return JSONResponse({"error": {"message": message, "type": "invalid_request_error"}}, status_code=400)
-        # Summary requests (compaction): answer "summary <n>" and remember what was asked.
+        # Answer checks: PASS, or FAIL when the answer contains a word in state["check_fail"]; state["check_reply"]
+        # answers instead, state["check_status"] fails the check's request, state["check_delay"] slows it.
         first = (body.get("messages") or [{}])[0]
+        if str(first.get("content", "")).startswith("You check an AI assistant's answer"):
+            state.setdefault("check_inputs", []).append(body)
+            if state.get("check_status"):
+                return JSONResponse({"error": {"message": "checker down"}}, status_code=state["check_status"])
+            if state.get("check_delay"):
+                await asyncio.sleep(state["check_delay"])
+            answer = str(body["messages"][1]["content"]).split("<answer>")[-1]
+            bad = [w for w in state.get("check_fail", []) if w in answer]
+            body["mock_content"] = state.get("check_reply") or (f"FAIL: it says {bad[0]}" if bad else "PASS")
+            body["mock_delay"] = 0.01
+        # Per-model answers: state["model_words"][model] = the pieces it streams (or answers in one go).
+        words_of = (state.get("model_words") or {}).get(body.get("model"))
+        if words_of and not body.get("mock_content"):
+            body["mock_words"] = words_of
+        # Summary requests (compaction): answer "summary <n>" and remember what was asked.
         if str(first.get("content", "")).startswith("You compact the history"):
             state.setdefault("summary_inputs", []).append(body["messages"][1]["content"])
             body["mock_content"] = f"summary {len(state['summary_inputs'])}"
@@ -376,6 +392,9 @@ def create_mock(limit: int = 2) -> FastAPI:
         chunks = body.get("mock_chunks", 5)
         tag = body.get("mock_tag")
         words = ["I can't ", "help with ", "that request."] if refuse else [f"t{i} " for i in range(chunks)]
+        if body.get("mock_words") and not refuse:
+            words = list(body["mock_words"])
+            body.setdefault("mock_content", "".join(words))
         chunks = len(words)
         state["active"] += 1
         state["peak"] = max(state["peak"], state["active"])
