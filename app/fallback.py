@@ -9,6 +9,7 @@ An alias can list backup models. The request moves to the next one when (per ali
                 ~200 characters are held back to check, then released (or the model is switched).
 The request itself is resent unchanged; nothing is rephrased. An alias that checks answers (app/answer_check.py)
 holds back a whole plain-text answer instead (``hold_answer``), and moves on when its checker fails it.
+An alias's model and fallbacks may be other aliases: ``links_of`` opens them into the models they try.
 """
 
 from __future__ import annotations
@@ -17,13 +18,79 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
 TRIGGERS = ("unavailable", "errors", "context", "refused")
 DEFAULT_TRIGGERS = ("unavailable", "errors", "context")  # "refused" adds a short delay: opt-in
+MOST_LINKS = 30  # models one alias may try, those of the aliases in it included
+
+
+@dataclass(frozen=True)
+class Link:
+    """One model an alias tries: its name ("model@upstream" sends it to that provider only), the providers ticked
+    on the alias it's the model of (none for a fallback), and the parameter rules of the aliases opened on the way
+    to it (the one asked for applies its own to the whole request)."""
+
+    named: str
+    only: tuple[int, ...] = ()
+    rules: tuple[str, ...] = ()
+
+
+def links_of(alias: Any, aliases: Mapping[str, Any]) -> list[Link]:
+    """What an alias tries, in order: its model (on the providers it ticked), then its fallbacks. A name that is
+    another alias's stands for that alias's own list, the way it works alone (its model on its providers with its
+    parameter rules, then its fallbacks), so aliases can be built from others; as in requests, a bare name an alias
+    has is the alias's (``model@provider`` is the model). A loop is cut (an alias already open isn't opened again;
+    the editor refuses them), and a model already in the list on the same providers isn't tried twice."""
+    links: list[Link] = []
+
+    def walk(current: Any, rules: tuple[str, ...], opened: frozenset[str]) -> None:
+        for index, named in enumerate((current.target_model, *current.fallbacks)):
+            inner = aliases.get(named)
+            if inner is not None:
+                if inner.name not in opened:
+                    walk(inner, (*rules, inner.params) if inner.params.strip() else rules, opened | {inner.name})
+                continue
+            only = tuple(current.upstream_ids) if index == 0 else ()
+            if len(links) < MOST_LINKS and all((link.named, link.only) != (named, only) for link in links):
+                links.append(Link(named, only, rules))
+
+    walk(alias, (), frozenset({alias.name}))
+    return links
+
+
+def triggers_of(alias: Any, aliases: Mapping[str, Any]) -> frozenset[str]:
+    """When an alias moves on to its next model: on its own ticks; one without fallbacks of its own (its list is
+    that of the alias it sends to) on that alias's."""
+    opened: set[str] = set()
+    while alias is not None and alias.name not in opened:
+        if alias.fallbacks:
+            return frozenset(alias.fallback_on)
+        opened.add(alias.name)
+        alias = aliases.get(alias.target_model)
+    return frozenset()
+
+
+def loop_of(alias: Any, aliases: Mapping[str, Any]) -> list[str] | None:
+    """The aliases around a loop in what an alias uses (``["a", "b", "a"]``), or None."""
+
+    def walk(current: Any, path: list[str]) -> list[str] | None:
+        for named in (current.target_model, *current.fallbacks):
+            inner = aliases.get(named)
+            if inner is None:
+                continue
+            if inner.name in path:
+                return [*path[path.index(inner.name) :], inner.name]
+            if found := walk(inner, [*path, inner.name]):
+                return found
+        return None
+
+    return walk(alias, [alias.name])
+
 
 SNIFF_CHARS = 200
 SNIFF_SECONDS = 2.5

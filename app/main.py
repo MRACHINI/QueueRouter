@@ -58,7 +58,17 @@ from .circuit import Circuits
 from .compaction import Plans
 from .compaction import compact as compact_request
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
-from .fallback import Replay, hold_answer, is_policy_error, is_refusal_text, message_text, sniff_stream
+from .fallback import (
+    Link,
+    Replay,
+    hold_answer,
+    is_policy_error,
+    is_refusal_text,
+    links_of,
+    message_text,
+    sniff_stream,
+    triggers_of,
+)
 from .limits import OVERFLOW_STATUS, ModelLimits, error_message, output_limit_of, overflow_body, overflow_of
 from .names import EVERY, SEPARATOR, PublicIds, providers, public_ids
 from .opencode import (
@@ -1032,6 +1042,19 @@ def create_app(
         target = next((t for t in snapshot.upstreams.values() if t.upstream.name == upstream), None)
         return (bare, (target.id,)) if target is not None and bare else (name, ())
 
+    def first_model(name: str | None) -> tuple[str | None, tuple[int, ...]]:
+        """The model a name sends to first and the upstreams it may go to (none = any): an alias's first model,
+        through the aliases in it (links_of), else the name itself; ``model@upstream`` only there."""
+        alias = snapshot.aliases.get(name) if name else None
+        only: tuple[int, ...] = ()
+        if alias is not None:
+            links = links_of(alias, snapshot.aliases)
+            if not links:  # only aliases that lead back to it
+                return None, ()
+            name, only = links[0].named, links[0].only
+        model, pin = split_pin(name)
+        return model, pin or only
+
     app_ids_memo: list = [None, None, PublicIds()]  # [snapshot, model lists' state, the IDs]
 
     def app_ids() -> PublicIds:
@@ -1065,11 +1088,12 @@ def create_app(
             for c in candidates
         )
 
-    def unknown_model(name: str | None, alias=None, raw: bool = False) -> JSONResponse | None:
+    def unknown_model(
+        name: str | None, alias=None, raw: bool = False, only: tuple[int, ...] = ()
+    ) -> JSONResponse | None:
         """A 404 with suggestions when no upstream offers ``name`` (only when every upstream's model
         list is known: a list we couldn't fetch proves nothing). ``raw``: hidden models count (an alias
-        or QueueRouter's own request names it)."""
-        only = alias.upstream_ids if alias else ()
+        or QueueRouter's own request names it). ``only``: the upstreams it may go to (none = any)."""
         usable = [t for t in snapshot.upstreams.values() if t.usable and (not only or t.id in only)]
         if not name or not usable:
             return None
@@ -1252,12 +1276,14 @@ def create_app(
             # offered by several upstreams, or an alias has its name (the bare choice is the alias): a choice names one
             if len(pinned) > 1 or model_id in snapshot.aliases:
                 rows.update({p["id"]: p for p in pinned})
+        models = {model_id: row["context"] for model_id, row in rows.items()}
         for alias in snapshot.aliases.values():
+            first, _ = first_model(alias.name)  # what it sends to first (an alias may be another's model or fallback)
             rows[alias.name] = {
                 "id": alias.name,
                 "label": alias.name,
                 "upstreams": [],
-                "context": None,
+                "context": models.get(first or ""),
                 "hidden": False,
                 "alias": True,
             }
@@ -1359,8 +1385,7 @@ def create_app(
             alias = snapshot.aliases.get(name)
             if alias and alias.council != "off":  # several calls: no price, as in opencode
                 continue
-            model, pin = split_pin(alias.target_model if alias else name)
-            ids = pin or (alias.upstream_ids if alias else ())
+            model, ids = first_model(name)
             on = [t for t in targets if (not ids or t.id in ids) and (t.id, model) in entries]
             if price := model_price(model, [(t, entries[(t.id, model)]) for t in on], overrides):
                 costs[name] = 0.0 if price.source == "plan" else blended_price(price, mix)
@@ -2252,13 +2277,8 @@ def create_app(
 
         def size_of(name: str, on: list[Target]) -> dict[str, int] | None:
             """A model's or an alias's limits (an alias: its target, on its pinned upstreams)."""
-            other = snapshot.aliases.get(name)
-            if other is None:
-                bare, pin = split_pin(name)
-                return limits_on(bare, [t for t in on if not pin or t.id in pin])
-            bare, pin = split_pin(other.target_model)
-            ids = pin or other.upstream_ids
-            return limits_on(bare, [t for t in on if not ids or t.id in ids])
+            bare, ids = first_model(name)  # an alias: its first model, through the aliases in it
+            return limits_on(bare, [t for t in on if not ids or t.id in ids]) if bare else None
 
         offered_by = {m: [t.upstream.name for t, _ in pairs] for m, pairs in listed.items()}  # shown in opencode
         manual_thinking = await asyncio.to_thread(store.list_model_thinking) if with_thinking else {}
@@ -2292,10 +2312,9 @@ def create_app(
         for alias in sorted(snapshot.aliases.values(), key=lambda a: a.name):
             if allowed and alias.name not in allowed:  # by its own name: the model it sends to doesn't bring it
                 continue
-            target, pin = split_pin(alias.target_model)  # "model@upstream" pins it like the upstream ticks
-            ids = pin or alias.upstream_ids
+            target, ids = first_model(alias.name)  # "model@upstream" pins it like the upstream ticks
             pinned = [t for t in targets if not ids or t.id in ids]
-            limits = limits_on(target, pinned)
+            limits = limits_on(target, pinned) if target else None
             if alias.council != "off":  # every member and the judge must take the conversation: the smallest counts
                 names = [alias.target_model, alias.council_judge or alias.target_model, *alias.council_members]
                 sizes = [s for s in (size_of(n, targets) for n in names) if s]
@@ -2365,9 +2384,7 @@ def create_app(
         model = payload.get("model")
         if stripped is payload or not isinstance(model, str):  # no images
             return payload
-        alias = snapshot.aliases.get(model)
-        name, pin = split_pin(alias.target_model if alias else model)
-        only = pin or (alias.upstream_ids if alias else ())
+        name, only = first_model(model)
         pairs = [
             (t, e)
             for t in snapshot.upstreams.values()
@@ -2510,7 +2527,7 @@ def create_app(
             return error_response("no upstream returned a model list", 502, "upstream_error")
         for alias in snapshot.aliases.values():
             if not allowed or alias.name in allowed:
-                merged[alias.name] = alias_entry(alias, everything.get(split_pin(alias.target_model)[0] or ""))
+                merged[alias.name] = alias_entry(alias, everything.get(first_model(alias.name)[0] or ""))
                 inner[alias.name] = alias.name
         scored = await asyncio.to_thread(store.list_model_scores)
         overrides = await asyncio.to_thread(store.list_model_prices)
@@ -2650,11 +2667,8 @@ def create_app(
     def summariser(alias, step_model: str) -> tuple[str, int | None]:
         """The model that writes summaries (the alias's compaction model, else the step's) and its context."""
         name = alias.compact_model or step_model
-        target_alias = snapshot.aliases.get(name)
-        real, pin = split_pin(target_alias.target_model if target_alias else name)
-        return name, model_context(
-            real, candidates_for(real, pin or (target_alias.upstream_ids if target_alias else ()), raw=True)
-        )
+        real, only = first_model(name)
+        return name, model_context(real, candidates_for(real, only, raw=True)) if real else None
 
     def load_summary(key: str | None) -> compaction_mod.Plan | None:
         if not key:
@@ -2800,8 +2814,8 @@ def create_app(
             return payload
         contexts = []
         for named in {alias.target_model, alias.council_judge or alias.target_model, *alias.council_members}:
-            model, pin = split_pin(named)
-            candidates = candidates_for(model, pin, raw=True)
+            model, pin = first_model(named)
+            candidates = candidates_for(model, pin, raw=True) if model else ()
             if candidates and (context := model_context(model, candidates)):
                 contexts.append(int(context / stats.ratio(model)))  # in estimate units, as for the alias
         if not contexts:
@@ -4144,10 +4158,15 @@ def create_app(
         # client's model list and queue limits apply to that request, not to the models working on it
         if not internal and (refusal := policy_refusal(client, asked or model, allowed_by)):
             return refused(refusal)
-        no_fallbacks = not (alias and alias.fallbacks)  # with fallbacks, a missing target just moves on
-        checked = cfg().unknown_model_check and no_fallbacks and not target_pin  # a pinned upstream decides
-        if checked and (missing := unknown_model(target_model, alias, raw=internal)) is not None:
-            return refused(missing)
+        # The chain: the requested model, or the alias's model then its fallbacks, aliases in it opened (links_of)
+        chain = links_of(alias, snapshot.aliases) if alias else [Link(target_model or "")]  # "": no model named
+        if not chain:
+            loop = f"alias '{asked}' has no model: the aliases in it lead back to it"
+            return refused(error_response(loop, 404, "model_not_found"))
+        first, first_pin = split_pin(chain[0].named)
+        checked = cfg().unknown_model_check and len(chain) == 1 and not first_pin  # with fallbacks, it moves on
+        if checked and (missing := unknown_model(first, alias, internal, chain[0].only)) is not None:
+            return refused(missing)  # a pinned upstream decides
         if allow_council and alias and alias.council != "off" and isinstance(payload, dict):
             lane = request_lane(request_headers, client)
             auto = "opencode" if "x-opencode-session-id" in request_headers else None
@@ -4168,11 +4187,9 @@ def create_app(
                 return await run_council(
                     request, client, alias, compacted, request_headers, lane, tags, path, body, query, original=payload
                 )
-        # The chain: the requested model (or the alias's target), then the alias's fallbacks.
-        chain = [target_model, *(alias.fallbacks if alias else ())]
-        triggers = frozenset(alias.fallback_on) if alias and alias.fallbacks else frozenset()
+        triggers = triggers_of(alias, snapshot.aliases) if alias and len(chain) > 1 else frozenset()
         check = None  # the alias's answer check: chat completions from apps (not QueueRouter's own requests)
-        if alias and alias.check_answers and alias.fallbacks and alias.check_instructions.strip():
+        if alias and alias.check_answers and len(chain) > 1 and alias.check_instructions.strip():
             if not internal and path == "chat/completions" and isinstance(payload, dict):
                 check = Check(alias.check_model or alias.target_model, alias.check_instructions, client)
         param_changes = []
@@ -4190,9 +4207,9 @@ def create_app(
         session = session_key(request_headers, client.name, payload)
         steps: list[Step] = []
         too_long_for: tuple | None = None
-        for i, named in enumerate(chain):
-            step_model, pin = split_pin(named)  # "model@upstream": only that upstream
-            only = pin or (alias.upstream_ids if alias and i == 0 else ())
+        for i, link in enumerate(chain):
+            step_model, pin = split_pin(link.named or None)  # "model@upstream": only that upstream ("": none named)
+            only = pin or link.only
             # models hidden on an upstream: for aliases and QueueRouter's own calls, not a client's own model@upstream
             step_candidates = candidates_for(step_model, only, raw=alias is not None or internal)
             if not step_candidates:
@@ -4201,6 +4218,8 @@ def create_app(
                 steps.append(Step(step_model, step_candidates, body))
                 break
             step_payload = dict(payload)
+            for rules in link.rules:  # an alias in this one: its rules for its models, the client's still last
+                apply_rules(step_payload, rules_of(rules), client_rules)
             if alias or i > 0 or pin:
                 step_payload["model"] = step_model  # the upstream gets the real model name
             context = model_context(step_model, step_candidates)

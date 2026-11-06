@@ -1759,6 +1759,24 @@ v0.65.0: Usage page periods, and who used which model.
   dearest first with its share of the row's cost. They're on the page already (hidden), so opening one loads nothing,
   and open rows stay open when the page updates itself. This replaces the page's "by client and model" choice; the
   CSV keeps it ("CSV per model", `by=model`), and over the whole period its `day` is the period's start/end.
+v0.66.0: aliases inside aliases.
+- Asked for: an alias as another alias's main model. Before, an alias's model and fallbacks were sent to providers as
+  written, so another alias's name failed (the picker even offered it); only the checker, council and summary models
+  took alias names (QueueRouter's own requests look names up like apps' do).
+- `fallback.links_of`: the chain an alias tries. A name that is another (enabled) alias's opens into that alias's own
+  list, the way it works alone: its model on its ticked providers, then its fallbacks, its parameter rules applied to
+  its steps after the outer alias's (client's rules still last). The outer alias's ticks are for its own model, so a
+  nested alias as its model uses its own. A loop is cut at runtime (an alias already open isn't opened again; with
+  nothing left: 404 "lead back to it"), a model already listed on the same providers isn't tried twice, 30 at most.
+  Triggers: the alias asked for, or with no fallbacks of its own the first nested alias's that has some
+  (`triggers_of`); its answer check counts the whole chain. Nested aliases' council, answer check, compaction and
+  virtual context don't run inside another: the outer alias's apply.
+- `first_model`: an alias's first model through the aliases in it, for its context size and price in `/v1/models` and
+  opencode, images, summaries and council compaction.
+- Editor: `loop_of` refuses an alias whose list leads back around (names the loop); the answer check's "needs a
+  fallback" counts a nested alias's. Models page: an "alias" badge on names that are aliases, and a warning where a
+  bare name is both an alias and a model a provider lists. That one changed meaning: it was the model (sent as
+  written); it is now the alias, as in requests and the picker (which offers `model@provider` for a hidden model).
 
 ### Later (agreed, not scheduled)
 

@@ -4,9 +4,13 @@
 <h1>Models &amp; aliases</h1>
 <p class="muted">An <strong>alias</strong> is a stable model name for your apps (e.g. <code>smart</code>, <code>code</code>).
 QueueRouter rewrites it to the real model before forwarding, so you can switch models here without touching any
-app. Aliases show up in <code>/v1/models</code> with their target's context size.</p>
+app. Aliases show up in <code>/v1/models</code> with their target's context size. An alias's model or fallbacks can be
+other aliases: each takes its place with its own model, providers, parameter rules and fallbacks.</p>
 
 <h2>Aliases</h2>
+{% macro sent(n) -%}
+<code>{{ n | model_label }}</code>{% if n in alias_names %} <span class="badge" title="An alias: its model, providers, rules and fallbacks take this place">alias</span>{% endif %}
+{%- endmacro %}
 <datalist id="model-ids">
   {% for name, ids in models.items() %}{% for m in ids %}<option value="{{ m }}">{{ name }}</option>{% endfor %}{% endfor %}
 </datalist>
@@ -19,8 +23,9 @@ app. Aliases show up in <code>/v1/models</code> with their target's context size
   <tr id="alias-{{ a.name }}">
     <td data-label="Alias"><a href="/admin/aliases/{{ a.id }}"><strong><code>{{ a.name }}</code></strong></a>{% if not a.enabled %} <span class="badge">disabled</span>{% endif %}
       {% if a.notes %}<div class="small muted">{{ a.notes }}</div>{% endif %}</td>
-    <td data-label="Sends to" class="small"><code>{{ a.target_model | model_label }}</code>{% for fb in a.fallbacks %} → <code>{{ fb | model_label }}</code>{% endfor %}
-      <div class="muted">{% if a.upstream_ids %}on {% for uid in a.upstream_ids %}{{ upstream_names.get(uid, uid) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}on any upstream{% endif %}</div></td>
+    <td data-label="Sends to" class="small">{{ sent(a.target_model) }}{% for fb in a.fallbacks %} → {{ sent(fb) }}{% endfor %}
+      <div class="muted">{% if a.target_model in alias_names %}its providers: those of {{ a.target_model }}{% elif a.upstream_ids %}on {% for uid in a.upstream_ids %}{{ upstream_names.get(uid, uid) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}on any upstream{% endif %}</div>
+      {% for n in shadowed.get(a.name, []) %}<div class="notice err small"><code>{{ n }}</code> is an alias and also a model a provider lists: here it means the alias. For the model, pick <code>{{ n }}@provider</code>.</div>{% endfor %}</td>
     <td data-label="Extras" class="small">
       {% if a.compact != "off" %}<span class="badge" title="Conversations too big for the model are shrunk">{{ a.compact }}{% if a.compact_model %} with {{ a.compact_model }}{% endif %}</span>{% endif %}
       {% if a.virtual_context %}<span class="badge" title="Context size told to apps">{{ "{:,}".format(a.virtual_context) }} context</span>{% endif %}

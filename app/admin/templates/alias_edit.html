@@ -20,8 +20,10 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
       <small class="muted">The name apps use, e.g. in opencode's model list.</small></label>
     {% endif %}
     <label>Target model {{ picker("target_model", a.target_model, "single", "Search models…") }}
-      <small class="muted">Where requests go (and, with a council on planning steps, the model for every other step).</small></label>
-    <fieldset class="plain"><legend class="small muted">Only on these upstreams (none ticked = any)</legend>
+      <small class="muted">Where requests go (and, with a council on planning steps, the model for every other step).
+      Another alias works too: its model, providers, parameter rules and fallbacks take this place, then this alias's
+      fallbacks follow. Its council and answer check don't run here; this alias's settings apply.</small></label>
+    <fieldset class="plain"><legend class="small muted">Only on these upstreams (none ticked = any; an alias above uses its own)</legend>
       <div class="row wrap">{% for u in upstreams %}
         <label class="check"><input type="checkbox" name="upstream_{{ u.id }}" value="{{ u.id }}" {% if u.id in a.upstream_ids %}checked{% endif %}> {{ u.name }}</label>
       {% endfor %}</div></fieldset>
@@ -31,8 +33,10 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
 
   <fieldset class="card">
     <legend>Fallbacks</legend>
-    <label>Fallback models, tried in order {{ picker("fallbacks", a.fallbacks, "multi", "Add a fallback model…", True) }}</label>
-    <fieldset class="plain"><legend class="small muted">Move on to the next one when</legend>
+    <label>Fallback models, tried in order {{ picker("fallbacks", a.fallbacks, "multi", "Add a fallback model…", True) }}
+      <small class="muted">An alias here stands for its own model and fallbacks. A model already tried isn't tried
+      again.</small></label>
+    <fieldset class="plain"><legend class="small muted">Move on to the next one when (with no fallbacks here, those of the alias above apply)</legend>
       <div class="row wrap">{% for t in triggers %}
         <label class="check"><input type="checkbox" name="on_{{ t }}" {% if t in a.fallback_on %}checked{% endif %}> {{ t }}</label>
       {% endfor %}</div></fieldset>

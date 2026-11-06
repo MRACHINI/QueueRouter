@@ -49,7 +49,7 @@ from ..council import MAX_MEMBERS as COUNCIL_MAX
 from ..council import MIN_MEMBERS as COUNCIL_MIN
 from ..council import MODES as COUNCIL_MODES
 from ..council import WHEN as COUNCIL_WHEN
-from ..fallback import DEFAULT_TRIGGERS, TRIGGERS
+from ..fallback import DEFAULT_TRIGGERS, TRIGGERS, links_of, loop_of
 from ..names import EVERY, ModelNames
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
@@ -98,8 +98,8 @@ ALIAS_ERRORS = {  # what was wrong in the alias editor
     "virtual_context": "Context told to apps: from 1,024 to 100,000,000 tokens, or blank.",
     "council": "Unknown council setting.",
     "council_members": "A council needs 1 to 64 members.",
-    "check": "Checking answers needs instructions and at least one fallback model (a failed answer goes to the "
-    "next model).",
+    "check": "Checking answers needs instructions and at least one fallback model, this alias's or one in an alias "
+    "it uses (a failed answer goes to the next model).",
     "council_search_max": "Searches per member: 1 to 10.",
     "council_search_results": "Results per search: 1 to 10.",
     "orch_rounds": "Orchestrator rounds: 1 to 30.",
@@ -1735,8 +1735,18 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         overrides = store.list_model_prices()
         names = ctx.names()
         offered = {(upstream, m) for upstream, ids in models.items() for m in ids}
-        for alias in store.list_aliases():
+        aliases = store.list_aliases()
+        alias_names = {a.name for a in aliases if a.enabled}  # a disabled one's name is a model's, as in requests
+        listed = {m for _, m in offered}
+        # a bare name in an alias's list that is an alias's and a provider's model too: it means the alias, as in
+        # requests (model@provider is the model); said under the alias, since before 0.66 it meant the model
+        shadowed = {
+            a.name: [n for n in (a.target_model, *a.fallbacks) if n in alias_names and n in listed] for a in aliases
+        }
+        for alias in aliases:
             bare, pinned = names.unpin(alias.target_model)
+            if not pinned and bare in alias_names:
+                continue  # another alias: its own model is priced
             if pinned or not any(m == bare for _, m in offered):
                 offered.add((pinned, bare))
         recent = store.used_models(days=PRICING_DAYS)  # older names only matter for old usage
@@ -1761,7 +1771,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             request,
             "models.html",
             session,
-            aliases=store.list_aliases(),
+            aliases=aliases,
+            alias_names=alias_names,
+            shadowed=shadowed,
             triggers=TRIGGERS,
             default_triggers=DEFAULT_TRIGGERS,
             compact_modes=[m for m in COMPACT_MODES if m in ENABLED_COMPACT_MODES],
@@ -1963,12 +1975,21 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             raise ValueError("council_members")
         if council != "off" and len(members) < COUNCIL_MIN:
             raise ValueError("council_members")
+        # its model and fallbacks may be other aliases (fallback.links_of), never leading back to one in the way
+        draft = SimpleNamespace(
+            name=name, target_model=target, fallbacks=fallbacks, upstream_ids=upstream_ids, params=params
+        )
+        aliases = {a.name: a for a in store.list_aliases()} | {name: draft}
+        if loop := loop_of(draft, aliases):
+            raise AliasLoop(
+                f"These aliases use each other in a loop: {' → '.join(loop)}. An alias can't lead back to itself."
+            )
         check_answers = form.get("check_answers") == "on"
         check_model = str(form.get("check_model", "")).strip()
         check_instructions = str(form.get("check_instructions", "")).strip()
         if len(check_model) > 200 or len(check_instructions) > 4000:
             raise ValueError("check")
-        if check_answers and not (check_instructions and fallbacks):
+        if check_answers and not (check_instructions and len(links_of(draft, aliases)) > 1):
             raise ValueError("check")
         return {
             "target_model": target,
@@ -2056,6 +2077,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         )
 
     def alias_error(exc: Exception) -> str:
+        if isinstance(exc, AliasLoop):
+            return str(exc)
         if isinstance(exc, RulesError):
             return MESSAGES["rules_invalid"]
         if isinstance(exc, sqlite3.IntegrityError):
@@ -2475,6 +2498,10 @@ def _parse_date(value: str) -> float | None:
 
 class RulesError(ValueError):
     pass
+
+
+class AliasLoop(ValueError):
+    """Aliases that would use each other in a loop: the message names them."""
 
 
 class NotAllowed(Exception):
