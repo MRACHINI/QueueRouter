@@ -49,7 +49,7 @@ from ..council import MAX_MEMBERS as COUNCIL_MAX
 from ..council import MIN_MEMBERS as COUNCIL_MIN
 from ..council import MODES as COUNCIL_MODES
 from ..council import WHEN as COUNCIL_WHEN
-from ..fallback import DEFAULT_TRIGGERS, TRIGGERS, links_of, loop_of
+from ..fallback import DEFAULT_TRIGGERS, TRIGGERS, loop_of
 from ..names import EVERY, ModelNames
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
@@ -98,8 +98,8 @@ ALIAS_ERRORS = {  # what was wrong in the alias editor
     "virtual_context": "Context told to apps: from 1,024 to 100,000,000 tokens, or blank.",
     "council": "Unknown council setting.",
     "council_members": "A council needs 1 to 64 members.",
-    "check": "Checking answers needs instructions and at least one fallback model, this alias's or one in an alias "
-    "it uses (a failed answer goes to the next model).",
+    "check": "Checking answers needs instructions and at least one fallback model (a failed answer goes to the "
+    "next model).",
     "council_search_max": "Searches per member: 1 to 10.",
     "council_search_results": "Results per search: 1 to 10.",
     "orch_rounds": "Orchestrator rounds: 1 to 30.",
@@ -111,7 +111,7 @@ LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes /
 REQUEST_LIST_COLUMNS = (
     "id, ts, client, priority, model, target_model, upstream, status, outcome, retries, queue_ms, ttft_ms, "
     "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, finish_reason, stopped, "
-    "compaction, council, role, parent, answer_check"
+    "compaction, council, role, parent, answer_check, via"
 )
 REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "id",
@@ -139,6 +139,7 @@ REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "parent",
     "fallback",
     "answer_check",
+    "via",
 )
 HERE = os.path.dirname(__file__)
 
@@ -1975,11 +1976,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             raise ValueError("council_members")
         if council != "off" and len(members) < COUNCIL_MIN:
             raise ValueError("council_members")
-        # its model and fallbacks may be other aliases (fallback.links_of), never leading back to one in the way
-        draft = SimpleNamespace(
-            name=name, target_model=target, fallbacks=fallbacks, upstream_ids=upstream_ids, params=params
-        )
-        aliases = {a.name: a for a in store.list_aliases()} | {name: draft}
+        # its model and fallbacks may be other aliases (requests are forwarded to them), never leading back around
+        draft = SimpleNamespace(name=name, target_model=target, fallbacks=fallbacks)
+        aliases = {a.name: a for a in store.list_aliases() if a.enabled} | {name: draft}
         if loop := loop_of(draft, aliases):
             raise AliasLoop(
                 f"These aliases use each other in a loop: {' → '.join(loop)}. An alias can't lead back to itself."
@@ -1989,7 +1988,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         check_instructions = str(form.get("check_instructions", "")).strip()
         if len(check_model) > 200 or len(check_instructions) > 4000:
             raise ValueError("check")
-        if check_answers and not (check_instructions and len(links_of(draft, aliases)) > 1):
+        if check_answers and not (check_instructions and fallbacks):
             raise ValueError("check")
         return {
             "target_model": target,

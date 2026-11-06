@@ -5,11 +5,11 @@
 <p class="muted">An <strong>alias</strong> is a stable model name for your apps (e.g. <code>smart</code>, <code>code</code>).
 QueueRouter rewrites it to the real model before forwarding, so you can switch models here without touching any
 app. Aliases show up in <code>/v1/models</code> with their target's context size. An alias's model or fallbacks can be
-other aliases: each takes its place with its own model, providers, parameter rules and fallbacks.</p>
+other aliases: the request is forwarded to them, and each handles it its own way (council, answer check, fallbacks…).</p>
 
 <h2>Aliases</h2>
 {% macro sent(n) -%}
-<code>{{ n | model_label }}</code>{% if n in alias_names %} <span class="badge" title="An alias: its model, providers, rules and fallbacks take this place">alias</span>{% endif %}
+<code>{{ n | model_label }}</code>{% if n in alias_names %} <span class="badge" title="An alias: the request is forwarded to it, and it handles it its own way">alias</span>{% endif %}
 {%- endmacro %}
 <datalist id="model-ids">
   {% for name, ids in models.items() %}{% for m in ids %}<option value="{{ m }}">{{ name }}</option>{% endfor %}{% endfor %}

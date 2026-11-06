@@ -807,6 +807,7 @@ function liveRequests(root) {
     if (r.council) marks.push("council");
     if (r.compaction) marks.push("compacted");
     if (r.answer_check) marks.push(r.answer_check.includes("failed") ? "check failed" : "checked");
+    if (r.via) marks.push(`via ${r.via}`);
     if (r.role) marks.push(r.role);
     const cell = td("Model", "");
     cell.title = [r.label, ...marks].join(" · ");
@@ -842,6 +843,7 @@ function liveRequests(root) {
     if (d.council) line("Council", d.council);
     if (d.compaction) line("Compacted", d.compaction);
     if (d.fallback) line("Fell back", d.fallback);
+    if (d.via) line("Forwarded", d.via);
     if (d.answer_check) line("Answer check", d.answer_check);
     if (d.role) line("Made by QueueRouter", d.role);
     if (d.parent) {
@@ -871,7 +873,7 @@ function liveRequests(root) {
     for (const [name, value] of Object.entries(ids)) line(name, copy(String(value)));
     const links = [];
     if (d.has_content) links.push(["Content", `/admin/requests/${d.id}/content`]);
-    if (d.council || d.answer_check) links.push(["Trace", `/admin/requests/${d.id}/trace`]);
+    if (d.council || d.answer_check || d.via) links.push(["Trace", `/admin/requests/${d.id}/trace`]);
     if (links.length) {
       const row = el("div", "links");
       for (const [name, href] of links) {

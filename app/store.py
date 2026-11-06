@@ -570,6 +570,10 @@ MIGRATIONS: list[str] = [
         FROM requests WHERE outcome IS NOT 'refused' AND COALESCE(council, '') = ''
         GROUP BY 1, 2, 3, 4;
     """,
+    # 41: requests forwarded from alias to alias: the way they came ("a → b"; the app asked for a)
+    """
+    ALTER TABLE requests ADD COLUMN via TEXT;
+    """,
 ]
 HOURLY_USAGE = 40  # the migration that added usage_hourly
 
@@ -630,6 +634,7 @@ REQUEST_COLUMNS = (
     "backoff_ms",
     "fallback",
     "answer_check",
+    "via",
 )
 
 
@@ -1426,8 +1431,9 @@ class Store:
                         f"INSERT OR IGNORE INTO requests ({', '.join(REQUEST_COLUMNS)}) VALUES ({placeholders})",
                         tuple(int(row[c]) if c == "stream" else row.get(c) for c in REQUEST_COLUMNS),
                     )
-                if row.get("outcome") == "refused" or row.get("council"):
-                    continue  # turned away before any work, or a council (its members and judge are usage)
+                if row.get("outcome") in ("refused", "forwarded") or row.get("council"):
+                    continue  # turned away before any work, a council (its members and judge are usage), or forwarded
+                    # to another alias (the request it was forwarded as is)
                 counts = (
                     row.get("client") or "-",
                     row.get("target_model") or row.get("model") or "-",

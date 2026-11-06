@@ -20,7 +20,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from collections.abc import AsyncIterator, Collection, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -58,17 +58,7 @@ from .circuit import Circuits
 from .compaction import Plans
 from .compaction import compact as compact_request
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
-from .fallback import (
-    Link,
-    Replay,
-    hold_answer,
-    is_policy_error,
-    is_refusal_text,
-    links_of,
-    message_text,
-    sniff_stream,
-    triggers_of,
-)
+from .fallback import Replay, hold_answer, is_policy_error, is_refusal_text, message_text, sniff_stream
 from .limits import OVERFLOW_STATUS, ModelLimits, error_message, output_limit_of, overflow_body, overflow_of
 from .names import EVERY, SEPARATOR, PublicIds, providers, public_ids
 from .opencode import (
@@ -135,6 +125,7 @@ HISTORY_POINTS, HISTORY_EVERY_S = 1800, 1  # dashboard chart: 30 minutes, one po
 QUOTA_BLOCK_S = 3600  # how long an upstream whose quota ran out is skipped for that model (unless it says)
 ADMIN_MAX_BODY = 4 * 1024 * 1024  # admin forms and the Playground (the restore upload has its own limit)
 CONTENT_CAPTURE_MAX = 16 * 1024 * 1024  # streamed reply bytes kept for content logging (cut later)
+MAX_FORWARDS = 8  # aliases one request may be forwarded through (the editor refuses loops; this ends any other)
 CATALOG_MAX_AGE_S = 3600
 
 
@@ -216,6 +207,7 @@ class RequestLog:
             "stopped": None,  # cancelled: how far it had got ("in queue", "mid-answer"...)
             "fallback": None,  # why it moved on to the alias's next model ("a -> b (reason)"; several: "; ")
             "answer_check": None,  # what the alias's answer check said, per model checked (app/answer_check.py)
+            "via": None,  # forwarded from alias to alias: the way it came ("a → b"; the app asked for a)
             "tags": None,
             "run": None,
             "target_model": None,
@@ -302,6 +294,8 @@ class Admission:
     # copies the list's reference), so a step queues where the request first did and its waits add up
     place: list = dataclasses.field(default_factory=list)
     check: Check | None = None  # the alias checks plain-text answers (app/answer_check.py)
+    hop: Hop | None = None  # after its own models, the request goes on to another alias (Forward)
+    forward: Callable[[Hop, str, list], Awaitable[Response]] | None = None  # serves it there (see serve)
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
@@ -341,6 +335,23 @@ class Checking:
     """An answer is held back while it comes or is checked: a keep-alive is due (``note``: say what's happening)."""
 
     note: str | None = None
+
+
+@dataclass(frozen=True)
+class Hop:
+    """Where a request goes on when it's forwarded: ``alias``'s list from ``start`` (0: into it, later: back to an
+    alias that forwarded, after the alias it forwarded to), then ``then``, the same for the aliases around it."""
+
+    alias: str
+    start: int = 0
+    then: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass
+class Forward:
+    """The alias's own models are done: the request goes on as one for another alias (``hop``)."""
+
+    hop: Hop
 
 
 # Events from the attempt loop to the response writers.
@@ -1043,15 +1054,15 @@ def create_app(
         return (bare, (target.id,)) if target is not None and bare else (name, ())
 
     def first_model(name: str | None) -> tuple[str | None, tuple[int, ...]]:
-        """The model a name sends to first and the upstreams it may go to (none = any): an alias's first model,
-        through the aliases in it (links_of), else the name itself; ``model@upstream`` only there."""
-        alias = snapshot.aliases.get(name) if name else None
+        """The model a name sends to first and the upstreams it may go to (none = any): an alias's model, through
+        the aliases it forwards to, else the name itself; ``model@upstream`` only there. None: a loop."""
         only: tuple[int, ...] = ()
-        if alias is not None:
-            links = links_of(alias, snapshot.aliases)
-            if not links:  # only aliases that lead back to it
+        seen: set[str] = set()
+        while name and (alias := snapshot.aliases.get(name)) is not None:
+            if name in seen:
                 return None, ()
-            name, only = links[0].named, links[0].only
+            seen.add(name)
+            name, only = alias.target_model, alias.upstream_ids
         model, pin = split_pin(name)
         return model, pin or only
 
@@ -1962,8 +1973,8 @@ def create_app(
         steps = adm.steps or (Step(adm.rlog.fields["model"] or "", adm.candidates, adm.body),)
         triggers = adm.triggers
         for index, step in enumerate(steps):
-            last = index == len(steps) - 1
-            nxt = None if last else steps[index + 1].model
+            last = index == len(steps) - 1 and adm.hop is None  # a forward after it: not the last
+            nxt = steps[index + 1].model if index + 1 < len(steps) else adm.hop.alias if adm.hop else None
 
             def fall(reason: str, step=step, nxt=nxt):
                 add_note(adm.rlog, "fallback", f"{step.model} -> {nxt} ({reason})")
@@ -2076,6 +2087,8 @@ def create_app(
                 raise
             if not moved_on:
                 return
+        if adm.hop is not None:  # every model of its own moved on: the alias after them takes the request
+            yield Forward(adm.hop)
 
     async def check_answer(
         adm: Admission, step: Step, got: Got, events: AsyncIterator, triggers: frozenset[str]
@@ -2831,10 +2844,24 @@ def create_app(
         return result.payload if result is not None else payload
 
     async def run_council(
-        request, client, alias, payload, request_headers, lane, tags, path, body, query, original: dict | None = None
+        request,
+        client,
+        alias,
+        payload,
+        request_headers,
+        lane,
+        tags,
+        path,
+        body,
+        query,
+        original: dict | None = None,
+        onward: dict | None = None,
     ) -> Response:
         """Members answer at once (internal requests, tagged "council"), the judge picks one or writes the
-        answer. A streaming app gets its response headers at once and keep-alives meanwhile."""
+        answer. A streaming app gets its response headers at once and keep-alives meanwhile. ``onward``: how the
+        request was forwarded here from another alias (serve's ``via``, ``then``, ``parent``, ``place``)."""
+        onward = onward or {}
+        via = onward.get("via") or ()
         priority = LANE_NAMES[lane]
         stream = payload.get("stream") is True
         rlog = RequestLog(
@@ -2845,9 +2872,10 @@ def create_app(
             user_agent=(request_headers.get("user-agent") or "")[:300] or None,
             client_headers=client_identity(request_headers, payload),
             role=(request_headers.get("x-queuerouter-role") or "")[:80] or None,
-            parent=(request_headers.get("x-queuerouter-parent") or "")[:40] or None,
+            parent=onward.get("parent") or (request_headers.get("x-queuerouter-parent") or "")[:40] or None,
             priority=priority,
-            model=alias.name,
+            model=via[0] if via else alias.name,
+            via=" → ".join((*via, alias.name))[:300] if via else None,
             tags=",".join([*tags, "council"]),
             stream=stream,
             stage="council",
@@ -3242,7 +3270,7 @@ def create_app(
             rlog.finish(stats, outcome="done" if ok else "error", status=200 if ok else 502)
 
         async def fallback() -> Response:  # no member answered: the alias's own model, as without a council
-            return await serve(request, client, path, body, request_headers, query, allow_council=False)
+            return await serve(request, client, path, body, request_headers, query, allow_council=False, **onward)
 
         if not stream:
             try:  # stopped when the app goes away, as for a plain request: members free their slots
@@ -4108,13 +4136,22 @@ def create_app(
         allow_defer: bool = True,
         allow_council: bool = True,
         internal: bool = False,
+        via: tuple[str, ...] = (),
+        then: tuple[tuple[str, int], ...] = (),
+        start: int = 0,
+        parent: str | None = None,
+        place: list | None = None,
     ) -> Response:
         """Everything after authentication: policies, aliases/fallbacks, queueing, forwarding.
         Used by the API and by the admin Playground (which passes its own clean ``headers``).
         ``allow_defer``: a streaming request that must wait for a summary is answered at once (see
-        deferred_response) and served again once the summary is ready."""
+        deferred_response) and served again once the summary is ready. A request forwarded from another alias
+        (Hop): ``via`` the aliases it came through (the first is what the app asked for, already let in), ``then``
+        where it goes on if this alias runs out, ``start`` where in this alias's list it begins, ``parent`` the
+        request it was forwarded from, ``place`` that one's place in the queue (kept, and not counted again)."""
         if unavailable := not_configured() or mode_refusal():
             return unavailable
+        original_body = body  # what a forwarded request starts from (``body`` changes below)
         request_headers = headers if headers is not None else dict(request.headers)
         try:
             payload = json.loads(body) if body else {}
@@ -4156,17 +4193,59 @@ def create_app(
             allowed_by = {model, asked} | ({bare_target} if bare_target not in snapshot.aliases else set())
         # QueueRouter's own requests (council members, judge, summaries) serve a request already admitted: the
         # client's model list and queue limits apply to that request, not to the models working on it
-        if not internal and (refusal := policy_refusal(client, asked or model, allowed_by)):
+        if not internal and not via and (refusal := policy_refusal(client, asked or model, allowed_by)):
             return refused(refusal)
-        # The chain: the requested model, or the alias's model then its fallbacks, aliases in it opened (links_of)
-        chain = links_of(alias, snapshot.aliases) if alias else [Link(target_model or "")]  # "": no model named
-        if not chain:
-            loop = f"alias '{asked}' has no model: the aliases in it lead back to it"
-            return refused(error_response(loop, 404, "model_not_found"))
-        first, first_pin = split_pin(chain[0].named)
-        checked = cfg().unknown_model_check and len(chain) == 1 and not first_pin  # with fallbacks, it moves on
-        if checked and (missing := unknown_model(first, alias, internal, chain[0].only)) is not None:
-            return refused(missing)  # a pinned upstream decides
+        # The chain: the requested model, or the alias's model then its fallbacks (from ``start``). Another alias in
+        # it is forwarded to (Hop): the request is served as one for that alias, its whole way (council,
+        # orchestrator, answer check, its fallbacks), and comes back here for what follows it if that runs out.
+        if alias:
+            entries = [(alias.target_model, alias.upstream_ids), *((name, ()) for name in alias.fallbacks)][start:]
+        else:
+            entries = [(target_model or "", ())]  # "": no model named
+        forwards = alias is not None and isinstance(payload, dict)  # a body that isn't JSON goes as it is
+        cut = next((i for i, (name, _) in enumerate(entries) if forwards and name in snapshot.aliases), len(entries))
+        hop = None
+        if cut < len(entries):  # another alias in its list: its own models before it, then that alias
+            back = ((alias.name, start + cut + 1),) if cut + 1 < len(entries) else ()
+            hop = Hop(entries[cut][0], 0, back + then)
+        elif then:  # forwarded here: after its own list, back to the alias it came from
+            hop = Hop(then[0][0], then[0][1], then[1:])
+        own_after = len(entries) > 1  # models of its own after the first, an alias among them
+        entries = entries[:cut]
+
+        async def forward(onward: Hop, from_id: str | None, spot: list | None) -> Response:
+            """This request served as one for another alias (``onward``), its whole way, from what the app sent."""
+            came = (*via, alias.name) if alias else via
+            if len(came) > MAX_FORWARDS:
+                stuck = f"model '{came[0]}' was forwarded through {len(came)} aliases: do they loop?"
+                return refused(error_response(stuck, 508, "alias_loop"))
+            changed = json.loads(original_body)
+            changed["model"] = onward.alias
+            return await serve(
+                request,
+                client,
+                path,
+                json.dumps(changed).encode(),
+                headers,
+                query,
+                allow_defer=False,  # served again later it would lose its way; a summary is written meanwhile
+                allow_council=onward.start == 0 and not internal,  # its council; not again when coming back
+                internal=internal,
+                via=came,
+                then=onward.then,
+                start=onward.start,
+                parent=from_id,
+                place=spot,
+            )
+
+        if not entries:  # its model is another alias, or nothing of its own is left: straight on
+            if hop is not None:
+                return await forward(hop, parent, place)
+            return refused(error_response(f"alias '{asked}' has no model", 404, "model_not_found"))
+        first, first_pin = split_pin(entries[0][0] or None)
+        checked = cfg().unknown_model_check and len(entries) == 1 and hop is None and not first_pin
+        if checked and (missing := unknown_model(first, alias, internal, entries[0][1])) is not None:
+            return refused(missing)  # with fallbacks it moves on; a pinned upstream decides
         if allow_council and alias and alias.council != "off" and isinstance(payload, dict):
             lane = request_lane(request_headers, client)
             auto = "opencode" if "x-opencode-session-id" in request_headers else None
@@ -4184,12 +4263,19 @@ def create_app(
             )
             if continues or council_mod.applies(alias, payload, tags, low):
                 compacted = council_compacted(client, alias, payload, request_headers)
+                onward = {"via": via, "then": then, "parent": parent, "place": place}  # when forwarded here
                 return await run_council(
-                    request, client, alias, compacted, request_headers, lane, tags, path, body, query, original=payload
+                    request, client, alias, compacted, request_headers, lane, tags, path, body, query, payload, onward
                 )
-        triggers = triggers_of(alias, snapshot.aliases) if alias and len(chain) > 1 else frozenset()
+        if alias and own_after:  # when it moves on: its own ticks while it has more of its own
+            triggers = frozenset(alias.fallback_on)
+        elif hop is not None and (outer := snapshot.aliases.get(hop.alias)) is not None:
+            triggers = frozenset(outer.fallback_on)  # only its model, then back: the alias it came from decides
+        else:
+            triggers = frozenset()
+        more = len(entries) > 1 or hop is not None  # something to move on to
         check = None  # the alias's answer check: chat completions from apps (not QueueRouter's own requests)
-        if alias and alias.check_answers and len(chain) > 1 and alias.check_instructions.strip():
+        if alias and alias.check_answers and more and alias.check_instructions.strip():
             if not internal and path == "chat/completions" and isinstance(payload, dict):
                 check = Check(alias.check_model or alias.target_model, alias.check_instructions, client)
         param_changes = []
@@ -4207,9 +4293,9 @@ def create_app(
         session = session_key(request_headers, client.name, payload)
         steps: list[Step] = []
         too_long_for: tuple | None = None
-        for i, link in enumerate(chain):
-            step_model, pin = split_pin(link.named or None)  # "model@upstream": only that upstream ("": none named)
-            only = pin or link.only
+        for i, (named, ticked) in enumerate(entries):
+            step_model, pin = split_pin(named or None)  # "model@upstream": only that upstream ("": none named)
+            only = pin or ticked
             # models hidden on an upstream: for aliases and QueueRouter's own calls, not a client's own model@upstream
             step_candidates = candidates_for(step_model, only, raw=alias is not None or internal)
             if not step_candidates:
@@ -4218,8 +4304,6 @@ def create_app(
                 steps.append(Step(step_model, step_candidates, body))
                 break
             step_payload = dict(payload)
-            for rules in link.rules:  # an alias in this one: its rules for its models, the client's still last
-                apply_rules(step_payload, rules_of(rules), client_rules)
             if alias or i > 0 or pin:
                 step_payload["model"] = step_model  # the upstream gets the real model name
             context = model_context(step_model, step_candidates)
@@ -4228,7 +4312,8 @@ def create_app(
             most = model_output(step_model, step_candidates) if fit else None
             lowered = fit and fit_output(step_payload, real_context, stats.ratio(step_model), most)
             compaction = None
-            bigger_next = "context" in triggers and i < len(chain) - 1  # a fallback loses nothing: prefer it
+            later = i < len(entries) - 1 or hop is not None  # a model, or an alias, after this one
+            bigger_next = "context" in triggers and later  # a fallback loses nothing: prefer it
             if alias and alias.compact != "off" and context and not (bigger_next and too_long(step_payload, context)):
                 output = requested_output(step_payload) or min(DEFAULT_OUTPUT, context // 8)
                 context = int(context / stats.ratio(step_model))  # in estimate units: providers count more
@@ -4293,6 +4378,8 @@ def create_app(
             estimate = estimate_prompt_tokens(step_payload)
             steps.append(Step(step_model, step_candidates, step_body, compaction, estimate))
         if not steps:
+            if hop is not None and ("context" in triggers or not too_long_for):  # none of its own can take it
+                return await forward(hop, parent, place)
             if too_long_for:
                 estimate, context, _, output = too_long_for
                 return refused(
@@ -4313,7 +4400,7 @@ def create_app(
         tags = parse_tags(client.policy.tags, request_headers.get("x-queuerouter-tags"), auto_tags)
         rkey = run_key(request_headers, client.name, session)
         run = runs.get(rkey) if rkey else None
-        if run is not None:
+        if run is not None and not via:  # a forwarded request was counted where the app's arrived
             policy = client.policy
             max_tokens = policy.run_max_tokens
             header_budget = request_headers.get("x-queuerouter-run-budget-tokens", "")
@@ -4346,11 +4433,12 @@ def create_app(
             user_agent=(request_headers.get("user-agent") or "")[:300] or None,
             client_headers=client_identity(request_headers, payload),
             role=(request_headers.get("x-queuerouter-role") or "")[:80] or None,
-            parent=(request_headers.get("x-queuerouter-parent") or "")[:40] or None,
+            parent=parent or (request_headers.get("x-queuerouter-parent") or "")[:40] or None,
             priority=LANE_NAMES[lane],
             session=session and session[:8],
             position=position,
-            model=model,
+            model=via[0] if via else model,  # forwarded: still the name the app asked for
+            via=" → ".join((*via, alias.name))[:300] if via and alias else None,
             target_model=target_model if alias_used else None,
             compaction=steps[0].compaction,
             estimate=steps[0].estimate,
@@ -4390,7 +4478,10 @@ def create_app(
             run,
             log_request=body if keep_content else None,
             strip_usage=strip_usage,
+            place=place if place is not None else [],  # forwarded: where the app's request queued
             check=check,
+            hop=hop,
+            forward=forward,
         )
         if rlog.fields["stream"]:
             return StreamingResponse(
@@ -4437,6 +4528,10 @@ def create_app(
                         status = event.status
                         rlog.fields["error"] = event.message[:500]
                         return error_response(event.message, event.status, event.kind)
+                    elif isinstance(event, Forward) and adm.forward is not None:  # the alias after its models answers
+                        forwarded = await adm.forward(event.hop, adm.request_id, adm.place)
+                        outcome, status = "forwarded", forwarded.status_code
+                        return forwarded
                     elif isinstance(event, Got):
                         response = event.response
                         try:
@@ -4494,6 +4589,18 @@ def create_app(
 
     # -- streaming -----------------------------------------------------------------------
 
+    async def passed_on(response: Response, model: str) -> AsyncIterator[bytes]:
+        """Another request's answer (forwarded to another alias) as this stream's: its chunks as they come (closed
+        with us, so an app going away frees its slot at once), or its error or whole answer as events."""
+        if isinstance(response, StreamingResponse):
+            async with contextlib.aclosing(response.body_iterator) as chunks:
+                async for chunk in chunks:
+                    yield chunk if isinstance(chunk, bytes) else chunk.encode()
+        elif response.status_code >= 400:
+            yield b"data: " + bytes(response.body).replace(b"\n", b" ") + b"\n\n"
+        else:
+            yield council_mod.as_stream(bytes(response.body), model)
+
     async def stream_flow(adm: Admission) -> AsyncIterator[bytes]:
         rlog = adm.rlog
         inflight[adm.request_id] = rlog  # only once the stream is read: an unread one never shows
@@ -4533,6 +4640,13 @@ def create_app(
                         status = event.status
                         rlog.fields["error"] = event.message[:500]
                         yield sse_error(event.message, event.status, event.kind)
+                        return
+                    elif isinstance(event, Forward) and adm.forward is not None:  # the alias after its models answers
+                        outcome = "forwarded"
+                        forwarded = await adm.forward(event.hop, adm.request_id, adm.place)
+                        status = forwarded.status_code
+                        async for chunk in passed_on(forwarded, event.hop.alias):
+                            yield chunk
                         return
                     elif isinstance(event, Got):
                         response = event.response

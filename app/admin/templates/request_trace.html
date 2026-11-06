@@ -8,6 +8,7 @@
   {% if r.total_ms %}· {{ "{:,}".format(r.total_ms) }} ms{% endif %}</p>
 {% if r.council %}<p><span class="badge">{{ r.council }}</span></p>{% endif %}
 {% if r.fallback %}<p class="small">fell back: {{ r.fallback }}</p>{% endif %}
+{% if r.via %}<p class="small">forwarded: {{ r.via }}</p>{% endif %}
 {% if r.answer_check %}<p class="small">answer check: {{ r.answer_check }}</p>{% endif %}
 {% if r.error %}<p class="small muted">error: {{ r.error }}</p>{% endif %}
 

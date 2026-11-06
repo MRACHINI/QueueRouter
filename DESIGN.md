@@ -1777,6 +1777,25 @@ v0.66.0: aliases inside aliases.
   fallback" counts a nested alias's. Models page: an "alias" badge on names that are aliases, and a warning where a
   bare name is both an alias and a model a provider lists. That one changed meaning: it was the model (sent as
   written); it is now the alias, as in requests and the picker (which offers `model@provider` for a hidden model).
+v0.67.0: aliases forward to aliases (replaces 0.66's opening them into their models).
+- Asked for: the alias inside works as itself. 0.66 copied its models, providers, rules and fallbacks into the outer
+  list, so its council, orchestrator and answer check didn't run.
+- serve: an alias's list (model, then fallbacks, from `start`) is cut at the first name that is another (enabled)
+  alias's. Its own models before it are the chain; the alias is a `Hop`. With nothing of its own first, the request
+  is forwarded at once (no row of its own); otherwise `chained`, once every model of its own moved on (the outer
+  alias's triggers), yields `Forward`, and the flows hand over: non-stream returns the forwarded response, a stream
+  passes the forwarded stream on (`passed_on`, as a council's fallback does). That row's outcome is "forwarded",
+  left out of usage like a council's parent (the forwarded request is the usage).
+- `forward`: `serve` again from the body the app sent with `model` = that alias: its whole way (council or
+  orchestrator unless it's a way back, compaction, answer check, its fallbacks, its triggers). `via` = the aliases
+  it came through (`via[0]`, the app's name, is the row's model; the client's group list was checked for it, so
+  not again, nor run budgets/loop counts), `then` = where it goes on after that alias runs out: back to the outer
+  alias after the name it forwarded at (`start`), whose triggers decide when the inner one has nothing of its own
+  after its model. `parent` links the rows, `place` keeps the queue place (seq set: requeued, not counted again for
+  rate limits). Not deferred for a summary (it would lose its way). More than 8 forwards: 508 (loops are refused by
+  the editor; this ends any other).
+- `requests.via` (migration 41): "a → b", shown under the row ("Forwarded") and as a badge, and on the trace page.
+- `first_model` follows an alias's target through the aliases it forwards to (sizes, prices, images in listings).
 
 ### Later (agreed, not scheduled)
 

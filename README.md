@@ -27,9 +27,10 @@ from a **web admin UI**.
   **ArliAI plan selector** (Free → Max) that sets parallel requests
   and context cap.
 - **Model aliases** (`smart`, `code`, …) that you can repoint without touching any app; listed in
-  `/v1/models` with the target's context size. An alias's model or fallbacks can be other aliases: each takes
-  its place with its own model, providers, parameter rules and fallbacks (loops are refused). A bare name that is
-  both an alias and a provider's model means the alias, as in requests; `model@provider` is the model.
+  `/v1/models` with the target's context size. An alias's model or fallbacks can be other aliases: the request
+  is forwarded to that alias and handled its way (council, orchestrator, answer check, its own fallbacks); if
+  it runs out, the first alias's next fallbacks follow. Loops are refused. A bare name that is both an alias
+  and a provider's model means the alias, as in requests; `model@provider` is the model.
 - **Fallback chains**: an alias can list backup models, used when the first is unavailable,
   keeps failing, can't fit the prompt, or (opt-in) refuses — detected from content-policy errors,
   `finish_reason: content_filter` or a reply opening with a refusal. The request is resent
