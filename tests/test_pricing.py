@@ -99,7 +99,7 @@ def test_summarize_usage_totals_and_savings(catalog):
             "cache_write_tokens": 0,
         },
     ]
-    out, totals, _ = summarize_usage(rows, {}, catalog, by_model=False, plan_per_month=30.0, days=30)
+    out, totals, _ = summarize_usage(rows, {}, catalog, merged=False, plan_per_month=30.0, days=30)
     assert len(out) == 1 and out[0]["requests"] == 4 and out[0]["priced"] is False
     assert totals["cost_in"] == pytest.approx(0.3) and totals["cost_out"] == pytest.approx(0.6)
     assert totals["unpriced_tokens"] == 100

@@ -256,7 +256,7 @@ async def test_rename_show_key_and_timed_logging(admin_stack):
         r = await c.post(f"/admin/clients/{client.id}", data={**form, "name": "bilal-pc"})
         assert "m=saved" in r.headers["location"]
         assert (await c.post(api, json=body, headers=auth)).status_code == 200  # the same key
-        for table in ("requests", "usage_daily"):
+        for table in ("requests", "usage_daily", "usage_hourly"):
             names = {r["client"] for r in store.query(f"SELECT DISTINCT client FROM {table}")}
             assert "bilal" not in names and "bilal-pc" in names, (table, names)
 

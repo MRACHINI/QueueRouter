@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 
 import httpx
 
@@ -77,7 +78,7 @@ async def test_pick(make_stack):
     council_rows = [r for r in rows if r["council"]]
     assert council_rows[0]["council"] == "pick 2/2: small-model" and council_rows[0]["model"] == "team"
     assert sum(1 for r in rows if "council" in (r["tags"] or "") and not r["council"]) >= 3  # members + judge
-    usage = await asyncio.to_thread(stack.app.state.store.usage, 1)
+    usage = await asyncio.to_thread(stack.app.state.store.usage_between, 0, time.time() + 3600)
     assert sum(u["requests"] for u in usage) == len(rows) - len(council_rows)  # its own row isn't usage
 
 

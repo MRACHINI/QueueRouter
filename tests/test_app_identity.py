@@ -3,6 +3,7 @@
 import asyncio
 import dataclasses
 import json
+import time
 
 import httpx
 
@@ -54,7 +55,7 @@ async def test_requests_from_other_apps_are_refused(make_stack):
             break
         await asyncio.sleep(0.1)
     assert len(rows) == 2 and rows[0]["user_agent"].startswith("python-httpx") and rows[0]["status"] == 403
-    usage = await asyncio.to_thread(store.usage, 1)
+    usage = await asyncio.to_thread(store.usage_between, 0, time.time() + 3600)
     assert sum(u["requests"] for u in usage) == 2  # the two real requests; refusals aren't usage
 
 

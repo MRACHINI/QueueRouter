@@ -419,16 +419,30 @@ def _add_usage(out: dict, row, costs: tuple[float, float, float] | None) -> None
         out["cost"] += sum(costs)
 
 
+def _dearest(rows, name: str) -> list[dict]:
+    return sorted(rows, key=lambda r: (-r["cost"], -r["prompt_tokens"], r[name]))
+
+
+def _with_shares(parts: dict, whole: dict, name: str) -> list[dict]:
+    """A row's parts (its models, or its clients), dearest first, each with its share of the row's cost."""
+    out = _dearest(parts.values(), name)
+    for part in out:
+        part["share"] = part["cost"] / whole["cost"] if whole["cost"] else None
+    return out
+
+
 def summarize_usage(
     rows,
     overrides: dict,
     catalog: PriceCatalog,
-    by_model: bool,
-    plan_per_month: float,
-    days: int,
+    merged: bool = False,
+    plan_per_month: float = 0.0,
+    days: float = 1.0,
     names: ModelNames | None = None,
 ):
-    """Usage rows (per day/client/model/upstream) -> display rows with costs, plus totals.
+    """Usage rows (per day or hour, client, model and upstream) -> a row per client and day (or per client over
+    the whole period when ``merged``), each with its ``models``, plus the totals. Days newest first, and within one
+    the dearest client first. ``days``: how long the period has run, for what a monthly plan cost in it.
 
     Cost is only "known" for rows whose model has a price; ``unpriced_tokens`` says how many
     tokens are missing from the total, so it's never silently low.
@@ -440,23 +454,26 @@ def summarize_usage(
     for row in rows:
         model, upstream = row["model"], row["upstream"]
         costs = book.costs(row)
-        key = (row["day"], row["client"], upstream, model) if by_model else (row["day"], row["client"])
-        fresh = {
-            "day": row["day"],
-            "client": row["client"],
-            "model": model if by_model else None,
-            "upstream": upstream if by_model else None,
-            "label": names.label(model, upstream) if by_model else None,
-        }
-        _add_usage(grouped.setdefault(key, {**fresh, **_empty_usage()}), row, costs)
+        day = None if merged else row["day"]
+        client = grouped.setdefault(
+            (day, row["client"]), {"day": day, "client": row["client"], "models": {}, **_empty_usage()}
+        )
+        fresh = {"model": model, "upstream": upstream, "label": names.label(model, upstream)}
+        _add_usage(client["models"].setdefault((upstream, model), {**fresh, **_empty_usage()}), row, costs)
+        _add_usage(client, row, costs)
         _add_usage(totals, row, costs)
+    out = _dearest(grouped.values(), "client")
+    out.sort(key=lambda r: r["day"] or "", reverse=True)  # stable: the dearest first within a day
+    for client in out:
+        client["models"] = _with_shares(client["models"], client, "label")
     totals["plan_cost"] = plan_per_month * days / PRICE_PER_MONTH_DAYS
     totals["savings"] = totals["cost"] - totals["plan_cost"]
-    return list(grouped.values()), totals, book.prices
+    return out, totals, book.prices
 
 
 def model_costs(rows, overrides: dict, catalog: PriceCatalog, names: ModelNames | None = None):
-    """Usage rows -> one row per model on a provider, dearest first, plus their total."""
+    """Usage rows -> one row per model on a provider, dearest first, each with the ``clients`` that used it, plus
+    their total."""
     names = names or ModelNames()
     book = _PriceBook(overrides, catalog, names)
     grouped: dict[tuple[str, str], dict] = {}
@@ -464,10 +481,26 @@ def model_costs(rows, overrides: dict, catalog: PriceCatalog, names: ModelNames 
     for row in rows:
         model, upstream = row["model"], row["upstream"]
         costs = book.costs(row)
-        fresh = {"model": model, "upstream": upstream, "label": names.label(model, upstream)}
-        _add_usage(grouped.setdefault((upstream, model), {**fresh, **_empty_usage()}), row, costs)
+        fresh = {"model": model, "upstream": upstream, "label": names.label(model, upstream), "clients": {}}
+        used = grouped.setdefault((upstream, model), {**fresh, **_empty_usage()})
+        client = used["clients"].setdefault(row["client"], {"client": row["client"], **_empty_usage()})
+        _add_usage(client, row, costs)
+        _add_usage(used, row, costs)
         _add_usage(total, row, costs)
-    return sorted(grouped.values(), key=lambda r: (-r["cost"], -r["prompt_tokens"], r["label"])), total
+    out = _dearest(grouped.values(), "label")
+    for used in out:
+        used["clients"] = _with_shares(used["clients"], used, "client")
+    return out, total
+
+
+def usage_by(rows, overrides: dict, catalog: PriceCatalog, slot: str, names: ModelNames | None = None) -> dict:
+    """Usage rows -> their totals with costs per ``row[slot]`` (an hour or a day: the charts)."""
+    names = names or ModelNames()
+    book = _PriceBook(overrides, catalog, names)
+    out: dict[str, dict] = {}
+    for row in rows:
+        _add_usage(out.setdefault(row[slot], _empty_usage()), row, book.costs(row))
+    return out
 
 
 def request_costs(rows, calls, overrides: dict, catalog: PriceCatalog, names: ModelNames | None = None) -> list[dict]:

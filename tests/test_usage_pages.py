@@ -60,7 +60,7 @@ def test_token_costs_split_normal_cached_and_output(catalog):
 
 def test_usage_rows_show_each_part(catalog):
     rows = [usage_row("glm-4.7", 1_000_000, 400_000, 500_000)]
-    out, totals, _ = summarize_usage(rows, {}, catalog, by_model=False, plan_per_month=0, days=1)
+    out, totals, _ = summarize_usage(rows, {}, catalog, merged=False, plan_per_month=0, days=1)
     assert out[0]["input_tokens"] == 600_000 and out[0]["cached_tokens"] == 400_000
     assert (out[0]["cost_in"], out[0]["cost_cached"], out[0]["cost_out"]) == pytest.approx((0.6, 0.04, 1.0))
     assert totals["cost"] == pytest.approx(1.64) and out[0]["cost"] == pytest.approx(1.64)
@@ -70,12 +70,36 @@ def test_models_dearest_first_with_a_total(catalog):
     rows = [
         usage_row("unknown", 100, 0, 100),
         usage_row("glm-4.7", 1_000_000, 0, 0),
-        usage_row("glm-4.7", 1_000_000, 0, 0, client="bilal"),
+        usage_row("glm-4.7", 3_000_000, 0, 0, client="bilal"),
     ]
     models, total = model_costs(rows, {}, catalog)
     assert [m["model"] for m in models] == ["glm-4.7", "unknown"]
-    assert models[0]["cost"] == pytest.approx(2) and models[0]["requests"] == 2 and models[0]["priced"]
-    assert not models[1]["priced"] and total["cost"] == pytest.approx(2) and total["unpriced_tokens"] == 200
+    assert models[0]["cost"] == pytest.approx(4) and models[0]["requests"] == 2 and models[0]["priced"]
+    assert not models[1]["priced"] and total["cost"] == pytest.approx(4) and total["unpriced_tokens"] == 200
+    # each model opens to the clients that used it, the dearest first, with their share of its cost
+    clients = models[0]["clients"]
+    assert [(c["client"], c["requests"], c["share"]) for c in clients] == [("bilal", 1, 0.75), ("ali", 1, 0.25)]
+    assert models[1]["clients"][0]["share"] is None  # no price: no share
+
+
+def test_clients_per_day_or_over_the_whole_period(catalog):
+    rows = [
+        usage_row("glm-4.7", 1_000_000, 0, 0, day="2026-10-30"),
+        usage_row("glm-4.7", 2_000_000, 0, 0, day="2026-10-31"),
+        usage_row("unknown", 10, 0, 0, day="2026-10-31"),
+        usage_row("glm-4.7", 5_000_000, 0, 0, day="2026-10-30", client="bilal"),
+    ]
+    per_day, totals, _ = summarize_usage(rows, {}, catalog)
+    assert [(r["day"], r["client"]) for r in per_day] == [
+        ("2026-10-31", "ali"),
+        ("2026-10-30", "bilal"),  # the dearest first within a day
+        ("2026-10-30", "ali"),
+    ]
+    models = per_day[0]["models"]
+    assert [(m["model"], m["share"]) for m in models] == [("glm-4.7", 1.0), ("unknown", 0.0)]
+    whole, merged_totals, _ = summarize_usage(rows, {}, catalog, merged=True)
+    assert [(r["day"], r["client"], r["requests"]) for r in whole] == [(None, "bilal", 1), (None, "ali", 3)]
+    assert whole[1]["models"][0]["requests"] == 2 and merged_totals["cost"] == totals["cost"] == pytest.approx(8)
 
 
 def test_a_council_adds_up_its_calls(catalog):
@@ -161,42 +185,70 @@ async def test_filter_choices_are_kept_for_a_while(make_stack):
         assert (await c.get("/admin/api/requests/filters")).json()["client"] == []  # not scanned again yet
 
 
-async def test_usage_body_and_model_range(make_stack):
+async def test_usage_body_and_its_period(make_stack):
     stack = make_stack(bootstrap=OWNER)
     store = stack.app.state.store
     day = 86_400
     now = time.time()
     store.record_requests(
         [
-            stored_row("today", now, model="model-today", prompt_tokens=10, completion_tokens=1),
+            stored_row("now", now, model="model-now", prompt_tokens=10, completion_tokens=1),
             stored_row("week", now - 3 * day, model="model-week", prompt_tokens=10, completion_tokens=1),
             stored_row("month", now - 20 * day, model="model-month", prompt_tokens=10, completion_tokens=1),
         ]
     )
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
-        page = (await c.get("/admin/usage")).text
-        assert "<html" in page and all(f"model-{name}" in page for name in ("today", "week", "month"))
-        assert 'data-model-days="30" aria-current="true"' in page  # the default
+        page = (await c.get("/admin/usage")).text  # the last 24 hours
+        assert "<html" in page and '<option value="24h" selected>' in page and "Tokens per hour" in page
+        assert "model-now" in page and "model-week" not in page
 
-        body = (await c.get("/admin/usage/body?model_days=1")).text
-        assert "<html" not in body and 'data-model-days="1" aria-current="true"' in body
-        table = body.split("Cost per model")[1].split("Per day")[0]
-        assert "model-today" in table and "model-week" not in table
-        table = (await c.get("/admin/usage/body?model_days=7")).text.split("Cost per model")[1].split("Per day")[0]
-        assert "model-week" in table and "model-month" not in table
-        assert 'data-model-days="30" aria-current="true"' in (await c.get("/admin/usage/body?model_days=5")).text
+        body = (await c.get("/admin/usage/body?range=7d")).text
+        assert "<html" not in body and "model-week" in body and "model-month" not in body
+        assert "Tokens per day" in body
+        body = (await c.get("/admin/usage/body?range=30d")).text
+        assert all(f"model-{name}" in body for name in ("now", "week", "month"))
+        first = time.strftime("%Y-%m-%d", time.gmtime(now - 21 * day))
+        custom = f"range=custom&from={first}&to={time.strftime('%Y-%m-%d', time.gmtime(now - 2 * day))}"
+        body = (await c.get(f"/admin/usage/body?{custom}")).text
+        assert "model-week" in body and "model-month" in body and "model-now" not in body
+        assert f"From {first} 00:00 to " in body
+
+        # a model opens to its clients, a client to its models; over the whole period, a row per client
+        assert 'data-key="model:-:model-week"' in body
+        assert '<tr class="part" data-of="model:-:model-week" hidden>' in body
+        page = (await c.get("/admin/usage?range=30d&group=range")).text
+        assert "Per client, whole period" in page and "<th>Day</th>" not in page
+        assert page.count('data-of="client::ali"') == 3  # its three models
+        assert 'data-group="range" aria-current="true"' in page
+        assert 'href="/admin/usage.csv?range=30d&amp;group=range&amp;by=model"' in page
+        csv_text = (await c.get("/admin/usage.csv?range=30d&group=range&by=model")).text
+        rows = csv_text.strip().splitlines()[1:]
+        assert len(rows) == 3 and all(r.split(",")[0].endswith("Z") and "/" in r.split(",")[0] for r in rows)
 
 
-async def test_a_period_counts_its_days_with_today(make_stack):
+async def test_a_period_takes_its_hours(make_stack):
     stack = make_stack(bootstrap=OWNER)
     store = stack.app.state.store
-    now = time.time()
+    hour = int(time.time() // 3600) * 3600
     store.record_requests(
-        [stored_row("a", now, prompt_tokens=1), stored_row("b", now - 86_400, prompt_tokens=1)],
+        [
+            stored_row("a", hour + 1, prompt_tokens=1),
+            stored_row("b", hour - 3600 + 5, prompt_tokens=2),
+            stored_row("c", hour - 3600 + 9, prompt_tokens=4, client="bilal"),
+        ],
     )
-    assert len(store.usage(1)) == 1
-    assert len(store.usage(2)) == 2
+    rows = store.usage_between(hour, hour + 3600)
+    assert [(r["client"], r["prompt_tokens"]) for r in rows] == [("ali", 1)]
+    rows = store.usage_between(hour - 3600, hour + 3600)
+    assert sorted((r["hour"][-2:], r["client"], r["prompt_tokens"]) for r in rows) == sorted(
+        [
+            (time.strftime("%H", time.gmtime(hour)), "ali", 1),
+            (time.strftime("%H", time.gmtime(hour - 3600)), "ali", 2),
+            (time.strftime("%H", time.gmtime(hour - 3600)), "bilal", 4),
+        ]
+    )
+    assert all(r["day"] == r["hour"][:10] for r in rows)
 
 
 async def test_brief_stream_holds_only_what_the_pages_use(make_stack):
@@ -216,7 +268,7 @@ async def test_the_lists_dont_wait_for_the_write_lock(make_stack):
     store.record_requests([stored_row("r", time.time())])
     with store._lock:  # what a long write or a backup holds
         rows = await asyncio.wait_for(asyncio.to_thread(store.list_requests, 10), 5)
-        usage = await asyncio.wait_for(asyncio.to_thread(store.usage, 30), 5)
+        usage = await asyncio.wait_for(asyncio.to_thread(store.usage_between, 0, time.time() + 3600), 5)
     assert [r["id"] for r in rows] == ["r"] and len(usage) == 1
 
 

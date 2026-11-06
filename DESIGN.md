@@ -1740,6 +1740,25 @@ v0.64.0: answer checks per alias.
   model: passed / failed with the reason / not checked and why) are stored and shown under the row; the trace page
   lists the check's rows. A held stream keeps its real provider times (`Replay.sniffer`); what the app waits for
   (`ttft_ms`) ends when the checked answer goes out.
+v0.65.0: Usage page periods, and who used which model.
+- Asked for: both tables over the last 24 hours by default, or 1 day, 1 week, 30 days, or a range you set; the per-day
+  table per day or merged over the whole range; each client's use of each model, opened by a click.
+- `usage_hourly` (migration 40): the daily rollup's columns per UTC hour, added to by `record_requests` with the
+  daily one and moved with a renamed client. Kept forever, like the daily totals (a row per hour per client and model
+  used). The upgrade fills it from the request log; `_start_hourly_usage` then compares each day's hourly and daily
+  totals back from today, and the first day that differs (the log is off, cut by its 30 days, or missed some) ends
+  them: meta `usage_hourly_from` is the next day, older hourly rows are dropped, and `usage_between` takes days before
+  it from the daily totals, whole (the page says so). A new database, or a log holding all of it: "".
+- `admin/periods.py`: one period for the whole page (tiles, charts, both tables, CSV), so their numbers agree (the
+  model table had its own before). Last 24 hours = the current hour and the 23 before; Today = since 00:00 UTC; 1
+  week and 30 days end with the current hour; Custom = from a day and hour to a day and hour (24:00 = the day's end, so
+  whole days count both; swapped when backwards; a year at most). Charts per hour up to 48 hours (unless whole days
+  are in it), else per day. The plan's cost counts the hours of the period that have passed. The 90 and 365-day
+  choices went (Custom does them).
+- Rows open: a model to the clients that used it, a client (per day, or over the whole period) to its models, each
+  dearest first with its share of the row's cost. They're on the page already (hidden), so opening one loads nothing,
+  and open rows stay open when the page updates itself. This replaces the page's "by client and model" choice; the
+  CSV keeps it ("CSV per model", `by=model`), and over the whole period its `day` is the period's start/end.
 
 ### Later (agreed, not scheduled)
 

@@ -142,8 +142,10 @@ from a **web admin UI**.
   Usage pages update themselves as requests finish, and reconnect and catch up by themselves after a
   restart or when the computer wakes. Time to first byte is recorded per request.
 - **Costs**: at official prices, split into normal input, cached input and output, for each request (Requests
-  page), per client and day, and per model over 1 day, 1 week or 30 days (Usage page). A council's cost adds up
-  its members and judge. Click a row on the Requests page for its identifiers, User-Agents and timings.
+  page), and on the Usage page per model and per client, each day or over the whole period. The Usage page shows
+  the last 24 hours, today, 1 week, 30 days or days and hours you pick (UTC); click a model to see which clients
+  used it, or a client to see its models, each with its share of the cost. A council's cost adds up its members and
+  judge. Click a row on the Requests page for its identifiers, User-Agents and timings.
 - **Every model shown with its provider**: `Synthetic|GLM-4.7` on every page, and one entry per provider in opencode
   (`04|32.5|$0.200|GLM-4.7|Synthetic`: number, score, price, name, provider).
   Each provider's model has its own price, score, context size and thinking levels. Give it an optional custom name
@@ -151,7 +153,8 @@ from a **web admin UI**.
   by that name instead of the provider's ID; the real ID is still what's sent to the provider. See
   [Model names](#model-names).
 - **Charts**: live running/queued chart on the dashboard (last 30 minutes); tokens, requests and
-  cost per day on the Usage page (server-rendered SVG, no scripts from elsewhere).
+  cost per hour (periods up to 2 days) or per day on the Usage page (server-rendered SVG, no scripts from
+  elsewhere).
 - **Response times** per model and upstream: the provider's own timings for streamed requests (its queue,
   first token, thinking time, output speed, longest pause, retry waits), median and worst 5% over the last
   hour, day or week, with a trend chart; an optional alert when a model gets slow to start.
@@ -161,8 +164,9 @@ from a **web admin UI**.
 - **Opt-in content logging** per client (optionally for N hours): prompts and replies stored
   encrypted, readable only by admins with the content permission (every view audited); the client
   sees `X-QueueRouter-Logging: on`.
-- **Usage tracking**: request log (metadata only, never content) and daily usage per client and
-  model, CSV export.
+- **Usage tracking**: request log (metadata only, never content) and usage per hour and per day for each client and
+  model, CSV export (per client, or per client and model). Usage from before 0.65 is per day only, except for
+  the days the request log still held when you upgraded.
 - **Cost at official prices**: what your tokens would have cost on the model makers' own APIs
   (prices from [models.dev](https://models.dev), refreshed daily; cached prompt tokens at the
   cached rate, tokens written to Claude's cache at 1.25 × the input price), and how much your flat-rate plan saves. Per-model overrides on the Models page;

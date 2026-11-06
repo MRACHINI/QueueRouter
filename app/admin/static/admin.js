@@ -626,11 +626,25 @@ function morphChildren(node, fresh) {
 }
 
 // Usage page: when new usage is written its numbers are fetched and only what changed is touched; the period and
-// range controls work the same way, without a page load.
+// grouping controls work the same way, without a page load. A row opens to what it's made of (a model's clients, a
+// client's models) and stays open through updates.
 function liveUsage(root) {
   const form = document.getElementById("usage-filters");
+  const custom = document.getElementById("usage-custom");
   const csv = document.getElementById("usage-csv");
+  const csvModels = document.getElementById("usage-csv-models");
   const query = new URLSearchParams(window.location.search);
+  const CUSTOM = ["from", "from_hour", "to", "to_hour"];
+  const opened = new Set();
+  const reopen = () => {
+    root.querySelectorAll("tr[data-key]").forEach((row) => {
+      const button = row.querySelector("button.expand");
+      if (button) button.setAttribute("aria-expanded", String(opened.has(row.dataset.key)));
+    });
+    root.querySelectorAll("tr[data-of]").forEach((row) => {
+      row.hidden = !opened.has(row.dataset.of);
+    });
+  };
   let version = null;
   let timer = null;
   let loading = false;
@@ -649,6 +663,7 @@ function liveUsage(root) {
         const fresh = document.createElement("template");
         fresh.innerHTML = await response.text();
         morphChildren(root, fresh.content);
+        reopen();
         stream.say(`Live · updated ${new Date().toLocaleTimeString()}`, "live");
       }
     } catch (_) {
@@ -667,20 +682,40 @@ function liveUsage(root) {
     },
     resync: refresh,
   });
-  const choose = (name, value) => {
-    if (value) query.set(name, value);
-    else query.delete(name);
+  // the address follows the form (the custom days only with Custom), so a reload or a shared link shows the same
+  const sync = () => {
+    const chosen = new FormData(form);
+    const isCustom = chosen.get("range") === "custom";
+    if (custom) custom.hidden = !isCustom;
+    for (const [name, value] of chosen) {
+      if (value && (isCustom || !CUSTOM.includes(name))) query.set(name, value);
+      else query.delete(name);
+    }
+    for (const old of ["days", "model_days", "by"]) query.delete(old); // from before 0.65
     window.history.replaceState(null, "", `${window.location.pathname}?${query}`);
     if (csv) csv.href = `/admin/usage.csv?${query}`;
+    if (csvModels) {
+      const perModel = new URLSearchParams(query);
+      perModel.set("by", "model");
+      csvModels.href = `/admin/usage.csv?${perModel}`;
+    }
     refresh();
   };
-  form.addEventListener("change", (event) => choose(event.target.name, event.target.value));
+  form.addEventListener("change", sync);
   form.addEventListener("submit", (event) => event.preventDefault());
   root.addEventListener("click", (event) => {
-    const link = event.target.closest("[data-model-days]");
-    if (!link) return;
-    event.preventDefault();
-    choose("model_days", link.dataset.modelDays);
+    const link = event.target.closest("[data-group]");
+    if (link) {
+      event.preventDefault();
+      form.elements.group.value = link.dataset.group;
+      sync();
+      return;
+    }
+    const row = event.target.closest("tr[data-key]");
+    if (!row || event.target.closest("a") || String(window.getSelection())) return; // not while selecting text
+    const key = row.dataset.key;
+    if (!opened.delete(key)) opened.add(key);
+    reopen();
   });
 }
 

@@ -19,6 +19,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -544,7 +545,33 @@ MIGRATIONS: list[str] = [
     ALTER TABLE requests ADD COLUMN fallback TEXT;
     ALTER TABLE requests ADD COLUMN answer_check TEXT;
     """,
+    # 40: usage per hour too (the Usage page's last 24 hours), filled from the request log for as far back as it
+    # goes, the way record_requests adds to the daily rollup; Store.hourly_usage_from says from which day it's whole
+    """
+    CREATE TABLE usage_hourly (
+        hour TEXT NOT NULL,
+        client TEXT NOT NULL,
+        model TEXT NOT NULL,
+        upstream TEXT NOT NULL,
+        requests INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (hour, client, model, upstream)
+    );
+    INSERT INTO usage_hourly
+        SELECT strftime('%Y-%m-%dT%H', CAST(ts AS INTEGER), 'unixepoch'), COALESCE(NULLIF(client, ''), '-'),
+            COALESCE(NULLIF(target_model, ''), NULLIF(model, ''), '-'), COALESCE(NULLIF(upstream, ''), '-'),
+            COUNT(*), SUM(outcome IS NOT 'done'), SUM(COALESCE(prompt_tokens, 0)),
+            SUM(COALESCE(completion_tokens, 0)), SUM(COALESCE(cached_tokens, 0)),
+            SUM(COALESCE(cache_write_tokens, 0))
+        FROM requests WHERE outcome IS NOT 'refused' AND COALESCE(council, '') = ''
+        GROUP BY 1, 2, 3, 4;
+    """,
 ]
+HOURLY_USAGE = 40  # the migration that added usage_hourly
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
 # Tables whose rows belong to a client (by name): deleted with it, renamed with it.
@@ -617,6 +644,17 @@ def storable(value: object) -> object:
 
 
 _UPSERT = "INSERT INTO {table} (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+# a finished request added to the daily or hourly usage totals
+_ADD_USAGE = (
+    "INSERT INTO {table} ({slot}, client, model, upstream, requests, errors, prompt_tokens, completion_tokens, "
+    "cached_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?) "
+    "ON CONFLICT({slot}, client, model, upstream) DO UPDATE SET requests = requests + 1, "
+    "errors = errors + excluded.errors, prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
+    "completion_tokens = completion_tokens + excluded.completion_tokens, "
+    "cached_tokens = cached_tokens + excluded.cached_tokens, "
+    "cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens"
+)
+HOUR_FORMAT = "%Y-%m-%dT%H"  # usage_hourly's hours (UTC)
 
 
 def hash_key(key: str) -> str:
@@ -929,6 +967,37 @@ class Store:
             with self._lock:
                 self._db.executescript(f"BEGIN;\n{MIGRATIONS[version - 1]}\nPRAGMA user_version={version};\nCOMMIT;")
             log.info(json.dumps({"event": "db_migrated", "version": version}))
+        if current < HOURLY_USAGE:
+            self._start_hourly_usage()
+
+    def _start_hourly_usage(self) -> None:
+        """Hourly totals filled from the request log hold all usage only for the days whose totals match the daily
+        rollup's (the log keeps 30 days by default, can be off, and its oldest day is cut part-way). Going back from
+        today, the first day that doesn't match ends them: from the next day on, hours are used; before it, whole
+        days. Hourly rows before that are dropped."""
+        sums = "SUM(requests), SUM(errors), SUM(prompt_tokens), SUM(completion_tokens), SUM(cached_tokens)"
+
+        def per_day(day: str, table: str) -> dict[str, tuple]:
+            rows = self.query(f"SELECT {day}, {sums} FROM {table} GROUP BY 1")  # noqa: S608
+            return {r[0]: tuple(r)[1:] for r in rows}
+
+        daily, hourly = per_day("day", "usage_daily"), per_day("substr(hour, 1, 10)", "usage_hourly")
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        start = ""  # all of it (a new database, or a log that holds all the usage)
+        for day in sorted({d for d in daily.keys() | hourly.keys() if d <= today}, reverse=True):
+            if daily.get(day) != hourly.get(day):
+                start = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+                break
+        with self.tx() as db:
+            db.execute("DELETE FROM usage_hourly WHERE hour < ?", (start,))
+            db.execute(_UPSERT.format(table="meta"), ("usage_hourly_from", start))
+        log.info(json.dumps({"event": "hourly_usage", "from": start}))
+
+    def hourly_usage_from(self) -> str:
+        """The first day (YYYY-MM-DD) whose usage is kept per hour; earlier days only have daily totals ("": all
+        days are). Read on the pages' own connection, like the usage it goes with."""
+        rows = self.read("SELECT value FROM meta WHERE key = 'usage_hourly_from'")
+        return rows[0]["value"] if rows else ""
 
     def audit(self, actor: str, action: str, target: str = "", detail: object = "") -> None:
         text = detail if isinstance(detail, str) else json.dumps(detail, default=str)
@@ -1258,16 +1327,17 @@ class Store:
                     db.execute(f"UPDATE {table} SET client = ? WHERE client = ?", (new, old))  # noqa: S608
                 # its history too (Requests, Usage, monthly budgets); usage rows merge with any the name already has
                 db.execute("UPDATE requests SET client = ? WHERE client = ?", (new, old))
-                keys = ("day", "client", "model", "upstream")
-                counts = [r["name"] for r in db.execute("PRAGMA table_info(usage_daily)") if r["name"] not in keys]
-                db.execute(
-                    f"INSERT INTO usage_daily ({', '.join(keys + tuple(counts))}) "  # noqa: S608
-                    f"SELECT day, ?, model, upstream, {', '.join(counts)} FROM usage_daily WHERE client = ? "
-                    f"ON CONFLICT(day, client, model, upstream) DO UPDATE SET "
-                    + ", ".join(f"{c} = {c} + excluded.{c}" for c in counts),
-                    (new, old),
-                )
-                db.execute("DELETE FROM usage_daily WHERE client = ?", (old,))
+                for table, slot in (("usage_daily", "day"), ("usage_hourly", "hour")):
+                    keys = (slot, "client", "model", "upstream")
+                    counts = [r["name"] for r in db.execute(f"PRAGMA table_info({table})") if r["name"] not in keys]
+                    db.execute(
+                        f"INSERT INTO {table} ({', '.join(keys + tuple(counts))}) "  # noqa: S608
+                        f"SELECT {slot}, ?, model, upstream, {', '.join(counts)} FROM {table} WHERE client = ? "
+                        f"ON CONFLICT({slot}, client, model, upstream) DO UPDATE SET "
+                        + ", ".join(f"{c} = {c} + excluded.{c}" for c in counts),
+                        (new, old),
+                    )
+                    db.execute(f"DELETE FROM {table} WHERE client = ?", (old,))  # noqa: S608
         self.audit(actor, "client.update", str(client_id), fields)
 
     def regenerate_client_key(self, client_id: int, actor: str) -> str:
@@ -1358,27 +1428,19 @@ class Store:
                     )
                 if row.get("outcome") == "refused" or row.get("council"):
                     continue  # turned away before any work, or a council (its members and judge are usage)
-                day = time.strftime("%Y-%m-%d", time.gmtime(row["ts"]))
-                db.execute(
-                    "INSERT INTO usage_daily (day, client, model, upstream, requests, errors, prompt_tokens, "
-                    "completion_tokens, cached_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(day, client, model, upstream) DO UPDATE SET requests = requests + 1, "
-                    "errors = errors + excluded.errors, prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
-                    "completion_tokens = completion_tokens + excluded.completion_tokens, "
-                    "cached_tokens = cached_tokens + excluded.cached_tokens, "
-                    "cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens",
-                    (
-                        day,
-                        row.get("client") or "-",
-                        row.get("target_model") or row.get("model") or "-",
-                        row.get("upstream") or "-",
-                        0 if row.get("outcome") == "done" else 1,
-                        row.get("prompt_tokens") or 0,
-                        row.get("completion_tokens") or 0,
-                        row.get("cached_tokens") or 0,
-                        row.get("cache_write_tokens") or 0,
-                    ),
+                counts = (
+                    row.get("client") or "-",
+                    row.get("target_model") or row.get("model") or "-",
+                    row.get("upstream") or "-",
+                    0 if row.get("outcome") == "done" else 1,
+                    row.get("prompt_tokens") or 0,
+                    row.get("completion_tokens") or 0,
+                    row.get("cached_tokens") or 0,
+                    row.get("cache_write_tokens") or 0,
                 )
+                when = time.gmtime(row["ts"])
+                for table, slot, fmt in (("usage_daily", "day", "%Y-%m-%d"), ("usage_hourly", "hour", HOUR_FORMAT)):
+                    db.execute(_ADD_USAGE.format(table=table, slot=slot), (time.strftime(fmt, when), *counts))
 
     def request_family(self, request_id: str) -> list[sqlite3.Row]:
         """A request and the ones QueueRouter made for it (council members and judge, orchestrator calls),
@@ -1467,17 +1529,20 @@ class Store:
             (f"{month}-01", f"{month}-32"),
         )
 
-    def usage(self, days: int = 30) -> list[sqlite3.Row]:
-        """Usage per day, client, model and upstream over the last ``days`` days, today included (cost is
-        computed per model and upstream, then grouped)."""
-        since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - (days - 1) * 86_400))
+    def usage_between(self, start: float, end: float) -> list[sqlite3.Row]:
+        """Usage per hour, client, model and upstream from ``start`` to ``end`` (UTC seconds, ``end`` not included;
+        cost is computed per model and upstream, then grouped). Days before hourly totals began
+        (hourly_usage_from) have only daily ones: their rows have no ``hour``, and count the whole day."""
+        first = self.hourly_usage_from()
+        hours = [time.strftime(HOUR_FORMAT, time.gmtime(t)) for t in (start, end)]
+        days = [time.strftime("%Y-%m-%d", time.gmtime(t)) for t in (start, end - 1)]
+        counts = "requests, errors, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens"
         return self.read(
-            "SELECT day, client, model, upstream, SUM(requests) AS requests, SUM(errors) AS errors, "
-            "SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, "
-            "SUM(cached_tokens) AS cached_tokens, SUM(cache_write_tokens) AS cache_write_tokens "
-            "FROM usage_daily WHERE day >= ? "
-            "GROUP BY day, client, model, upstream ORDER BY day DESC, client, model, upstream",
-            (since,),
+            f"SELECT hour, substr(hour, 1, 10) AS day, client, model, upstream, {counts} FROM usage_hourly "  # noqa: S608
+            "WHERE hour >= ? AND hour < ? AND hour >= ? UNION ALL "
+            f"SELECT NULL, day, client, model, upstream, {counts} FROM usage_daily "
+            "WHERE day >= ? AND day <= ? AND day < ? ORDER BY day DESC, client, model, upstream",
+            (*hours, first, *days, first),
         )
 
     def token_totals(self, days: int, since: str = "") -> tuple[int, int, int]:

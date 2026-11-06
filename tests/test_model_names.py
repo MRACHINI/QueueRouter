@@ -100,11 +100,11 @@ def test_usage_is_per_provider_at_its_price(catalog):
     models, total = model_costs(rows, overrides, catalog, NAMES)
     assert [(m["label"], m["cost"]) for m in models] == [("ArliAI|hf:zai/GLM-4.7", 3.0), ("Synthetic|GLM-4.7", 1.0)]
     assert total["cost"] == 4.0
-    out, totals, _ = summarize_usage(rows, overrides, catalog, True, 0, 1, NAMES)
-    assert sorted(r["label"] for r in out) == ["ArliAI|hf:zai/GLM-4.7", "Synthetic|GLM-4.7"]
-    assert sorted(r["cost"] for r in out) == [1.0, 3.0] and totals["cost"] == 4.0
-    per_client, _, _ = summarize_usage(rows, overrides, catalog, False, 0, 1, NAMES)
-    assert len(per_client) == 1 and per_client[0]["cost"] == 4.0
+    assert [(c["client"], c["cost"]) for c in models[1]["clients"]] == [("ali", 1.0)]
+    per_client, totals, _ = summarize_usage(rows, overrides, catalog, names=NAMES)
+    assert len(per_client) == 1 and per_client[0]["cost"] == 4.0 and totals["cost"] == 4.0
+    parts = [(m["label"], m["cost"]) for m in per_client[0]["models"]]
+    assert parts == [("ArliAI|hf:zai/GLM-4.7", 3.0), ("Synthetic|GLM-4.7", 1.0)]
 
 
 def test_request_rows_have_their_label_and_price(catalog):
@@ -202,7 +202,7 @@ async def test_opencode_lists_each_provider_and_requests_go_there(make_stack, ma
         rows = await asyncio.to_thread(store.list_requests, 10)
         pinned = next(r for r in rows if r["model"] == "mock-model@second")
         assert pinned["target_model"] == "mock-model" and pinned["upstream"] == "second"
-        usage = await asyncio.to_thread(store.usage, 1)
+        usage = await asyncio.to_thread(store.usage_between, 0, time.time() + 3600)
         assert {r["model"] for r in usage} == {"mock-model"} and "second" in {r["upstream"] for r in usage}
         listed = (await c.get("/admin/api/requests")).json()["rows"]
         assert any(r["label"] == "second|mock-model" for r in listed)

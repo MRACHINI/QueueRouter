@@ -6,16 +6,25 @@
   <h1>Usage</h1>
   <form method="get" action="/admin/usage" class="row wrap" id="usage-filters">
     <span class="live-status" id="usage-status" role="status"></span>
-    <input type="hidden" name="model_days" value="{{ model_days }}">
-    <select name="days" aria-label="Period">
-      {% for d in (1, 7, 30, 90, 365) %}<option value="{{ d }}" {% if d == days %}selected{% endif %}>last {{ d }} day{{ "s" if d > 1 }}</option>{% endfor %}
+    <select name="range" aria-label="Period">
+      {% for key, label in choices.items() %}<option value="{{ key }}" {% if key == period.choice %}selected{% endif %}>{{ label }}</option>{% endfor %}
     </select>
-    <select name="by" aria-label="Group">
-      <option value="">by client</option>
-      <option value="model" {% if by_model %}selected{% endif %}>by client and model</option>
-    </select>
+    <span class="row wrap" id="usage-custom" {% if period.choice != "custom" %}hidden{% endif %}>
+      <input type="date" name="from" value="{{ period.first }}" aria-label="First day (UTC)">
+      <select name="from_hour" aria-label="From (UTC)">
+        {% for h in range(24) %}<option value="{{ h }}" {% if h == period.first_hour %}selected{% endif %}>{{ "%02d:00" | format(h) }}</option>{% endfor %}
+      </select>
+      <span class="small muted">to</span>
+      <input type="date" name="to" value="{{ period.last }}" aria-label="Last day (UTC)">
+      <select name="to_hour" aria-label="Until (UTC)">
+        {% for h in range(1, 25) %}<option value="{{ h }}" {% if h == period.last_hour %}selected{% endif %}>{{ "%02d:00" | format(h) }}</option>{% endfor %}
+      </select>
+      <span class="small muted">UTC</span>
+    </span>
+    <input type="hidden" name="group" value="{{ "range" if merged else "" }}">
     <noscript><button type="submit" class="secondary">Show</button></noscript>
-    <a id="usage-csv" href="/admin/usage.csv?days={{ days }}{% if by_model %}&amp;by=model{% endif %}">CSV</a>
+    <a id="usage-csv" href="{{ links.csv }}">CSV</a>
+    <a id="usage-csv-models" href="{{ links.csv_models }}" title="A row per model of each client">CSV per model</a>
   </form>
 </div>
 

@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -63,6 +63,7 @@ from ..pricing import (
     resolve,
     summarize_usage,
     token_mix,
+    usage_by,
 )
 from ..ranking import CREDIT, CREDIT_URL, Scores
 from ..ranking import INDEXES as RANK_INDEXES
@@ -72,7 +73,8 @@ from ..store import ROLES, Store
 from ..thinking import EFFORTS as THINKING_EFFORTS
 from ..upstream import UA_MODES
 from ..websearch import PROVIDERS as SEARCH_PROVIDERS
-from .charts import day_range, lines, usage_charts
+from . import periods
+from .charts import lines, usage_charts
 from .security import (
     AdminSession,
     Sessions,
@@ -1595,36 +1597,51 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         has_content = may_read and request_id in await asyncio.to_thread(store.content_ids, [request_id])
         return JSONResponse({**details, "has_content": has_content})
 
-    MODEL_RANGES = (1, 7, 30)  # days the Usage page's table of models can show
-
     async def usage_summary(request: Request) -> dict:
-        days = _clamp_int(request.query_params.get("days"), 30, 1, 366)
-        by_model = request.query_params.get("by") == "model"
-        model_days = _clamp_int(request.query_params.get("model_days"), 30, 1, 30)
-        model_days = model_days if model_days in MODEL_RANGES else 30
+        """The Usage page's numbers for its period (?range=24h|1d|7d|30d|custom, custom with from, from_hour, to and
+        to_hour), per day or over the whole period (?group=range)."""
+        query = request.query_params
+        now = time.time()
+        fields = (query.get(k, "") for k in ("range", "from", "from_hour", "to", "to_hour"))
+        period = periods.resolve(*fields, now=now)
+        merged = query.get("group") == "range"
+        kept = {k: v for k in ("range", "from", "from_hour", "to", "to_hour", "group") if (v := query.get(k))}
+
+        def link(path: str, **changed: str) -> str:
+            params = {k: v for k, v in {**kept, **changed}.items() if v}
+            return f"{path}?{urlencode(params)}" if params else path
 
         def load() -> dict:
-            stored = store.usage(max(days, model_days))
+            stored = store.usage_between(period.start, period.end)
+            whole = any(r["hour"] is None for r in stored)  # days from before hourly totals began
             overrides = store.list_model_prices()
             plan_per_month = sum(p.monthly_price or 0 for p in store.list_pools())
-            shown = [r for r in stored if r["day"] >= day_range(days)[0]]
             names = ctx.names()
-            rows, totals, _ = summarize_usage(shown, overrides, ctx.prices, by_model, plan_per_month, days, names)
-            models, model_total = model_costs(
-                [r for r in stored if r["day"] >= day_range(model_days)[0]], overrides, ctx.prices, names
-            )
+            ran = period.elapsed_hours(now)
+            rows, totals, _ = summarize_usage(stored, overrides, ctx.prices, merged, plan_per_month, ran / 24, names)
+            models, model_total = model_costs(stored, overrides, ctx.prices, names)
+            per = "hour" if period.hours <= periods.HOURLY_UP_TO and not whole else "day"
+            slots = period.hour_slots() if per == "hour" else period.day_slots()
             return {
-                "days": days,
-                "by_model": by_model,
+                "period": period,
+                "period_text": period.text(now),
+                "choices": periods.CHOICES,
+                "merged": merged,
                 "rows": rows,
                 "totals": totals,
                 "plan_per_month": plan_per_month,
+                "plan_span": f"{round(ran)} hours" if ran < 47.5 else f"{round(ran / 24)} days",
+                "whole_before": store.hourly_usage_from() if whole else None,
+                "links": {  # for a browser without scripts: the page's script keeps them up to date itself
+                    "by_day": link("/admin/usage", group=""),
+                    "whole": link("/admin/usage", group="range"),
+                    "csv": link("/admin/usage.csv"),
+                    "csv_models": link("/admin/usage.csv", by="model"),
+                },
                 "models": models,
                 "model_total": model_total,
-                "model_days": model_days,
-                "model_ranges": MODEL_RANGES,
                 "catalog_loaded": bool(ctx.prices.prices),
-                "charts": usage_charts(rows, days),
+                "charts": usage_charts(usage_by(stored, overrides, ctx.prices, per, names), slots, per),
             }
 
         return await asyncio.to_thread(load)
@@ -1677,7 +1694,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def usage_csv(request: Request):
         require(request, "viewer")
         summary = await usage_summary(request)
-        days, by_model = summary["days"], summary["by_model"]
+        period, by_model = summary["period"], request.query_params.get("by") == "model"
+        start, end = (periods.stamp(t, "%Y-%m-%dT%H:%MZ") for t in (period.start, period.end))
         out = io.StringIO()
         writer = csv.writer(out)
         columns = [
@@ -1694,13 +1712,17 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             *(["upstream", "label"] if by_model else []),
         ]
         writer.writerow(columns)
-        for r in summary["rows"]:
-            values = {**r, "cost_usd": f"{r['cost']:.4f}" if r["priced"] else ""}
-            writer.writerow([_csv_cell(values[c]) for c in columns])
+        for client in summary["rows"]:
+            day = client["day"] or f"{start}/{end}"  # over the whole period: its start and end
+            for r in client["models"] if by_model else [client]:
+                cost = f"{r['cost']:.4f}" if r["priced"] else ""
+                values = {**r, "day": day, "client": client["client"], "cost_usd": cost}
+                writer.writerow([_csv_cell(values[c]) for c in columns])
+        name = f"queuerouter-usage-{start[:13].replace('-', '')}-{end[:13].replace('-', '')}.csv"
         return Response(
             out.getvalue(),
             media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="queuerouter-usage-{days}d.csv"'},
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
         )
 
     # -- models and aliases --------------------------------------------------------------
@@ -2449,13 +2471,6 @@ def _parse_date(value: str) -> float | None:
         return None
     day = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
     return (day + timedelta(days=1)).timestamp()
-
-
-def _clamp_int(raw: str | None, default: int, low: int, high: int) -> int:
-    try:
-        return min(high, max(low, int(raw or default)))
-    except ValueError:
-        return default
 
 
 class RulesError(ValueError):

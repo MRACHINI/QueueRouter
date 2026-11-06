@@ -62,7 +62,7 @@ def stacked_bars(title: str, labels: list[str], series: list[tuple[str, str, lis
             parts.append(f'<rect class="{css}" x="{x:.1f}" y="{y:.1f}" width="{bar:.1f}" height="{h:.1f}"/>')
         parts.append("</g>")
         if i % label_every == 0:
-            short = label[5:] if len(label) == 10 else label  # YYYY-MM-DD -> MM-DD
+            short = {10: label[5:], 16: label[11:]}.get(len(label), label)  # MM-DD of a day, HH:00 of an hour
             cx = LEFT + slot * i + slot / 2
             parts.append(
                 f'<text class="axis" x="{cx:.1f}" y="{HEIGHT - 8}" text-anchor="middle">{escape(short)}</text>'
@@ -118,41 +118,36 @@ def lines(title: str, labels: list[str], series: list[tuple[str, str, list[float
     return f'<figure class="chart-box"><figcaption>{escape(title)} {legend}</figcaption>{"".join(parts)}</figure>'
 
 
-def usage_charts(rows: list[dict], days: int, today: date | None = None) -> list[str]:
-    """Per-day charts for the Usage page from its rows (one per day/client[/model])."""
-    labels = day_range(days, today)
-    index = {d: i for i, d in enumerate(labels)}
+def usage_charts(totals: dict[str, dict], slots: list[str], per: str = "day") -> list[str]:
+    """The Usage page's charts: ``totals`` per hour (YYYY-MM-DDTHH) or day (YYYY-MM-DD), one bar for each of
+    ``slots``, empty ones included."""
+    labels = [f"{s[:10]} {s[11:]}:00" if per == "hour" else s for s in slots]
 
-    def per_day(key) -> list[float]:
-        values = [0.0] * len(labels)
-        for r in rows:
-            i = index.get(r["day"])
-            if i is not None:
-                values[i] += key(r) or 0
-        return values
+    def values(key) -> list[float]:
+        return [key(totals[s]) or 0 if s in totals else 0.0 for s in slots]
 
     charts = [
         stacked_bars(
-            "Tokens per day",
+            f"Tokens per {per}",
             labels,
             [
-                ("in", "s1", per_day(lambda r: r["prompt_tokens"])),
-                ("out", "s2", per_day(lambda r: r["completion_tokens"])),
+                ("in", "s1", values(lambda r: r["prompt_tokens"])),
+                ("out", "s2", values(lambda r: r["completion_tokens"])),
             ],
         ),
         stacked_bars(
-            "Requests per day",
+            f"Requests per {per}",
             labels,
             [
-                ("ok", "s1", per_day(lambda r: r["requests"] - r["errors"])),
-                ("errors", "s3", per_day(lambda r: r["errors"])),
+                ("ok", "s1", values(lambda r: r["requests"] - r["errors"])),
+                ("errors", "s3", values(lambda r: r["errors"])),
             ],
         ),
     ]
-    if any(r.get("cost") for r in rows):
+    if any(r.get("cost") for r in totals.values()):
         charts.append(
             stacked_bars(
-                "Cost per day at official prices", labels, [("cost", "s2", per_day(lambda r: r["cost"]))], money=True
+                f"Cost per {per} at official prices", labels, [("cost", "s2", values(lambda r: r["cost"]))], money=True
             )
         )
     return charts
