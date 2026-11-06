@@ -12,6 +12,24 @@ def clip(text: str, limit_bytes: int) -> tuple[str, bool]:
     return data[:limit_bytes].decode("utf-8", "ignore") + "\n…[cut]", True
 
 
+def clip_edits(detail: dict, limit_bytes: int) -> dict:
+    """What prompt edits changed (app/edits.py Run.finish), each text within the size limit."""
+    slots = [
+        {
+            **slot,
+            "before": clip(slot.get("before", ""), limit_bytes)[0],
+            "after": clip(slot.get("after", ""), limit_bytes)[0],
+        }
+        for slot in detail.get("slots", [])
+    ]
+    part = max(1024, limit_bytes // 8)  # a change's own texts (a rewrite's can be the whole prompt)
+    steps = [
+        {**step, "hunks": [[clip(str(t), part)[0] for t in hunk] for hunk in step.get("hunks", [])]}
+        for step in detail.get("steps", [])
+    ]
+    return {"slots": slots, "steps": steps}
+
+
 def _text(value: object) -> str:
     """Text from a delta field: a string, or the text parts of a list (some providers send parts)."""
     if isinstance(value, str):

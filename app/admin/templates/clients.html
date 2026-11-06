@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Clients{% endblock %}
 {% from "limits.html" import limit_fields %}
+{% from "picker.html" import picker %}
 {% block content %}
+<script type="application/json" id="edit-choices">{{ edit_choices | tojson }}</script>
 <h1>Clients</h1>
 <p class="muted">Each app (opencode, scripts, n8n…) gets its own key. Keys are kept encrypted: <em>Show</em> displays
 one again (each view is in the audit log). Renaming a client keeps its key and moves its history with it. Changes
@@ -110,7 +112,7 @@ apply immediately.</p>
     <td colspan="5" data-label="">
         {% set p = c.policy %}
         <details class="policy">
-          <summary class="small">Limits{% if p.user_agents or p.ua_mode != "keep" or p.tags or own_limits(p) %} <span class="badge">set</span>{% endif %}</summary>
+          <summary class="small">Limits{% if p.user_agents or p.ua_mode != "keep" or p.tags or own_limits(p) %} <span class="badge">set</span>{% endif %}{% if p.edits %} <span class="badge">{{ p.edits | length }} prompt edit{{ "s" if p.edits | length > 1 }}</span>{% endif %}</summary>
           <form method="post" action="/admin/clients/{{ c.id }}/policy" class="grid tight">
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <p class="small muted span-all">Models: {% if group %}from its group, <a href="/admin/groups/{{ group.id }}">{{ group.name }}</a>
@@ -127,6 +129,8 @@ apply immediately.</p>
             <label class="span-all">User-Agent template <small class="muted">for "template": {original} {client} {priority} {model} {upstream} {version}</small>
               <input name="ua_template" value="{{ p.ua_template }}" placeholder="{original} via queuerouter/{version} (client={client}; priority={priority})"></label>
             <label>Default tags <input name="tags" value="{{ p.tags }}" placeholder="e.g. coding, opencode"></label>
+            <label class="span-all">Prompt edits, in order {{ picker("edits", p.edits, "multi", "Add a prompt edit…", True, "edit-choices", True) }}
+              <small class="muted">After the alias's and its group's{% if group and group.policy.edits %} ({% for i in group.policy.edits %}{{ edit_names.get(i, "#" ~ i) }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}. Made on the <a href="/admin/edits">Edits</a> page.</small></label>
             {{ limit_fields(p, group.policy if group else none) }}
             {% set m = month.get(c.name) %}{% if m %}<p class="small muted span-all">This month (UTC): {{ "{:,}".format(m.requests) }} requests · {{ "{:,}".format(m.tokens) }} tokens · ${{ "%.2f" | format(m.cost) }} at official prices. Over a monthly quota, requests get 429 until the month ends.</p>{% endif %}
             <div class="align-end"><button type="submit" class="secondary">Save limits</button></div>

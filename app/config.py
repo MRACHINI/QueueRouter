@@ -58,6 +58,7 @@ class ClientPolicy:
     month_cost_usd: float | None = None  # at official prices (Usage page)
     log_content: bool = False  # keep prompts and replies (encrypted; admins with content permission)
     log_content_until: float | None = None  # epoch seconds; None = until turned off
+    edits: tuple[int, ...] = ()  # prompt edits (app/edits.py), in order: a group's run before its clients' own
 
     @classmethod
     def from_json(cls, text: str | None) -> ClientPolicy:
@@ -71,6 +72,8 @@ class ClientPolicy:
             data["allowed_models"] = tuple(data["allowed_models"] or ())
         if "user_agents" in data:
             data["user_agents"] = tuple(data["user_agents"] or ())
+        if "edits" in data:
+            data["edits"] = tuple(i for i in data["edits"] or () if isinstance(i, int) and not isinstance(i, bool))
         return cls(**data)
 
     def to_json(self) -> str:
@@ -115,11 +118,13 @@ GROUP_LIMITS = (
 
 def with_group(own: ClientPolicy, group: ClientPolicy | None) -> ClientPolicy:
     """What a client's requests get: its group's models, and each limit its own where it has one (None and "" =
-    not set), else the group's. Monthly quotas count per client: each gets the group's numbers."""
+    not set), else the group's. Monthly quotas count per client: each gets the group's numbers. Prompt edits add
+    up: the group's, then the client's own."""
     if group is None:
         return own
     inherited = {name: getattr(group, name) for name in GROUP_LIMITS if getattr(own, name) in (None, "")}
-    return replace(own, allowed_models=group.allowed_models, **inherited)
+    edits = tuple(dict.fromkeys((*group.edits, *own.edits)))
+    return replace(own, allowed_models=group.allowed_models, edits=edits, **inherited)
 
 
 @dataclass(frozen=True)

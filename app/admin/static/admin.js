@@ -141,13 +141,17 @@ document.addEventListener("DOMContentLoaded", () => {
   const dashboard = document.getElementById("dashboard");
   if (dashboard) liveDashboard(dashboard);
   document.querySelectorAll("[data-model-picker]").forEach(modelPicker);
-  const choicesData = document.getElementById("model-choices");
-  if (choicesData) {
-    const choices = JSON.parse(choicesData.textContent || "[]");
-    document.querySelectorAll("[data-picker]").forEach((root) => chipPicker(root, choices));
-  }
+  const lists = {}; // each picker's choices: the models, or another list the page names (data-choices)
+  document.querySelectorAll("[data-picker]").forEach((root) => {
+    const id = root.dataset.choices || "model-choices";
+    if (!(id in lists)) lists[id] = JSON.parse(document.getElementById(id)?.textContent || "null");
+    if (lists[id]) chipPicker(root, lists[id]);
+  });
+  document.querySelectorAll("[data-kind-form]").forEach(kindForm);
   const liveRequestsRoot = document.getElementById("requests-live");
   if (liveRequestsRoot) liveRequests(liveRequestsRoot);
+  const liveEditsRoot = document.getElementById("edits-live");
+  if (liveEditsRoot) liveEdits(liveEditsRoot);
   const usage = document.getElementById("usage-live");
   if (usage) liveUsage(usage);
   const playground = document.getElementById("playground");
@@ -808,6 +812,7 @@ function liveRequests(root) {
     if (r.compaction) marks.push("compacted");
     if (r.answer_check) marks.push(r.answer_check.includes("failed") ? "check failed" : "checked");
     if (r.via) marks.push(`via ${r.via}`);
+    if (r.edited) marks.push("edited");
     if (r.role) marks.push(r.role);
     const cell = td("Model", "");
     cell.title = [r.label, ...marks].join(" · ");
@@ -844,6 +849,24 @@ function liveRequests(root) {
     if (d.compaction) line("Compacted", d.compaction);
     if (d.fallback) line("Fell back", d.fallback);
     if (d.via) line("Forwarded", d.via);
+    let edited = null;
+    if (d.edits) {
+      try {
+        edited = JSON.parse(d.edits);
+      } catch (_) {
+        edited = null;
+      }
+    }
+    if (edited) {
+      const parts = [];
+      if (edited.changed?.length) parts.push(`changed by ${edited.changed.join(", ")}`);
+      if (edited.missed?.length) parts.push(`found nothing: ${edited.missed.join(", ")}`);
+      if (!parts.length) parts.push("no change");
+      const [before, after] = edited.size || [0, 0];
+      if (before !== after) parts.push(`${before.toLocaleString()} → ${after.toLocaleString()} characters`);
+      line("Prompt edits", parts.join(" · "));
+      for (const note of edited.notes || []) line("Prompt edits", note);
+    }
     if (d.answer_check) line("Answer check", d.answer_check);
     if (d.role) line("Made by QueueRouter", d.role);
     if (d.parent) {
@@ -873,7 +896,9 @@ function liveRequests(root) {
     for (const [name, value] of Object.entries(ids)) line(name, copy(String(value)));
     const links = [];
     if (d.has_content) links.push(["Content", `/admin/requests/${d.id}/content`]);
-    if (d.council || d.answer_check || d.via) links.push(["Trace", `/admin/requests/${d.id}/trace`]);
+    if (d.has_content && edited?.changed?.length) links.push(["Prompt changes", `/admin/requests/${d.id}/edits`]);
+    const editCalls = (edited?.notes || []).some((n) => n.includes("model"));
+    if (d.council || d.answer_check || d.via || editCalls) links.push(["Trace", `/admin/requests/${d.id}/trace`]);
     if (links.length) {
       const row = el("div", "links");
       for (const [name, href] of links) {
@@ -1291,6 +1316,7 @@ function modelPicker(form) {
 function chipPicker(root, choices) {
   const single = root.dataset.picker === "single";
   const ordered = root.hasAttribute("data-ordered");
+  const strict = root.hasAttribute("data-strict"); // only listed choices (a typed name isn't added)
   const hidden = root.querySelector('input[type="hidden"]');
   const chips = root.querySelector(".picker-chips");
   const search = root.querySelector(".picker-search");
@@ -1302,7 +1328,8 @@ function chipPicker(root, choices) {
   let dragged = null;
 
   const describe = (c) => {
-    if (!c) return "not listed by any upstream";
+    if (!c) return strict ? "doesn't exist any more" : "not listed by any upstream";
+    if (c.note !== undefined) return c.note;
     if (c.alias) return "alias";
     const size = c.context ? ` · ${c.context >= 1000 ? Math.round(c.context / 1000) + "k" : c.context}` : "";
     return `${c.upstreams.join(", ")}${size}${c.hidden ? " · hidden" : ""}`;
@@ -1314,6 +1341,11 @@ function chipPicker(root, choices) {
   const add = (id) => {
     id = id.trim();
     if (!id) return;
+    if (strict && !byId.has(id)) { // a typed name: the choice it names, if any
+      const typed = choices.find((c) => (c.label || c.id).toLowerCase() === id.toLowerCase());
+      if (!typed) return;
+      id = typed.id;
+    }
     values = single ? [id] : values.includes(id) ? values : [...values, id];
     search.value = "";
     save();
@@ -1380,7 +1412,7 @@ function chipPicker(root, choices) {
     if (!shown.length && search.value.trim()) {
       const item = document.createElement("li");
       item.className = "muted small";
-      item.textContent = `Enter: add "${search.value.trim()}" (not listed by any upstream)`;
+      item.textContent = strict ? "No match" : `Enter: add "${search.value.trim()}" (not listed by any upstream)`;
       menu.append(item);
     }
     menu.hidden = !menu.children.length;
@@ -1416,4 +1448,160 @@ function chipPicker(root, choices) {
     if (search.value.trim()) add(search.value);
   });
   renderChips();
+}
+
+// Edit editor: only the fields of the chosen kind are shown ([data-kinds="text pattern"]); all are sent, and the
+// server reads the kind's own.
+function kindForm(form) {
+  const select = form.querySelector("[data-kind-select]");
+  if (!select) return;
+  const sync = () => {
+    form.querySelectorAll("[data-kinds]").forEach((el) => {
+      el.hidden = !el.dataset.kinds.split(" ").includes(select.value);
+    });
+  };
+  select.addEventListener("change", sync);
+  sync();
+}
+
+// Edits > Live: requests whose prompt edits ran, newest first. New ones are fetched whenever the live stream says
+// requests were written; older ones with "Older". The filters reload the list without a page load.
+function liveEdits(root) {
+  const list = document.getElementById("edited-requests");
+  const more = document.getElementById("edits-more");
+  const form = document.getElementById("edit-filters");
+  const status = document.getElementById("edits-status");
+  let newest = null;
+  let oldest = null;
+  let version = null;
+  let busy = false;
+
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  const filters = () => {
+    const query = new URLSearchParams();
+    for (const [key, value] of new FormData(form)) if (value) query.set(key, value);
+    return query;
+  };
+  const clock = (ts) => {
+    const date = new Date(ts * 1000);
+    const two = (n) => String(n).padStart(2, "0");
+    const time = `${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}`;
+    return date.toDateString() === new Date().toDateString() ? time : `${two(date.getMonth() + 1)}-${two(date.getDate())} ${time}`;
+  };
+  const chips = (names, className) => {
+    const cell = el("span");
+    for (const name of names) cell.append(el("span", `badge ${className}`, name), " ");
+    if (!names.length) cell.append(el("span", "muted", "—"));
+    return cell;
+  };
+  const row = (r) => {
+    const tr = el("tr", "edited");
+    tr.dataset.id = r.id;
+    const cell = (label, ...children) => {
+      const td = el("td");
+      td.dataset.label = label;
+      td.append(...children);
+      tr.append(td);
+      return td;
+    };
+    const time = el("time", "", clock(r.ts));
+    time.title = new Date(r.ts * 1000).toLocaleString();
+    cell("Time", time);
+    cell("Client", r.client || "—");
+    const model = cell("Model", r.target ? `${r.model} → ${r.target}` : r.model || "—");
+    if (r.via) model.append(" ", el("span", "badge", `via ${r.via}`));
+    if (r.outcome && r.outcome !== "done") model.append(" ", el("span", "badge", r.outcome));
+    const changed = el("div"); // the chips with the notes under them (one block: a card on a phone keeps it whole)
+    changed.append(chips(r.changed, "ok"));
+    for (const note of r.notes) changed.append(el("div", "small muted", note));
+    cell("Changed", changed);
+    cell("Found nothing", chips(r.missed, ""));
+    const [before, after] = r.size;
+    const size = cell("Size", `${before.toLocaleString()} → ${after.toLocaleString()}`);
+    size.className = "num";
+    const link = el("a", "", "changes");
+    if (r.view) {
+      link.href = `/admin/requests/${encodeURIComponent(r.id)}/edits`;
+      cell("", link);
+    } else {
+      cell("", el("span", "small muted", r.changed.length ? "no text kept" : ""));
+    }
+    return tr;
+  };
+  const placeholder = (text) => {
+    const tr = el("tr", "placeholder");
+    const td = el("td", "muted", text);
+    td.colSpan = 7;
+    tr.append(td);
+    return tr;
+  };
+  const fetchRows = async (extra) => {
+    const query = filters();
+    for (const [key, value] of Object.entries(extra)) query.set(key, value);
+    const response = await liveGet(`${root.dataset.rows}?${query}`, stream);
+    return response ? response.json() : null;
+  };
+  const load = async () => {
+    newest = oldest = null;
+    const data = await fetchRows({});
+    if (!data) return;
+    list.replaceChildren(...data.rows.map(row));
+    if (!data.rows.length) list.append(placeholder(filters().toString() ? "No requests match these filters." : "No requests changed by edits yet."));
+    if (data.rows.length) {
+      newest = data.rows[0].ts;
+      oldest = data.rows[data.rows.length - 1];
+    }
+    showMore(data.more);
+  };
+  const fetchNew = async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      if (newest === null) return await load();
+      const data = await fetchRows({ after: newest });
+      if (!data) return;
+      const fresh = data.rows.filter((r) => !list.querySelector(`tr[data-id="${CSS.escape(r.id)}"]`));
+      if (!fresh.length) return;
+      list.querySelector(".placeholder")?.remove();
+      list.prepend(...fresh.map((r) => {
+        const tr = row(r);
+        tr.classList.add("fresh");
+        return tr;
+      }));
+      newest = Math.max(newest, ...data.rows.map((r) => r.ts));
+    } finally {
+      busy = false;
+    }
+  };
+  const showMore = (hasMore) => {
+    more.replaceChildren();
+    if (!hasMore || !oldest) return;
+    const button = el("button", "secondary", "Older");
+    button.type = "button";
+    button.addEventListener("click", async () => {
+      const data = await fetchRows({ before: oldest.ts, before_id: oldest.id });
+      if (!data) return;
+      list.append(...data.rows.map(row));
+      if (data.rows.length) oldest = data.rows[data.rows.length - 1];
+      showMore(data.more);
+    });
+    more.append(button);
+  };
+  form.addEventListener("change", () => {
+    const query = filters();
+    history.replaceState(null, "", query.toString() ? `?${query}` : window.location.pathname);
+    load();
+  });
+  const stream = liveStream(root.dataset.stream, status, {
+    message(state) {
+      if (version !== null && state.usage_version !== version) fetchNew();
+      version = state.usage_version;
+    },
+    resync: fetchNew,
+  });
 }

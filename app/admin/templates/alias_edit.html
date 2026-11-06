@@ -9,6 +9,7 @@
 reorder where order matters. A name no provider lists can be typed and added with Enter. When several providers offer
 the same model, it is also listed as <code>model@provider</code>: that choice is only sent to that provider.</p>
 <script type="application/json" id="model-choices">{{ choices | tojson }}</script>
+<script type="application/json" id="edit-choices">{{ edit_choices | tojson }}</script>
 
 <form method="post" action="{% if new %}/admin/aliases{% else %}/admin/aliases/{{ a.id }}{% endif %}" class="alias-editor">
   <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -40,6 +41,14 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
       <div class="row wrap">{% for t in triggers %}
         <label class="check"><input type="checkbox" name="on_{{ t }}" {% if t in a.fallback_on %}checked{% endif %}> {{ t }}</label>
       {% endfor %}</div></fieldset>
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>Prompt edits</legend>
+    <label>Edits, in order {{ picker("edits", a.edits, "multi", "Add a prompt edit…", True, "edit-choices", True) }}
+      <small class="muted">Changes to the system prompt of its requests, before they reach any of its models (made on the
+      <a href="/admin/edits">Edits</a> page). The group's and the client's own edits follow these. A request this alias
+      forwards to another alias keeps these changes, and that alias makes its own.</small></label>
   </fieldset>
 
   <fieldset class="card">

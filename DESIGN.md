@@ -1797,6 +1797,52 @@ v0.67.0: aliases forward to aliases (replaces 0.66's opening them into their mod
 - `requests.via` (migration 41): "a → b", shown under the row ("Forwarded") and as a badge, and on the trace page.
 - `first_model` follows an alias's target through the aliases it forwards to (sizes, prices, images in listings).
 
+v0.68.0: prompt edits (app/edits.py, app/admin/edit_routes.py).
+- Asked for: change the system prompt of requests, selecting what to change (exact text or a pattern), or have a
+  model do it, as items of their own applied in order; a model that writes find-and-replace edits itself instead of
+  rewriting every time; a live view of how real requests were changed, with the changes highlighted.
+- An edit (table `prompt_edits`, migration 42) has a kind: text, pattern, add, rewrite, learn ("make edits");
+  `settings` JSON per kind, checked by `clean_settings`. Attached in order to aliases (`aliases.edits`), groups and
+  clients (`ClientPolicy.edits`; `with_group` puts the group's before the client's own). `serve` runs them after the
+  unknown-model check, before the council, on the app's requests only (not `internal` ones: members, judges,
+  summaries, checks, edits' own calls), on `payload["messages"]`: every system and developer message (string
+  content, or each text part), never user or assistant messages. The session key is taken first, from the app's
+  prompt. Every model of the alias gets the edited body (`prompt_changed` re-serializes it). A request forwarded to
+  another alias carries the changes (`Outcome.replay` on the app's body) and the ids already made (`edited`), so
+  that alias makes only its own and a client's "add" isn't made twice.
+- Patterns use the `regex` module with a 0.25 s timeout per text: a pattern that would backtrack for ages is
+  skipped and noted instead of stalling the event loop. ^ and $ match per line.
+- Rewrite: each text (or each part a `part` pattern finds) goes to the model with the instructions; the answer
+  (fences and thinking removed) replaces it. Results are kept per (edit, text hash): in memory (500) and in
+  `prompt_edit_results`, encrypted; unused for 30 days, deleted; forgotten when the edit's settings change.
+- Learn: the prompt is split into paragraphs (blank lines; longer than 4,000 characters in pieces of lines); a
+  paragraph's hash leaves out what its "keep" patterns match. Paragraphs not in `prompt_edit_seen` (at most 60,000
+  characters at once) go to the model with the instructions and the edits already made; it answers JSON
+  {edits: [{find|pattern, replace}], keep: [pattern]}. `parse_made` keeps a find only if it's in the paragraphs, a
+  pattern only if it compiles and matches there, drops repeats; an edit that would leave less than half the text,
+  or every edit when "hold for approval" is on, is stored "pending". Made edits are rows with `parent_id`; they
+  run in order under the edit's name. The read hashes are stored (with the new keep patterns) and the snapshot
+  reloads, then the in-memory read set grows.
+- Model calls: through `internal_completion` as the request's client and lane, role "prompt edit: <name>", parent
+  the request (its id is now made before the edits). One call per (edit, text) or (edit, paragraphs) at a time:
+  requests with the same new text share it. "Wait": the request waits up to the edit's time limit (5–600 s; the
+  call goes on in the background past it); not waiting: the request goes with what's there. A failed call (error,
+  empty or unreadable answer) rests that edit's model for 60 s; a rewrite then sends the prompt as it is, or
+  refuses with 502 `prompt_edit_failed` when set to.
+- What ran: `requests.edits` (JSON: changed, missed = attached edits that found nothing, notes, sizes) for the
+  Requests page ("edited" badge, details) and the Live tab (`/admin/api/edits/live`, partial index
+  `requests_edited`; filters by edit, client, found nothing, via `json_each`). With content logging on, the texts
+  before and after and each edit's changes (with 60 characters around) go to `request_content.edits`, encrypted, cut
+  to the content size limit; `/admin/requests/{id}/edits` shows them (admins allowed to read content; audited), the
+  whole prompt with removed text struck and added text marked (`diff_segments`: by line, then by word; long
+  unchanged runs folded), then by edit. Hit counts per edit (and made edit) are added up in memory and written with
+  the usage rows.
+- Edits page: list (kind, what it does, where used, hits, held edits), editor per kind, Try it (a pasted prompt or
+  a logged request's, as the app sent it; no model is asked: a rewrite's kept result, a learn edit's made edits,
+  and notes on what a model would get), made edits (change, turn off, approve, delete; approve all; read again;
+  forget all), kept rewrites (forget). The alias, group and client editors pick edits with an ordered picker
+  (`data-choices="edit-choices"`, `data-strict`). Deleting an edit removes it everywhere it's used.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

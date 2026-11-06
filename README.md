@@ -42,6 +42,19 @@ from a **web admin UI**.
   discarded answer and the check are rows of their own, so their cost counts). Answers that call
   tools, and the last model's, aren't checked; a checked answer arrives whole once it passes, not
   word by word. A checker that fails or takes over two minutes lets the answer through.
+- **Prompt edits** (Edits page): changes to the system prompt of requests before they reach the model, made
+  once and attached in order to aliases, client groups and clients (an alias's run first, then the group's, then
+  the client's). They touch the app's system and developer messages only. Kinds: *text* (find and replace, or
+  delete), *pattern* (a regular expression, for parts that change between requests), *add* (before or after the
+  prompt, instead of it, or only when there is none), *model: rewrite* (a model you pick rewrites the prompt, or
+  only the parts a pattern finds, by your instructions; its result is kept, so a text is rewritten once) and
+  *model: make edits* (a model reads the prompt by paragraph and makes text and pattern edits of its own, listed
+  under it to change, turn off, delete or approve; it reads only paragraphs it hasn't read, and marks parts that
+  change between requests, like a date, so they don't count as new). A model edit waits for its model or works
+  in the background for the next requests; its request is a row of its own, so its cost counts. **Try it** shows an
+  edit's changes on a pasted or logged prompt, highlighted; the **Live** tab lists the requests edits changed (and
+  attached edits that found nothing), and for clients with content logging on, each request's changes
+  highlighted. Patterns run with a time limit, so a slow one can't stall the server.
 - **Sticky routing**: with several upstreams, a conversation returns to the upstream that served
   it, so its prompt cache stays warm.
 - **Provider quotas handled sensibly**: a provider's 429 message is shown (stream notes, errors, the

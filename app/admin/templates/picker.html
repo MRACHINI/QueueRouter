@@ -1,7 +1,8 @@
-{#- A model picker (admin.js chipPicker): search, chips, a hidden field with the comma-separated values. The page puts
-    the choices in <script type="application/json" id="model-choices">. -#}
-{% macro picker(name, values, kind, placeholder, ordered=False) -%}
-<div class="picker" data-picker="{{ kind }}"{% if ordered %} data-ordered{% endif %}>
+{#- A picker (admin.js chipPicker): search, chips, a hidden field with the comma-separated values. The page puts the
+    choices in <script type="application/json" id="model-choices"> (or the id given as ``choices``); ``strict``: only
+    listed choices can be added (a typed name isn't). -#}
+{% macro picker(name, values, kind, placeholder, ordered=False, choices=None, strict=False) -%}
+<div class="picker" data-picker="{{ kind }}"{% if ordered %} data-ordered{% endif %}{% if choices %} data-choices="{{ choices }}"{% endif %}{% if strict %} data-strict{% endif %}>
   <input type="hidden" name="{{ name }}" value="{{ values | join(', ') if values is not string else values }}">
   <div class="picker-box">
     <span class="picker-chips"></span>

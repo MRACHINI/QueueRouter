@@ -44,6 +44,7 @@ from . import (
 from . import compaction as compaction_mod
 from . import council as council_mod
 from . import cron as cron_mod
+from . import edits as edits_mod
 from . import jobs as jobs_mod
 from . import thinking as thinking_mod
 from . import tools as tools_mod
@@ -126,6 +127,7 @@ QUOTA_BLOCK_S = 3600  # how long an upstream whose quota ran out is skipped for 
 ADMIN_MAX_BODY = 4 * 1024 * 1024  # admin forms and the Playground (the restore upload has its own limit)
 CONTENT_CAPTURE_MAX = 16 * 1024 * 1024  # streamed reply bytes kept for content logging (cut later)
 MAX_FORWARDS = 8  # aliases one request may be forwarded through (the editor refuses loops; this ends any other)
+EDIT_RESULT_DAYS = 30  # a prompt edit's kept rewrite unused this long is deleted (made again when needed)
 CATALOG_MAX_AGE_S = 3600
 
 
@@ -182,6 +184,7 @@ class RequestLog:
     def __init__(self, request_id: str, method: str, path: str, ip: str) -> None:
         self.started = time.monotonic()
         self.content: tuple[bytes, bytes] | None = None  # (request, reply) when content logging is on
+        self.edit_detail: dict | None = None  # with content logging on: the system prompt before and after edits
         self.fields: dict = {
             "id": request_id,
             "method": method,
@@ -208,6 +211,7 @@ class RequestLog:
             "fallback": None,  # why it moved on to the alias's next model ("a -> b (reason)"; several: "; ")
             "answer_check": None,  # what the alias's answer check said, per model checked (app/answer_check.py)
             "via": None,  # forwarded from alias to alias: the way it came ("a → b"; the app asked for a)
+            "edits": None,  # what its prompt edits did, as JSON (app/edits.py Outcome.summary)
             "tags": None,
             "run": None,
             "target_model": None,
@@ -251,8 +255,9 @@ class RequestLog:
         stats.recent.append(entry)
         if stats.sink:
             stats.sink(entry)
-        if self.content is not None and stats.content_sink:
-            stats.content_sink(f["id"], f["client"] or "default", *self.content)
+        if (self.content is not None or self.edit_detail) and stats.content_sink:
+            request, reply = self.content or (b"", b"")
+            stats.content_sink(f["id"], f["client"] or "default", request, reply, self.edit_detail)
         log.info(json.dumps(f))
 
 
@@ -529,7 +534,18 @@ def create_app(
         snapshot = load_snapshot(store)
         context_sizes.load(store.list_model_limits())
         apply_snapshot()
+        edit_engine.forget()  # what prompt edits read and kept: from the database again
         log.info(json.dumps({"event": "config_reloaded", **summary()}))
+
+    edit_engine = edits_mod.Engine(
+        edits_mod.EditStore(
+            seen=store.edit_seen,
+            add_made=store.add_made_edits,
+            result=store.edit_result,
+            keep_result=store.keep_edit_result,
+            reload=reload,
+        )
+    )
 
     def summary() -> dict:
         s = snapshot.settings
@@ -651,8 +667,12 @@ def create_app(
         monthly.observe(entry)
 
     stats.sink = sink
-    pending_content: list[tuple[str, float, str, bytes, bytes]] = []
-    stats.content_sink = lambda rid, client, req, resp: pending_content.append((rid, time.time(), client, req, resp))
+    pending_content: list[tuple[str, float, str, bytes, bytes, dict | None]] = []
+
+    def content_sink(rid: str, client: str, req: bytes, resp: bytes, detail: dict | None = None) -> None:
+        pending_content.append((rid, time.time(), client, req, resp, detail))
+
+    stats.content_sink = content_sink
 
     async def flush_usage() -> None:
         """Write finished requests (and logged content) to the database off the event loop."""
@@ -669,18 +689,24 @@ def create_app(
             contents = []
             taken = pending_content[:]
             pending_content.clear()  # first: one entry that can't be read must not block the rest for good
-            for rid, ts, client, req, resp in taken:
+            for rid, ts, client, req, resp, detail in taken:
                 try:
                     reply = content_log.readable_reply(resp)
                 except Exception:  # an answer in a shape we don't know: kept as it came
                     reply = resp.decode("utf-8", "replace")
                 request_text, cut_req = content_log.clip(req.decode("utf-8", "replace"), limit)
                 reply_text, cut_resp = content_log.clip(reply, limit)
-                contents.append((rid, ts, client, request_text, reply_text, cut_req or cut_resp))
+                edited = json.dumps(content_log.clip_edits(detail, limit), ensure_ascii=False) if detail else None
+                contents.append((rid, ts, client, request_text, reply_text, cut_req or cut_resp, edited))
             try:
                 await asyncio.to_thread(store.save_contents, contents)
             except Exception as exc:
                 log.error(json.dumps({"event": "content_write_failed", "error": repr(exc)[:200]}))
+        if hits := edit_engine.take_hits():  # how often each prompt edit changed something (Edits page)
+            try:
+                await asyncio.to_thread(store.add_edit_hits, hits)
+            except Exception as exc:
+                log.error(json.dumps({"event": "edit_hits_write_failed", "error": repr(exc)[:200]}))
 
     def restore_rate_windows() -> None:
         """After a restart, rebuild the last 24 h of rate-limit windows from the request log."""
@@ -768,6 +794,7 @@ def create_app(
                     await asyncio.to_thread(store.prune_jobs, cfg().job_retention_days)
                     await asyncio.to_thread(store.prune_content, cfg().content_log_days)
                     await asyncio.to_thread(store.prune_summaries, cfg().compaction_keep_days)
+                    await asyncio.to_thread(store.prune_edit_results, EDIT_RESULT_DAYS)
                 except Exception as exc:  # e.g. database locked or disk full: try again next hour
                     log.error(json.dumps({"event": "prune_failed", "error": repr(exc)[:200]}))
                 try:
@@ -845,6 +872,7 @@ def create_app(
         for check in list(health_checks.values()):
             check.cancel()
         await job_runner.stop()
+        await edit_engine.close()
         await flush_usage()
         if exporter.pending and cfg().otel_endpoint:
             with contextlib.suppress(Exception):
@@ -865,6 +893,7 @@ def create_app(
     app.state.reload = reload
     app.state.bootstrap = bootstrap
     app.state.stats = stats
+    app.state.edit_engine = edit_engine
     app.state.circuits = circuits
     app.state.prices = prices
     app.state.scores = scores
@@ -2677,6 +2706,28 @@ def create_app(
             return None
         return bytes(response.body)
 
+    def chosen_edits(alias, client: ClientKey, done: frozenset[int]) -> list[edits_mod.Edit]:
+        """The prompt edits a request gets, in order: its alias's, then its group's and its client's own (the
+        client's policy has both); those already made to it (``done``: forwarded from another alias) aren't again."""
+        ids = dict.fromkeys((*(alias.edits if alias else ()), *client.policy.edits))
+        found = (snapshot.edits.get(i) for i in ids if i not in done)
+        return [edit for edit in found if edit is not None and edit.on]
+
+    def edit_asker(client: ClientKey, headers: Mapping[str, str], request_id: str) -> edits_mod.Ask:
+        """How a request's model edits ask their model: as its client, in its lane, as a call made for it (a row
+        of its own under it on the Requests page, so its cost counts)."""
+        priority = LANE_NAMES[request_lane(headers, client)]
+
+        async def ask(edit: edits_mod.Edit, messages: list[dict]) -> str | None:
+            payload = {"model": edit.settings.get("model"), "messages": messages}
+            role = f"prompt edit: {edit.label}"[:80]
+            body = await internal_completion(
+                client, payload, priority, tag="edit", origin=headers, role=role, parent=request_id
+            )
+            return edits_mod.reply_text(body)
+
+        return ask
+
     def summariser(alias, step_model: str) -> tuple[str, int | None]:
         """The model that writes summaries (the alias's compaction model, else the step's) and its context."""
         name = alias.compact_model or step_model
@@ -2856,17 +2907,21 @@ def create_app(
         query,
         original: dict | None = None,
         onward: dict | None = None,
+        edit_info: tuple[str, edits_mod.Outcome | None] | None = None,
     ) -> Response:
         """Members answer at once (internal requests, tagged "council"), the judge picks one or writes the
         answer. A streaming app gets its response headers at once and keep-alives meanwhile. ``onward``: how the
-        request was forwarded here from another alias (serve's ``via``, ``then``, ``parent``, ``place``)."""
+        request was forwarded here from another alias (serve's ``via``, ``then``, ``parent``, ``place``);
+        ``edit_info``: the request's id and what its prompt edits did (already in ``payload``)."""
         onward = onward or {}
         via = onward.get("via") or ()
         priority = LANE_NAMES[lane]
         stream = payload.get("stream") is True
-        rlog = RequestLog(
-            f"qr-{uuid.uuid4().hex[:12]}", "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies)
-        )
+        request_id, edit_outcome = edit_info or (f"qr-{uuid.uuid4().hex[:12]}", None)
+        rlog = RequestLog(request_id, "POST", f"/v1/{path}", client_ip(request, bootstrap.trusted_proxies))
+        if edit_outcome is not None:
+            rlog.fields["edits"] = edit_outcome.summary()
+            rlog.edit_detail = edit_outcome.detail
         rlog.fields.update(
             client=client.name,
             user_agent=(request_headers.get("user-agent") or "")[:300] or None,
@@ -4141,6 +4196,7 @@ def create_app(
         start: int = 0,
         parent: str | None = None,
         place: list | None = None,
+        edited: frozenset[int] = frozenset(),
     ) -> Response:
         """Everything after authentication: policies, aliases/fallbacks, queueing, forwarding.
         Used by the API and by the admin Playground (which passes its own clean ``headers``).
@@ -4148,7 +4204,8 @@ def create_app(
         deferred_response) and served again once the summary is ready. A request forwarded from another alias
         (Hop): ``via`` the aliases it came through (the first is what the app asked for, already let in), ``then``
         where it goes on if this alias runs out, ``start`` where in this alias's list it begins, ``parent`` the
-        request it was forwarded from, ``place`` that one's place in the queue (kept, and not counted again)."""
+        request it was forwarded from, ``place`` that one's place in the queue (kept, and not counted again),
+        ``edited`` the prompt edits already made to it (its body has them)."""
         if unavailable := not_configured() or mode_refusal():
             return unavailable
         original_body = body  # what a forwarded request starts from (``body`` changes below)
@@ -4212,15 +4269,20 @@ def create_app(
             hop = Hop(then[0][0], then[0][1], then[1:])
         own_after = len(entries) > 1  # models of its own after the first, an alias among them
         entries = entries[:cut]
+        edit_outcome: edits_mod.Outcome | None = None  # what this alias's (and the client's) prompt edits did
+        done_edits = edited
 
         async def forward(onward: Hop, from_id: str | None, spot: list | None) -> Response:
-            """This request served as one for another alias (``onward``), its whole way, from what the app sent."""
+            """This request served as one for another alias (``onward``), its whole way, from what the app sent
+            (with the prompt edits made here: that alias makes only its own)."""
             came = (*via, alias.name) if alias else via
             if len(came) > MAX_FORWARDS:
                 stuck = f"model '{came[0]}' was forwarded through {len(came)} aliases: do they loop?"
                 return refused(error_response(stuck, 508, "alias_loop"))
             changed = json.loads(original_body)
             changed["model"] = onward.alias
+            if edit_outcome is not None and isinstance(changed.get("messages"), list):
+                edit_outcome.replay(changed["messages"])
             return await serve(
                 request,
                 client,
@@ -4236,6 +4298,7 @@ def create_app(
                 start=onward.start,
                 parent=from_id,
                 place=spot,
+                edited=done_edits,
             )
 
         if not entries:  # its model is another alias, or nothing of its own is left: straight on
@@ -4246,6 +4309,20 @@ def create_app(
         checked = cfg().unknown_model_check and len(entries) == 1 and hop is None and not first_pin
         if checked and (missing := unknown_model(first, alias, internal, entries[0][1])) is not None:
             return refused(missing)  # with fallbacks it moves on; a pinned upstream decides
+        # its conversation as the app started it: prompt edits (below) don't make it another one
+        session = session_key(request_headers, client.name, payload)
+        request_id = f"qr-{uuid.uuid4().hex[:12]}"
+        # Prompt edits (app/edits.py): the alias's, then the group's and the client's, on the app's requests (not on
+        # QueueRouter's own: council members, judges, summaries, checks). Every model of the alias gets the result.
+        if not internal and isinstance(payload, dict) and isinstance(payload.get("messages"), list):
+            if chosen := chosen_edits(alias, client, edited):
+                record = client.policy.logs_content(time.time())  # the texts only with content logging on
+                asker = edit_asker(client, request_headers, request_id)
+                edit_outcome = await edit_engine.apply(payload["messages"], chosen, asker, record)
+                done_edits = edited | {e.id for e in chosen}
+                if edit_outcome.refusal:
+                    return refused(error_response(edit_outcome.refusal, 502, "prompt_edit_failed"))
+        prompt_changed = edit_outcome is not None and bool(edit_outcome.finals or edit_outcome.inserted)
         if allow_council and alias and alias.council != "off" and isinstance(payload, dict):
             lane = request_lane(request_headers, client)
             auto = "opencode" if "x-opencode-session-id" in request_headers else None
@@ -4265,7 +4342,19 @@ def create_app(
                 compacted = council_compacted(client, alias, payload, request_headers)
                 onward = {"via": via, "then": then, "parent": parent, "place": place}  # when forwarded here
                 return await run_council(
-                    request, client, alias, compacted, request_headers, lane, tags, path, body, query, payload, onward
+                    request,
+                    client,
+                    alias,
+                    compacted,
+                    request_headers,
+                    lane,
+                    tags,
+                    path,
+                    body,
+                    query,
+                    payload,
+                    onward,
+                    (request_id, edit_outcome),
                 )
         if alias and own_after:  # when it moves on: its own ticks while it has more of its own
             triggers = frozenset(alias.fallback_on)
@@ -4290,7 +4379,6 @@ def create_app(
             client_rules = rules_of(client.policy.params)
             if alias_rules or client_rules:
                 param_changes = apply_rules(payload, alias_rules, client_rules)
-        session = session_key(request_headers, client.name, payload)
         steps: list[Step] = []
         too_long_for: tuple | None = None
         for i, (named, ticked) in enumerate(entries):
@@ -4373,7 +4461,7 @@ def create_app(
                     continue  # try a model with a bigger context
                 break
             unchanged = i == 0 and not alias and not param_changes and not pin and not strip_usage
-            unchanged = unchanged and compaction is None and not lowered
+            unchanged = unchanged and compaction is None and not lowered and not prompt_changed
             step_body = body if unchanged else json.dumps(step_payload).encode()
             estimate = estimate_prompt_tokens(step_payload)
             steps.append(Step(step_model, step_candidates, step_body, compaction, estimate))
@@ -4394,7 +4482,6 @@ def create_app(
         else:
             alias_used = bool(alias)
 
-        request_id = f"qr-{uuid.uuid4().hex[:12]}"
         lane = request_lane(request_headers, client)
         auto_tags = "opencode" if "x-opencode-session-id" in request_headers else None  # any opencode version
         tags = parse_tags(client.policy.tags, request_headers.get("x-queuerouter-tags"), auto_tags)
@@ -4445,7 +4532,9 @@ def create_app(
             tags=",".join(tags) or None,
             run=rkey[:80] if rkey else None,
             stream=isinstance(payload, dict) and payload.get("stream") is True,
+            edits=edit_outcome.summary() if edit_outcome else None,
         )
+        rlog.edit_detail = edit_outcome.detail if edit_outcome else None
         keep_content = client.policy.logs_content(time.time())
         hints = {
             "X-Request-Id": request_id,

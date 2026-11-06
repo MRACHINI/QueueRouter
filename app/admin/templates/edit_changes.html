@@ -1,0 +1,26 @@
+{#- Prompt edits' changes, highlighted (app/admin/edit_routes.py changes_view): removed text struck through, added text
+    marked; a long unchanged run shows its ends, and a click shows the rest. -#}
+{% macro segments(items, prefix) -%}
+<pre class="mono wrap-any content-view changes">{% for s in items %}{% if s[0] == "same" %}{{ s[1] }}{% elif s[0] == "fold" %}{{ s[1] }}<input type="checkbox" class="fold-box" id="{{ prefix }}-{{ loop.index }}"><label for="{{ prefix }}-{{ loop.index }}" class="fold-note">… {{ "{:,}".format(s[2] | length) }} characters unchanged (show) …</label><span class="fold-mid">{{ s[2] }}</span>{{ s[3] }}{% else %}{% if s[1] %}<del>{{ s[1] }}</del>{% endif %}{% if s[2] %}<ins>{{ s[2] }}</ins>{% endif %}{% endif %}{% endfor %}</pre>
+{%- endmacro %}
+
+{% macro changes(view, prefix="c") -%}
+{% for slot in view.slots %}
+<h3 class="small">{% if view.slots | length > 1 %}Message {{ slot.n }} ({{ slot.role }}){% else %}System prompt{% endif %}
+  <span class="muted">{{ "{:,}".format(slot.before | length) }} → {{ "{:,}".format(slot.after | length) }} characters{% if slot.before == slot.after %} · unchanged{% endif %}</span></h3>
+{{ segments(slot.segments, prefix ~ "-" ~ slot.n) }}
+{% endfor %}
+{% if view.steps %}
+<h3 class="small">By edit</h3>
+<ol class="by-edit">
+{% for step in view.steps %}
+  <li><strong>{{ step.edit }}</strong>{% if view.slots | length > 1 %} <span class="muted small">in message {{ step.n }}</span>{% endif %}
+    {% for hunk in step.hunks %}
+    <pre class="mono wrap-any hunk"><span class="muted">{% if hunk[0] %}…{% endif %}{{ hunk[0] }}</span>{% if hunk[1] %}<del>{{ hunk[1] }}</del>{% endif %}{% if hunk[2] %}<ins>{{ hunk[2] }}</ins>{% endif %}<span class="muted">{{ hunk[3] }}{% if hunk[3] %}…{% endif %}</span></pre>
+    {% endfor %}
+    {% if step.more %}<p class="small muted">and {{ step.more }} more changes like these.</p>{% endif %}
+  </li>
+{% endfor %}
+</ol>
+{% endif %}
+{%- endmacro %}

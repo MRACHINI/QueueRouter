@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Prompt edits{% endblock %}
+{% block content %}
+<div class="row between wrap">
+  <h1>Prompt edits</h1>
+  <nav class="seg" aria-label="Edits pages"><a href="/admin/edits" aria-current="true">Edits</a><a href="/admin/edits/live">Live</a></nav>
+</div>
+<p class="muted small">Changes made to the system prompt of requests before they go to the model: the app's system and
+developer messages only, never the user's or the model's. Make an edit here, then attach it to aliases (alias editor),
+client groups (group editor) or clients (Clients &gt; Limits). A request gets its alias's edits first, then its group's,
+then its client's, in the order they're listed there. The <a href="/admin/edits/live">Live</a> tab shows the requests
+they changed.</p>
+
+<div class="row wrap">
+  <span class="small muted">New:</span>
+  <a class="button secondary" href="/admin/edits/new?kind=text">Text</a>
+  <a class="button secondary" href="/admin/edits/new?kind=pattern">Pattern</a>
+  <a class="button secondary" href="/admin/edits/new?kind=add">Add</a>
+  <a class="button secondary" href="/admin/edits/new?kind=rewrite">Model: rewrite</a>
+  <a class="button secondary" href="/admin/edits/new?kind=learn">Model: make edits</a>
+</div>
+
+{% if edits %}
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Name</th><th>Kind</th><th>What it does</th><th>Used by</th><th class="num">Changed</th><th>Last</th></tr></thead>
+  <tbody>
+  {% for e in edits %}
+  {% set held = e.children | selectattr("state", "equalto", "pending") | list | length %}
+  <tr>
+    <td data-label="Name"><a href="/admin/edits/{{ e.id }}">{{ e.name }}</a>{% if not e.on %} <span class="badge">off</span>{% endif %}</td>
+    <td data-label="Kind">{{ kind_labels.get(e.kind, e.kind) }}</td>
+    <td data-label="What it does" class="small wrap-any">{{ e.summary() }}{% if e.kind == "learn" %}
+      <br><span class="muted">{{ e.children | rejectattr("kind", "equalto", "keep") | list | length }} edits made</span>{% if held %} <a class="badge high" href="/admin/edits/{{ e.id }}#made">{{ held }} to approve</a>{% endif %}{% endif %}</td>
+    <td data-label="Used by" class="small">{% if users.get(e.id) %}{{ users[e.id] | join(", ") }}{% else %}<span class="muted">nothing yet</span>{% endif %}</td>
+    <td data-label="Changed" class="num">{{ "{:,}".format(e.hits) }}</td>
+    <td data-label="Last" class="small">{% if e.last_hit %}<time data-ts="{{ e.last_hit }}">{{ e.last_hit | int }}</time>{% else %}<span class="muted">—</span>{% endif %}
+      {% if e.on and users.get(e.id) and (e.last_hit or e.created_at) < stale_before %} <span class="badge" title="It hasn't changed a request for a week">stale</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="small muted">Changed: how many requests it changed. <em>Stale</em>: in use, but it hasn't changed a request
+for a week (has the app changed its prompt? The Live tab's "found nothing" shows where).</p>
+{% else %}
+<p class="muted">No edits yet.</p>
+{% endif %}
+{% endblock %}

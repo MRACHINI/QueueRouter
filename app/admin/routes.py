@@ -73,7 +73,7 @@ from ..store import ROLES, Store
 from ..thinking import EFFORTS as THINKING_EFFORTS
 from ..upstream import UA_MODES
 from ..websearch import PROVIDERS as SEARCH_PROVIDERS
-from . import periods
+from . import edit_routes, periods
 from .charts import lines, usage_charts
 from .security import (
     AdminSession,
@@ -111,7 +111,7 @@ LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes /
 REQUEST_LIST_COLUMNS = (
     "id, ts, client, priority, model, target_model, upstream, status, outcome, retries, queue_ms, ttft_ms, "
     "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, finish_reason, stopped, "
-    "compaction, council, role, parent, answer_check, via"
+    "compaction, council, role, parent, answer_check, via, edits IS NOT NULL AS edited"
 )
 REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "id",
@@ -140,6 +140,7 @@ REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "fallback",
     "answer_check",
     "via",
+    "edits",
 )
 HERE = os.path.dirname(__file__)
 
@@ -177,6 +178,8 @@ MESSAGES = {
     "group_in_use": "Clients are still in that group; move them to another group first.",
     "group_last": "Every client is in a group, so the last group can't be deleted.",
     "group_models": "Pick at least one model or alias, or tick Every model.",
+    "edits": f"Up to {edit_routes.EDITS_PER_OWNER} prompt edits.",
+    **edit_routes.MESSAGES,
 }
 
 MAX_USERNAME = 100
@@ -973,6 +976,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             live=live,
             plugin=plugin_install_commands(ctx.public_base(request)),
             month={c.name: ctx.month_usage(c.name) for c in every_client},
+            edit_choices=edit_routes.edit_choices(store),
+            edit_names={e.id: e.name for e in store.list_edits()},
             now=time.time(),
             content_days=store.get_tunables().get("content_log_days", Settings().content_log_days),
             content_kb=store.get_tunables().get("content_log_max_kb", Settings().content_log_max_kb),
@@ -1059,6 +1064,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 **_limits(form),  # blank: the group's
                 log_content=current.log_content,  # set with its own form (below)
                 log_content_until=current.log_content_until,
+                edits=edit_routes.edit_ids(form, store),  # after its group's
             )
             store.update_client(client_id, session.user.username, policy=policy)
         except RulesError:
@@ -1179,6 +1185,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             members=members,
             error=error,
             choices=ctx.model_choices(),
+            edit_choices=edit_routes.edit_choices(store),
         )
 
     def group_fields(form: dict) -> dict:
@@ -1190,7 +1197,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         models = () if every else tuple(dict.fromkeys(_items(form, "models")))
         if not every and not models:
             raise ValueError("group_models")
-        policy = ClientPolicy(allowed_models=models, **_limits(form))
+        edits = edit_routes.edit_ids(form, store)
+        policy = ClientPolicy(allowed_models=models, edits=edits, **_limits(form))
         return {"name": name, "notes": str(form.get("notes", "")).strip()[:500], "policy": policy}
 
     def group_from_form(form: dict, group_id: int | None = None) -> SimpleNamespace:
@@ -1202,7 +1210,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             id=group_id,
             name=str(form.get("name", "")).strip(),
             notes=str(form.get("notes", "")),
-            policy=SimpleNamespace(allowed_models=_items(form, "models"), **raw),
+            policy=SimpleNamespace(allowed_models=_items(form, "models"), edits=_items(form, "edits"), **raw),
             every=form.get("every_model") == "on",
         )
 
@@ -1990,7 +1998,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             raise ValueError("check")
         if check_answers and not (check_instructions and fallbacks):
             raise ValueError("check")
+        edits = edit_routes.edit_ids(form, store)
         return {
+            "edits": edits,
             "target_model": target,
             "upstream_ids": upstream_ids,
             "notes": str(form.get("notes", ""))[:300],
@@ -2054,6 +2064,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             check_answers=form.get("check_answers") == "on",
             check_model=str(form.get("check_model", "")).strip(),
             check_instructions=str(form.get("check_instructions", "")),
+            edits=items("edits"),
             enabled=form.get("enabled") == "on" if existing else True,
         )
 
@@ -2072,12 +2083,15 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             council_max=COUNCIL_MAX,
             upstreams=store.list_upstreams(),
             choices=ctx.model_choices(),
+            edit_choices=edit_routes.edit_choices(store),
             search_on=store.get_tunables().get("search_provider", "off") not in ("", "off"),
         )
 
     def alias_error(exc: Exception) -> str:
         if isinstance(exc, AliasLoop):
             return str(exc)
+        if str(exc) == "edits":
+            return MESSAGES["edits"]
         if isinstance(exc, RulesError):
             return MESSAGES["rules_invalid"]
         if isinstance(exc, sqlite3.IntegrityError):
@@ -2093,7 +2107,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             council_members=[], council_judge="", council_when="planning", council_instructions="",
             council_search=False, council_search_max=3, council_search_results=5, council_fetch=False,
             orch_rounds=6, orch_tasks=8, orch_seconds=300, council_roles="", check_answers=False, check_model="",
-            check_instructions="", enabled=True,
+            check_instructions="", edits=(), enabled=True,
         )  # fmt: skip
         return alias_page(request, session, empty)
 
@@ -2144,6 +2158,14 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         store.delete_alias(alias_id, session.user.username)
         ctx.reload()
         return back("/admin/models", "deleted")
+
+    # -- prompt edits (app/admin/edit_routes.py) -------------------------------------------------------------------
+
+    edit_routes.mount_edit_pages(
+        app,
+        store,
+        edit_routes.Helpers(page, require, require_post, back, ctx.reload, ctx.model_choices, ctx.model_label),
+    )
 
     # -- playground ----------------------------------------------------------------------
 

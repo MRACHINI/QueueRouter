@@ -5,6 +5,8 @@
 <p class="muted">Client <strong>{{ content.client }}</strong> · <time data-ts="{{ content.ts }}">{{ content.ts | int }}</time>
 {% if content.truncated %} · <span class="badge">cut to the size limit</span>{% endif %}.
 This view is recorded in the audit log.</p>
+{% if content.edits %}<p class="small">Prompt edits changed its system prompt: below is what was sent.
+<a href="/admin/requests/{{ content.id }}/edits">See the changes highlighted, and the prompt as the app sent it</a></p>{% endif %}
 <h2>Request</h2>
 <pre class="mono wrap-any content-view">{{ request_text }}</pre>
 <h2>Reply</h2>

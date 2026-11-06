@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Prompt edits · Live{% endblock %}
+{% block main_class %}container dense-page{% endblock %}
+{% block content %}
+<div class="row between wrap">
+  <h1>Prompt edits</h1>
+  <nav class="seg" aria-label="Edits pages"><a href="/admin/edits">Edits</a><a href="/admin/edits/live" aria-current="true">Live</a></nav>
+</div>
+<form method="get" action="/admin/edits/live" class="row wrap" id="edit-filters">
+  <span class="live-status" id="edits-status" role="status"></span>
+  <select name="edit" aria-label="edit">
+    <option value="">all edits</option>
+    {% for n in names %}<option value="{{ n }}" {% if chosen.edit == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+  </select>
+  <select name="client" aria-label="client">
+    <option value="">all clients</option>
+    {% for c in clients %}<option value="{{ c }}" {% if chosen.client == c %}selected{% endif %}>{{ c }}</option>{% endfor %}
+  </select>
+  <label class="check small"><input type="checkbox" name="missed" value="1" {% if chosen.missed %}checked{% endif %}> found nothing</label>
+  <noscript><button type="submit" class="secondary">Filter</button></noscript>
+  <a href="/admin/edits/live">reset</a>
+</form>
+<p class="muted small">Requests whose prompt edits ran, newest first, as they finish. <em>Changed</em>: the edits that changed
+the prompt; <em>found nothing</em>: attached edits whose text wasn't there (has the app changed its prompt?). The highlighted
+changes are kept only for clients with content logging on (Clients page), and shown to admins allowed to read logged
+content.</p>
+<noscript><p class="notice err">This list needs JavaScript.</p></noscript>
+
+<section id="edits-live" data-stream="/admin/api/live?view=brief" data-rows="/admin/api/edits/live" data-catch-up="{{ catch_up }}">
+<div class="table-wrap">
+<table class="cards dense edits-table">
+  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Changed</th><th>Found nothing</th><th class="num">Size</th><th></th></tr></thead>
+  <tbody id="edited-requests"><tr class="placeholder"><td colspan="7" class="muted">Loading…</td></tr></tbody>
+</table>
+</div>
+<p class="small muted" id="edits-more"></p>
+</section>
+{% endblock %}

@@ -264,6 +264,26 @@ def create_mock(limit: int = 2) -> FastAPI:
             bad = [w for w in state.get("check_fail", []) if w in answer]
             body["mock_content"] = state.get("check_reply") or (f"FAIL: it says {bad[0]}" if bad else "PASS")
             body["mock_delay"] = 0.01
+        # Prompt edits (app/edits.py): a rewrite answers state["rewrite_reply"] (else the text upper-cased); a "make
+        # edits" request answers state["learn_replies"] in turn (the last one again after that); state["*_status"]
+        # fails them, state["*_delay"] slows them. Every chat request's body: state["chat_bodies"].
+        state.setdefault("chat_bodies", []).append(body)
+        first_text = str(first.get("content", ""))
+        for kind, marker in (("rewrite", "You rewrite part of the system prompt"), ("learn", "You write edits for")):
+            if not first_text.startswith(marker):
+                continue
+            asked = state.setdefault(f"{kind}_inputs", [])
+            asked.append(body["messages"][1]["content"])
+            if state.get(f"{kind}_status"):
+                return JSONResponse({"error": {"message": f"{kind} down"}}, status_code=state[f"{kind}_status"])
+            if state.get(f"{kind}_delay"):
+                await asyncio.sleep(state[f"{kind}_delay"])
+            if kind == "rewrite":
+                body["mock_content"] = state.get("rewrite_reply") or body["messages"][1]["content"].upper()
+            else:
+                replies = state.get("learn_replies") or ['{"edits": [], "keep": []}']
+                body["mock_content"] = replies[min(len(asked) - 1, len(replies) - 1)]
+            body["mock_delay"] = 0.01
         # Per-model answers: state["model_words"][model] = the pieces it streams (or answers in one go).
         words_of = (state.get("model_words") or {}).get(body.get("model"))
         if words_of and not body.get("mock_content"):

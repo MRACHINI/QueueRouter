@@ -9,6 +9,7 @@
 set on a client itself wins over the group's. Changes apply to all its clients at once (opencode picks up a changed
 model list within a minute).</p>
 <script type="application/json" id="model-choices">{{ choices | tojson }}</script>
+<script type="application/json" id="edit-choices">{{ edit_choices | tojson }}</script>
 
 <form method="post" action="{% if new %}/admin/groups{% else %}/admin/groups/{{ g.id }}{% endif %}" class="alias-editor">
   <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -30,6 +31,13 @@ model list within a minute).</p>
       several providers offer, or one with an alias's name (the name alone is the alias). A model no provider lists
       now stays in the list and works again when it's back.</small>
     </div>
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>Prompt edits</legend>
+    <label>Edits, in order {{ picker("edits", p.edits, "multi", "Add a prompt edit…", True, "edit-choices", True) }}
+      <small class="muted">Changes to the system prompt of its clients' requests (made on the <a href="/admin/edits">Edits</a>
+      page). They follow the alias's edits; a client's own come after these.</small></label>
   </fieldset>
 
   <fieldset class="card">

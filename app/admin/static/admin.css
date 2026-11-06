@@ -360,3 +360,19 @@ tr.fresh td { animation: row-in 1.2s ease-out; }
   table.dense td { white-space: normal; }
   .price { min-width: 0; }
 }
+
+/* Prompt edits: changes highlighted (removed struck through, added marked), long unchanged runs folded */
+.changes del, .hunk del { background: var(--err-bg); color: var(--err-text); text-decoration: line-through; }
+.changes ins, .hunk ins { background: var(--ok-bg); color: var(--ok-text); text-decoration: none; }
+.changes { max-height: 70vh; }
+.fold-box { position: absolute; opacity: 0; pointer-events: none; }
+.fold-note { display: inline; color: var(--muted); background: var(--bg); border: 1px dashed var(--border); border-radius: 6px; padding: 0 6px; cursor: pointer; font-size: 0.8em; }
+.fold-mid { display: none; }
+.fold-box:checked + .fold-note { display: none; }
+.fold-box:checked + .fold-note + .fold-mid { display: inline; }
+.fold-box:focus-visible + .fold-note { outline: 2px solid var(--accent); }
+.hunk { margin: 4px 0; padding: 6px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; white-space: pre-wrap; font-size: 0.8rem; }
+ol.by-edit { padding-left: 20px; }
+ol.by-edit li { margin-bottom: 10px; }
+table.made textarea { min-height: 2.4em; font-size: 0.8rem; }
+.edits-table td { vertical-align: top; }

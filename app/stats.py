@@ -57,7 +57,7 @@ class Stats:
         self.clients: dict[str, ClientStats] = {}
         self.recent: deque[dict] = deque(maxlen=50)  # last request log entries, for the dashboard
         self.sink = None  # optional callable(entry) receiving every finished request (usage log)
-        self.content_sink = None  # optional callable(request id, client, request bytes, reply bytes)
+        self.content_sink = None  # optional callable(request id, client, request bytes, reply bytes, edit detail)
         self.queue_hist = Histogram()  # seconds waiting for a slot
         self.upstream_hist = Histogram()  # seconds from slot to last byte (completed requests)
         self.ttft_hist = Histogram()  # seconds from arrival to the first byte of the answer

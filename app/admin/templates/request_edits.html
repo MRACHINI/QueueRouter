@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Prompt edits of a request{% endblock %}
+{% from "edit_changes.html" import changes %}
+{% block content %}
+<p class="small"><a href="/admin/edits/live">← Live</a></p>
+<h1>Prompt edits of <code>{{ content.id }}</code></h1>
+<p class="muted">Client <strong>{{ content.client }}</strong> · <time data-ts="{{ content.ts }}">{{ content.ts | int }}</time>.
+This view is recorded in the audit log. <a href="/admin/requests/{{ content.id }}/content">The whole request and reply</a></p>
+{% if summary.changed %}<p class="small">Changed by: {% for n in summary.changed %}<span class="badge ok">{{ n }}</span> {% endfor %}</p>{% endif %}
+{% if summary.missed %}<p class="small">Found nothing: {% for n in summary.missed %}<span class="badge">{{ n }}</span> {% endfor %}</p>{% endif %}
+{% for note in summary.notes or [] %}<p class="small muted">{{ note }}</p>{% endfor %}
+{% if view %}{{ changes(view, "req") }}{% endif %}
+{% endblock %}

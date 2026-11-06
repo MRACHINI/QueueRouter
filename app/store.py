@@ -18,12 +18,13 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from .config import PRIORITIES, SECRET_TUNABLES, TUNABLES, ClientPolicy, Settings, parse_access_keys
+from .edits import Edit
 from .names import EVERY
 
 log = logging.getLogger("queuerouter")
@@ -574,6 +575,41 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE requests ADD COLUMN via TEXT;
     """,
+    # 42: prompt edits (app/edits.py): the edits, those a "learn" edit's model made (parent_id), the paragraphs it
+    # has read, kept rewrites (encrypted), which edits an alias uses; per request what they did, and with content
+    # logging on the texts before and after (encrypted)
+    """
+    CREATE TABLE prompt_edits (
+        id INTEGER PRIMARY KEY,
+        parent_id INTEGER REFERENCES prompt_edits(id) ON DELETE CASCADE,
+        name TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'on',
+        settings TEXT NOT NULL DEFAULT '{}',
+        notes TEXT NOT NULL DEFAULT '',
+        hits INTEGER NOT NULL DEFAULT 0,
+        last_hit REAL,
+        created_at REAL NOT NULL
+    );
+    CREATE UNIQUE INDEX prompt_edits_name ON prompt_edits (name) WHERE parent_id IS NULL;
+    CREATE INDEX prompt_edits_parent ON prompt_edits (parent_id);
+    CREATE TABLE prompt_edit_seen (
+        edit_id INTEGER NOT NULL REFERENCES prompt_edits(id) ON DELETE CASCADE,
+        hash TEXT NOT NULL,
+        PRIMARY KEY (edit_id, hash)
+    ) WITHOUT ROWID;
+    CREATE TABLE prompt_edit_results (
+        edit_id INTEGER NOT NULL REFERENCES prompt_edits(id) ON DELETE CASCADE,
+        hash TEXT NOT NULL,
+        result TEXT NOT NULL,
+        used_at REAL NOT NULL,
+        PRIMARY KEY (edit_id, hash)
+    );
+    ALTER TABLE aliases ADD COLUMN edits TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE requests ADD COLUMN edits TEXT;
+    CREATE INDEX requests_edited ON requests (ts) WHERE edits IS NOT NULL;
+    ALTER TABLE request_content ADD COLUMN edits TEXT;
+    """,
 ]
 HOURLY_USAGE = 40  # the migration that added usage_hourly
 
@@ -635,6 +671,7 @@ REQUEST_COLUMNS = (
     "fallback",
     "answer_check",
     "via",
+    "edits",
 )
 
 
@@ -774,6 +811,7 @@ class Alias:
     check_answers: bool = False  # a checker model reads plain-text answers first (app/answer_check.py)
     check_model: str = ""  # blank = the target model
     check_instructions: str = ""
+    edits: tuple[int, ...] = ()  # prompt edits, in order (app/edits.py)
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -1759,6 +1797,7 @@ class Store:
                 bool(r["check_answers"]),
                 r["check_model"] or "",
                 r["check_instructions"] or "",
+                tuple(i for i in json.loads(r["edits"] or "[]") if isinstance(i, int)),
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1792,6 +1831,7 @@ class Store:
         check_answers: bool = False,
         check_model: str = "",
         check_instructions: str = "",
+        edits: tuple[int, ...] = (),
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
@@ -1799,8 +1839,8 @@ class Store:
                 "compact, compact_model, virtual_context, council, council_members, council_judge, council_when, "
                 "council_instructions, council_search, council_search_max, council_search_results, council_fetch, "
                 "orch_rounds, orch_tasks, orch_seconds, council_roles, check_answers, check_model, "
-                "check_instructions, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "check_instructions, edits, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     target_model,
@@ -1828,6 +1868,7 @@ class Store:
                     int(check_answers),
                     check_model,
                     check_instructions,
+                    json.dumps(list(edits)),
                     time.time(),
                 ),
             )
@@ -1840,7 +1881,7 @@ class Store:
         return cur.lastrowid
 
     def update_alias(self, alias_id: int, actor: str, **fields: object) -> None:
-        for name in ("upstream_ids", "fallbacks", "fallback_on", "council_members"):
+        for name in ("upstream_ids", "fallbacks", "fallback_on", "council_members", "edits"):
             if name in fields:
                 fields[name] = json.dumps(list(fields[name]))
         allowed = {"target_model", "upstream_ids", "enabled", "notes", "params", "fallbacks", "fallback_on"}
@@ -1864,6 +1905,7 @@ class Store:
             "check_answers",
             "check_model",
             "check_instructions",
+            "edits",
         }
         self._update("aliases", alias_id, allowed, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)
@@ -1872,6 +1914,228 @@ class Store:
         with self.tx() as db:
             db.execute("DELETE FROM aliases WHERE id = ?", (alias_id,))
         self.audit(actor, "alias.delete", str(alias_id))
+
+    # -- prompt edits (app/edits.py) -----------------------------------------------------------
+
+    @staticmethod
+    def _edit(row: sqlite3.Row, children: tuple[Edit, ...] = ()) -> Edit:
+        try:
+            settings = json.loads(row["settings"] or "{}")
+        except ValueError:
+            settings = {}
+        return Edit(
+            row["id"],
+            row["name"],
+            row["kind"],
+            row["state"],
+            settings if isinstance(settings, dict) else {},
+            row["parent_id"],
+            row["notes"],
+            row["hits"],
+            row["last_hit"],
+            row["created_at"],
+            children,
+        )
+
+    def list_edits(self) -> list[Edit]:
+        """The edits, by name, each with those its model made (oldest first)."""
+        rows = self.query("SELECT * FROM prompt_edits ORDER BY parent_id IS NOT NULL, name COLLATE NOCASE, id")
+        made: dict[int, list[Edit]] = {}
+        for row in rows:
+            if row["parent_id"] is not None:
+                made.setdefault(row["parent_id"], []).append(self._edit(row))
+        return [self._edit(r, tuple(made.get(r["id"], ()))) for r in rows if r["parent_id"] is None]
+
+    def create_edit(self, name: str, kind: str, settings: dict, actor: str, notes: str = "", state: str = "on") -> int:
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT INTO prompt_edits (name, kind, state, settings, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (name, kind, state, json.dumps(settings, ensure_ascii=False), notes, time.time()),
+            )
+        self.audit(actor, "edit.create", name, {"kind": kind})
+        return cur.lastrowid
+
+    def update_edit(self, edit_id: int, actor: str, **fields: object) -> None:
+        """Changed settings (or kind) forget the kept rewrites: they were made by the old instructions."""
+        if "settings" in fields:
+            fields["settings"] = json.dumps(fields["settings"], ensure_ascii=False)
+        with self.tx() as db:
+            row = db.execute("SELECT settings, kind FROM prompt_edits WHERE id = ?", (edit_id,)).fetchone()
+            if row is None:
+                raise KeyError(edit_id)
+            changed = any(fields.get(k, row[k]) != row[k] for k in ("settings", "kind"))
+            if changed:
+                db.execute("DELETE FROM prompt_edit_results WHERE edit_id = ?", (edit_id,))
+        self._update("prompt_edits", edit_id, {"name", "kind", "state", "settings", "notes"}, fields)
+        self.audit(actor, "edit.update", str(edit_id), {k: v for k, v in fields.items() if k != "settings"})
+
+    def delete_edit(self, edit_id: int, actor: str) -> None:
+        """The edit (and what its model made), and its place in aliases, groups and clients."""
+        with self.tx() as db:
+            row = db.execute("SELECT name FROM prompt_edits WHERE id = ?", (edit_id,)).fetchone()
+            if row is None:
+                raise KeyError(edit_id)
+            db.execute("DELETE FROM prompt_edits WHERE id = ?", (edit_id,))
+            for alias in db.execute("SELECT id, edits FROM aliases").fetchall():
+                ids = json.loads(alias["edits"] or "[]")
+                if edit_id in ids:
+                    kept = json.dumps([i for i in ids if i != edit_id])
+                    db.execute("UPDATE aliases SET edits = ? WHERE id = ?", (kept, alias["id"]))
+            for table in ("clients", "client_groups"):
+                for owner in db.execute(f"SELECT id, policy FROM {table}").fetchall():  # noqa: S608
+                    policy = ClientPolicy.from_json(owner["policy"])
+                    if edit_id in policy.edits:
+                        changed = replace(policy, edits=tuple(i for i in policy.edits if i != edit_id))
+                        db.execute(f"UPDATE {table} SET policy = ? WHERE id = ?", (changed.to_json(), owner["id"]))  # noqa: S608
+        self.audit(actor, "edit.delete", row["name"])
+
+    def edit_users(self) -> dict[int, list[str]]:
+        """Edit id -> where it's used ("alias x", "group y", "client z")."""
+        used: dict[int, list[str]] = {}
+        for alias in self.list_aliases():
+            for i in alias.edits:
+                used.setdefault(i, []).append(f"alias {alias.name}")
+        for group in self.list_groups():
+            for i in group.policy.edits:
+                used.setdefault(i, []).append(f"group {group.name}")
+        for client in self.list_clients():
+            for i in client.policy.edits:
+                used.setdefault(i, []).append(f"client {client.name}")
+        return used
+
+    def add_made_edits(self, parent_id: int, made: list[tuple[str, dict, str]], read: list[str]) -> list[Edit]:
+        """Edits a "learn" edit's model made, (kind, settings, state), and the paragraphs it has now read."""
+        now = time.time()
+        stored = []
+        with self.tx() as db:
+            if db.execute("SELECT 1 FROM prompt_edits WHERE id = ?", (parent_id,)).fetchone() is None:
+                return []  # deleted meanwhile
+            for kind, settings, state in made:
+                cur = db.execute(
+                    "INSERT INTO prompt_edits (parent_id, kind, state, settings, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (parent_id, kind, state, json.dumps(settings, ensure_ascii=False), now),
+                )
+                stored.append(Edit(cur.lastrowid, "", kind, state, settings, parent_id, created_at=now))
+            db.executemany(
+                "INSERT OR IGNORE INTO prompt_edit_seen (edit_id, hash) VALUES (?, ?)", [(parent_id, h) for h in read]
+            )
+        if made:
+            self.audit("model", "edit.made", str(parent_id), {"made": len(made)})
+        return stored
+
+    def update_made_edit(self, parent_id: int, edit_id: int, actor: str, **fields: object) -> None:
+        if "settings" in fields:
+            fields["settings"] = json.dumps(fields["settings"], ensure_ascii=False)
+        rows = self.query("SELECT 1 FROM prompt_edits WHERE id = ? AND parent_id = ?", (edit_id, parent_id))
+        if not rows:
+            raise KeyError(edit_id)
+        self._update("prompt_edits", edit_id, {"state", "settings"}, fields)
+        self.audit(actor, "edit.made.update", f"{parent_id}/{edit_id}", {k: v for k, v in fields.items()})
+
+    def delete_made_edit(self, parent_id: int, edit_id: int | None, actor: str) -> None:
+        """One made edit, or (``edit_id`` None) all of them and what was read: the model reads it all again."""
+        with self.tx() as db:
+            if edit_id is None:
+                db.execute("DELETE FROM prompt_edits WHERE parent_id = ?", (parent_id,))
+                db.execute("DELETE FROM prompt_edit_seen WHERE edit_id = ?", (parent_id,))
+            else:
+                db.execute("DELETE FROM prompt_edits WHERE id = ? AND parent_id = ?", (edit_id, parent_id))
+        self.audit(actor, "edit.made.delete", f"{parent_id}/{edit_id or '*'}")
+
+    def approve_made_edits(self, parent_id: int, actor: str) -> int:
+        with self.tx() as db:
+            cur = db.execute(
+                "UPDATE prompt_edits SET state = 'on' WHERE parent_id = ? AND state = 'pending'", (parent_id,)
+            )
+        self.audit(actor, "edit.made.approve", str(parent_id), {"edits": cur.rowcount})
+        return cur.rowcount
+
+    def forget_read(self, edit_id: int, actor: str) -> None:
+        """A learn edit reads every paragraph again (its made edits stay)."""
+        with self.tx() as db:
+            db.execute("DELETE FROM prompt_edit_seen WHERE edit_id = ?", (edit_id,))
+        self.audit(actor, "edit.reread", str(edit_id))
+
+    def edit_seen(self, edit_id: int) -> set[str]:
+        return {r["hash"] for r in self.query("SELECT hash FROM prompt_edit_seen WHERE edit_id = ?", (edit_id,))}
+
+    def edit_seen_count(self) -> dict[int, int]:
+        rows = self.query("SELECT edit_id, COUNT(*) AS n FROM prompt_edit_seen GROUP BY edit_id")
+        return {r["edit_id"]: r["n"] for r in rows}
+
+    def edit_result(self, edit_id: int, digest: str) -> str | None:
+        rows = self.query("SELECT result FROM prompt_edit_results WHERE edit_id = ? AND hash = ?", (edit_id, digest))
+        if not rows:
+            return None
+        with self.tx() as db:
+            db.execute(
+                "UPDATE prompt_edit_results SET used_at = ? WHERE edit_id = ? AND hash = ?",
+                (time.time(), edit_id, digest),
+            )
+        return self.reveal(rows[0]["result"])
+
+    def keep_edit_result(self, edit_id: int, digest: str, text: str) -> None:
+        with self.tx() as db:
+            if db.execute("SELECT 1 FROM prompt_edits WHERE id = ?", (edit_id,)).fetchone() is None:
+                return
+            db.execute(
+                "INSERT OR REPLACE INTO prompt_edit_results (edit_id, hash, result, used_at) VALUES (?, ?, ?, ?)",
+                (edit_id, digest, self.encrypt(text), time.time()),
+            )
+
+    def edit_result_count(self) -> dict[int, int]:
+        rows = self.query("SELECT edit_id, COUNT(*) AS n FROM prompt_edit_results GROUP BY edit_id")
+        return {r["edit_id"]: r["n"] for r in rows}
+
+    def forget_edit_results(self, edit_id: int, actor: str) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM prompt_edit_results WHERE edit_id = ?", (edit_id,))
+        self.audit(actor, "edit.results.delete", str(edit_id))
+
+    def prune_edit_results(self, keep_days: float) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM prompt_edit_results WHERE used_at < ?", (time.time() - keep_days * 86_400,))
+
+    def add_edit_hits(self, hits: dict[int, tuple[int, float]]) -> None:
+        if not hits:
+            return
+        with self.tx() as db:
+            db.executemany(
+                "UPDATE prompt_edits SET hits = hits + ?, last_hit = MAX(COALESCE(last_hit, 0), ?) WHERE id = ?",
+                [(n, at, i) for i, (n, at) in hits.items()],
+            )
+
+    def edited_requests(
+        self,
+        limit: int,
+        after: float | None = None,
+        before: tuple[float, str] | None = None,
+        client: str = "",
+        edit: str = "",
+        missed: bool = False,
+    ) -> list[sqlite3.Row]:
+        """Requests whose prompt edits ran (the Live tab), newest first; ``edit`` one that changed (or, with
+        ``missed``, found nothing in) them."""
+        clauses, params = ["edits IS NOT NULL"], []
+        if after is not None:
+            clauses.append("ts >= ?")
+            params.append(after)
+        if before is not None:
+            clauses.append("ts <= ? AND (ts < ? OR id < ?)")
+            params.extend((before[0], before[0], before[1]))
+        if client:
+            clauses.append("client = ?")
+            params.append(client)
+        if edit:
+            clauses.append("EXISTS (SELECT 1 FROM json_each(edits, ?) WHERE value = ?)")
+            params.extend(("$.missed" if missed else "$.changed", edit))
+        elif missed:
+            clauses.append("json_array_length(edits, '$.missed') > 0")
+        sql = (
+            "SELECT id, ts, client, model, target_model, via, outcome, role, edits FROM requests "
+            f"WHERE {' AND '.join(clauses)} ORDER BY ts DESC, id DESC LIMIT ?"  # noqa: S608
+        )
+        return self.read(sql, (*params, limit))
 
     # -- alerts, webhooks, notifications -------------------------------------------------
 
@@ -2280,15 +2544,23 @@ class Store:
 
     # -- opt-in content logging ----------------------------------------------------------
 
-    def save_contents(self, rows: list[tuple[str, float, str, str, str, bool]]) -> None:
-        """(request id, ts, client, request text, reply text, truncated)."""
+    def save_contents(self, rows: list[tuple]) -> None:
+        """(request id, ts, client, request text, reply text, truncated[, what prompt edits changed as JSON])."""
         with self.tx() as db:
             db.executemany(
-                "INSERT OR REPLACE INTO request_content (id, ts, client, request, response, truncated) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO request_content (id, ts, client, request, response, truncated, edits) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (i, ts, storable(c), self.encrypt(req), self.encrypt(resp), int(cut))
-                    for i, ts, c, req, resp, cut in rows
+                    (
+                        i,
+                        ts,
+                        storable(c),
+                        self.encrypt(req),
+                        self.encrypt(resp),
+                        int(cut),
+                        self.encrypt(rest[0]) if rest and rest[0] else None,
+                    )
+                    for i, ts, c, req, resp, cut, *rest in rows
                 ],
             )
 
@@ -2297,6 +2569,10 @@ class Store:
         if not rows:
             return None
         row = rows[0]
+        try:
+            edits = json.loads(self.decrypt(row["edits"])) if row["edits"] else None
+        except ValueError:
+            edits = None
         return {
             "id": row["id"],
             "ts": row["ts"],
@@ -2304,7 +2580,12 @@ class Store:
             "request": self.decrypt(row["request"]),
             "response": self.decrypt(row["response"]),
             "truncated": bool(row["truncated"]),
+            "edits": edits if isinstance(edits, dict) else None,
         }
+
+    def logged_requests(self, limit: int = 30) -> list[sqlite3.Row]:
+        """The newest requests with logged content (to try prompt edits on)."""
+        return self.read("SELECT id, ts, client FROM request_content ORDER BY ts DESC LIMIT ?", (limit,))
 
     def content_ids(self, request_ids: list[str]) -> set[str]:
         if not request_ids:
