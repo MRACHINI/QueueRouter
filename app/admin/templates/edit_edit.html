@@ -58,6 +58,13 @@
       (find and replace, or a pattern), listed below once made. It reads only paragraphs it hasn't read before, so after
       the first requests it's rarely asked; it also marks parts that change between requests (a date, a folder) as
       "keep", so they don't count as new.</p>
+    <label data-kinds="learn">What it does <select name="learn">
+      {% for m in learn_modes %}<option value="{{ m }}" {% if (s.learn or "both") == m %}selected{% endif %}>{{ learn_labels[m] }}</option>{% endfor %}
+    </select>
+      <small class="muted">Learn and apply: the model reads new paragraphs and its edits change requests. Apply only: its
+      edits change requests, the model isn't asked (no cost; the Live tab still notes paragraphs it hasn't read, as when
+      the app's prompt changes). Learn only: the model reads new paragraphs but requests go out unchanged; the Live tab
+      notes the ones its edits would have changed. Each edit below has its own on / off either way.</small></label>
     <label data-kinds="rewrite">Only this part <input name="part" value="{{ s.part or "" }}" maxlength="2000" placeholder="optional pattern, e.g. (?s)<rules>.*?</rules>">
       <small class="muted">Blank: the whole system prompt. Else each part this pattern finds is rewritten on its own.</small></label>
     <div class="row wrap">
@@ -66,7 +73,7 @@
     </div>
     <small class="muted">Waiting: the request goes on once the model answers (the first time a text is seen). Not waiting, or
       past the time: the request goes with what's there, and the model's work counts from the next one. A model that
-      fails isn't asked again for a minute.</small>
+      fails isn't asked again for a minute.<span data-kinds="learn"> Learning only never waits: nothing is applied.</span></small>
     <label data-kinds="rewrite">When the model fails or takes too long <select name="on_fail">
       <option value="keep" {% if s.on_fail != "refuse" %}selected{% endif %}>send the prompt without the rewrite</option>
       <option value="refuse" {% if s.on_fail == "refuse" %}selected{% endif %}>refuse the request (502)</option>
@@ -137,11 +144,15 @@
     <tr>
       <td data-label="#" class="small">{{ m.id }}</td>
       <td data-label="Kind">{{ m.kind }}</td>
-      <td data-label="Find → replace">
-        <form method="post" action="/admin/edits/{{ e.id }}/made/{{ m.id }}" class="stack" id="made-{{ m.id }}">
+      <td data-label="Find → replace" class="made-what">
+        <form method="post" action="/admin/edits/{{ e.id }}/made/{{ m.id }}" class="stack made-edit" id="made-{{ m.id }}">
           <input type="hidden" name="csrf" value="{{ csrf }}">
-          <textarea name="find" rows="2" class="mono" aria-label="Find">{{ m.settings.find }}</textarea>
-          {% if m.kind != "keep" %}<textarea name="replace" rows="2" class="mono" aria-label="Replace with" placeholder="(deleted)">{{ m.settings.replace }}</textarea>{% endif %}
+          {% set seen = m.settings.seen %}
+          {% if seen and seen[0] %}<pre class="mono wrap-any seen" title="The text before it, where the model found it">{{ seen[0] }}</pre>{% endif %}
+          <textarea name="find" rows="2" class="mono" aria-label="{{ 'Pattern' if m.kind != 'text' else 'Find' }}">{{ m.settings.find }}</textarea>
+          {% if seen and seen[1] %}<pre class="mono wrap-any seen" title="The text after it, where the model found it">{{ seen[1] }}</pre>{% endif %}
+          {% if not seen %}<p class="small muted">Where it was found shows here once it matches a request again.</p>{% endif %}
+          {% if m.kind != "keep" %}<label class="small muted">becomes <textarea name="replace" rows="2" class="mono" placeholder="(deleted)">{{ m.settings.replace }}</textarea></label>{% endif %}
         </form>
       </td>
       <td data-label="State">{% if m.state == "pending" %}<span class="badge high">held</span>{% elif m.state == "off" %}<span class="badge">off</span>{% else %}on{% if m.kind != "keep" and (m.last_hit or m.created_at) < stale_before %} <span class="badge" title="It hasn't changed a request for a week">stale</span>{% endif %}{% endif %}</td>

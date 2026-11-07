@@ -21,9 +21,11 @@ Patterns run with a time limit (the ``regex`` module), so a pattern that would t
 from __future__ import annotations
 
 import asyncio
+import bisect
 import contextlib
 import difflib
 import hashlib
+import itertools
 import json
 import logging
 import re
@@ -55,6 +57,14 @@ ADD_LABELS = {
 }
 STATES = ("on", "off", "pending")
 SYSTEM_ROLES = ("system", "developer")
+LEARN_MODES = ("both", "apply", "learn")  # a "make edits" edit: learn and apply / apply only / learn only
+LEARN_LABELS = {
+    "both": "Learn and apply",
+    "apply": "Apply only (no model calls)",
+    "learn": "Learn only (a dry run)",
+}
+SEEN_AROUND = 200  # characters of the text around a made edit's match that are kept to show where it was
+SEEN_LINES = 3  # ...at most this many lines of it on each side
 
 FIND_MAX = 2_000  # characters of a find text or pattern
 TEXT_MAX = 50_000  # of a replacement or added text
@@ -156,7 +166,8 @@ class Edit:
         if self.kind == "add":
             return f"{ADD_LABELS.get(s.get('mode', ''), '')}: {_short(s.get('text', ''))}"
         part = f", only {_short(s.get('part', ''))}" if s.get("part") else ""
-        return f"{s.get('model', '')}{part}: {_short(s.get('instructions', ''), 80)}"
+        mode = {"apply": " (apply only)", "learn": " (learn only)"}.get(s.get("learn", "both"), "")
+        return f"{s.get('model', '')}{part}{mode}: {_short(s.get('instructions', ''), 80)}"
 
 
 def _short(text: str, most: int = 40) -> str:
@@ -260,7 +271,23 @@ def clean_settings(kind: str, raw: dict) -> dict:
         if on_fail not in ("keep", "refuse"):
             raise EditError("Choose what happens when the model fails.")
         return {**settings, "part": part, "on_fail": on_fail}
-    return {**settings, "approve": _flag(raw.get("approve"), False)}
+    learn = str(raw.get("learn") or "both")
+    if learn not in LEARN_MODES:
+        raise EditError("Choose what the edit does: learn, apply, or both.")
+    return {**settings, "approve": _flag(raw.get("approve"), False), "learn": learn}
+
+
+def around(text: str, start: int, end: int) -> list[str]:
+    """The text before and after ``text[start:end]`` (a few lines each side): where a made edit was found."""
+    before = text[max(0, start - SEEN_AROUND) : start].split("\n")[-SEEN_LINES:]
+    after = text[end : end + SEEN_AROUND].split("\n")[:SEEN_LINES]
+    head = "\n".join(before)
+    tail = "\n".join(after)
+    if start - len(head) > 0:
+        head = "…" + head
+    if end + len(tail) < len(text):
+        tail += "…"
+    return [head, tail]
 
 
 # -- where edits work: the system and developer messages -----------------------------------------------------------
@@ -402,6 +429,7 @@ class Run:
         self.originals = {slot.key: slot.get() for slot in slots_of(messages)}
         self.outcome.before = sum(len(t) for t in self.originals.values())
         self.steps: list[dict] = []
+        self.first_spot: tuple[str, int, int] | None = None
 
     def slot_number(self, slot: Slot) -> int:
         return next((i for i, s in enumerate(slots_of(self.messages)) if s.key == slot.key), 0) + 1
@@ -426,15 +454,18 @@ class Run:
         found = changed = 0
         literal = edit.kind == "text"
         replace = settings.get("replace", "")
+        self.first_spot = None  # (text, start, end) of its first match: where a made edit was found
         for slot in slots_of(self.messages):
             text = slot.get()
             if not text:
                 continue
             spots: list[tuple[int, int, str]] = []
 
-            def swap(match, spots=spots) -> str:
+            def swap(match, spots=spots, text=text) -> str:
                 new = replace if literal else match.expand(replace)
                 spots.append((match.start(), match.end(), new))
+                if self.first_spot is None:
+                    self.first_spot = (text, match.start(), match.end())
                 return new
 
             try:
@@ -675,6 +706,13 @@ def parse_made(text: str, edit: Edit, unread: list[str]) -> list[tuple[str, dict
     if not isinstance(data, dict):
         return None
     given = "\n\n".join(unread)
+    starts = list(itertools.accumulate((len(p) + 2 for p in unread[:-1]), initial=0))
+
+    def seen_in(start: int, end: int) -> list[str]:
+        """The text around a match in ``given``, within its own paragraph (the others may not be next to it)."""
+        i = bisect.bisect_right(starts, start) - 1
+        return around(unread[i], start - starts[i], min(end - starts[i], len(unread[i])))
+
     have = {(c.kind, c.settings.get("find"), c.settings.get("replace")) for c in edit.children}
     made: list[tuple[str, dict, str]] = []
     approve = bool(edit.settings.get("approve"))
@@ -699,19 +737,21 @@ def parse_made(text: str, edit: Edit, unread: list[str]) -> list[tuple[str, dict
         have.add(key)
         left = run.messages[0]["content"]
         held = approve or (len(given) > 200 and len(left) < HELD_SHARE * len(given))
+        if run.first_spot is not None:
+            settings["seen"] = seen_in(run.first_spot[1], run.first_spot[2])
         made.append((kind, settings, "pending" if held else "on"))
     keeps = data.get("keep") if isinstance(data.get("keep"), list) else []
     for find in keeps[:MADE_MAX]:
         if not isinstance(find, str) or not find or len(find) > KEEP_MAX or ("keep", find, None) in have:
             continue
         try:
-            compiled = check_pattern(find)
-            if compiled.search(given, timeout=PATTERN_TIMEOUT_S) is None:
-                continue
+            match = check_pattern(find).search(given, timeout=PATTERN_TIMEOUT_S)
         except (EditError, TimeoutError):
             continue
+        if match is None:
+            continue
         have.add(("keep", find, None))
-        made.append(("keep", {"find": find, "case": True}, "on"))
+        made.append(("keep", {"find": find, "case": True, "seen": seen_in(match.start(), match.end())}, "on"))
     return made
 
 
@@ -730,6 +770,7 @@ class EditStore:
     result: Callable[[int, str], str | None]  # a kept rewrite
     keep_result: Callable[[int, str, str], None]
     reload: Callable[[], None]  # the configuration again, with the made edits
+    set_seen: Callable[[list[tuple[int, list[str]]]], None] = lambda fills: None  # where made edits were found
 
 
 class Engine:
@@ -745,6 +786,7 @@ class Engine:
         self.hits: Counter = Counter()
         self.last_hit: dict[int, float] = {}
         self.tasks: set[asyncio.Task] = set()
+        self.placed: set[int] = set()  # made edits whose place (``seen``) was kept since this start
 
     def forget(self) -> None:
         """After a change on the Edits page: read again from the database when next needed."""
@@ -895,11 +937,17 @@ class Engine:
                     continue
                 unread[digest] = paragraph
                 size += len(paragraph)
+        mode = edit.settings.get("learn", "both")  # both / apply (no model) / learn (requests unchanged)
         made: list[Edit] = []
-        if unread and not self.failing(edit):
+        if unread and mode == "apply":
+            run.note(f"{edit.label}: {len(unread)} paragraphs it hasn't read (apply only: the model isn't asked)")
+        elif unread and not self.failing(edit):
             key = ("learn", edit.id, tuple(sorted(unread)))
             task = self.start(key, lambda: self.call_learn(edit, list(unread.values()), ask))
-            made = await self.waited(edit, task, run, f"reading {len(unread)} new paragraphs") or []
+            if mode == "learn":  # its edits change nothing yet: the request doesn't wait for them
+                run.note(f"{edit.label}: learning only, reading {len(unread)} new paragraphs in the background")
+            else:
+                made = await self.waited(edit, task, run, f"reading {len(unread)} new paragraphs") or []
             if made:
                 fresh = [m for m in made if m.kind != "keep"]
                 held = sum(1 for m in fresh if m.state == "pending")
@@ -909,18 +957,55 @@ class Engine:
         elif unread:
             run.note(f"{edit.label}: {len(unread)} new paragraphs not read (its model failed lately)")
         children = [c for c in (*edit.children, *made) if c.on and c.kind in ("text", "pattern")]
-        found = changed = 0
-        for child in children:
-            f, c = self.child_hit(run, child, edit)
-            found, changed = found + f, changed + c
-        run.done(edit, changed > 0, missed=bool(children) and found == 0)
+        fills = self.where_kept(run, keeps)
+        if mode == "learn":  # a dry run on a copy of the system messages: what its edits would have done
+            copies = [dict(m) for m in run.messages if isinstance(m, dict) and m.get("role") in SYSTEM_ROLES]
+            scratch = Run(copies, record=False)
+            would = sum(scratch.substitute(child)[1] for child in children)
+            if would:
+                run.note(f"{edit.label}: learning only; its edits would have changed this request ({would} places)")
+            run.done(edit, False)
+        else:
+            found = changed = 0
+            for child in children:
+                f, c = self.child_hit(run, child, edit, fills)
+                found, changed = found + f, changed + c
+            run.done(edit, changed > 0, missed=bool(children) and found == 0)
+        if fills:
+            try:
+                await asyncio.to_thread(self.keep.set_seen, fills)
+            except Exception as exc:  # only for its page: never fail the request over it
+                log.warning(json.dumps({"event": "edit_seen_write_failed", "error": repr(exc)[:200]}))
 
-    def child_hit(self, run: Run, child: Edit, parent: Edit) -> tuple[int, int]:
+    def child_hit(self, run: Run, child: Edit, parent: Edit, fills: list) -> tuple[int, int]:
         found, changed = run.substitute(child, report=parent)
         if changed:
             self.hits[child.id] += 1
             self.last_hit[child.id] = time.time()
+        if found and run.first_spot is not None and "seen" not in child.settings and child.id not in self.placed:
+            self.placed.add(child.id)  # made before 0.69: where it was found is kept now, once
+            fills.append((child.id, around(*run.first_spot)))
         return found, changed
+
+    def where_kept(self, run: Run, keeps: list[Edit]) -> list:
+        """Where "keep" patterns made before 0.69 match, kept once (their edit's page shows it)."""
+        fills: list = []
+        for keep in keeps:
+            if "seen" in keep.settings or keep.id in self.placed:
+                continue
+            for slot in slots_of(run.messages):
+                text = slot.get()
+                try:
+                    match = _matcher("keep", keep.settings.get("find", ""), True).search(
+                        text, timeout=PATTERN_TIMEOUT_S
+                    )
+                except (TimeoutError, regex.error):
+                    break
+                if match is not None:
+                    self.placed.add(keep.id)
+                    fills.append((keep.id, around(text, match.start(), match.end())))
+                    break
+        return fills
 
     async def call_learn(self, edit: Edit, unread: list[str], ask: Ask) -> list[Edit]:
         answer = await ask(edit, learn_messages(edit, unread))
@@ -981,8 +1066,13 @@ def try_edits(
             read = seen(edit.id)
             texts = [p for s in slots_of(run.messages) for p in paragraphs(s.get())]
             new = [p for p in texts if paragraph_hash(p, keeps) not in read]
-            if new:
+            mode = edit.settings.get("learn", "both")
+            if new and mode == "apply":
+                run.note(f"{edit.label}: {len(new)} paragraph(s) it hasn't read (apply only: not sent to {model})")
+            elif new:
                 run.note(f"{edit.label}: {len(new)} paragraph(s) it hasn't read would go to {model}")
+            if mode == "learn":
+                run.note(f"{edit.label}: learning only, so requests aren't changed yet; here is what it would do")
             children = [c for c in edit.children if c.on and c.kind in ("text", "pattern")]
             found = changed = 0
             for child in children:

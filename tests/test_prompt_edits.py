@@ -182,10 +182,28 @@ def test_parse_made():
         ("text", "x" * 300, "pending"),
         ("keep", "\\d{4}-\\d\\d-\\d\\d", "on"),
     ]
+    # where each was found, in its own paragraph (the page shows it around the edit)
+    assert [s["seen"] for _, s, _ in made] == [
+        ["You are ", ", an agent."],
+        ["", ""],
+        ["", ""],
+        ["Today's date: ", ""],
+    ]
     held = dataclasses.replace(learn, settings={**learn.settings, "approve": True})
     assert {state for kind, _, state in parse_made(answer, held, unread) if kind != "keep"} == {"pending"}
     assert parse_made("I made no edits.", learn, unread) is None
     assert parse_made('{"edits": []}', learn, unread) == []
+
+
+def test_around_keeps_a_few_lines_each_side():
+    text = "\n".join(f"line {i}" for i in range(10))
+    start = text.index("line 5")
+    before, after = edits_mod.around(text, start, start + len("line 5"))
+    assert before == "…line 3\nline 4\n" and after == "\nline 6\nline 7…"
+    assert edits_mod.around("abc", 1, 2) == ["a", "c"]
+    long = "x" * 500 + "FOUND" + "y" * 500
+    before, after = edits_mod.around(long, 500, 505)
+    assert before == "…" + "x" * edits_mod.SEEN_AROUND and after == "y" * edits_mod.SEEN_AROUND + "…"
 
 
 def test_diff_segments_and_changes():
@@ -208,6 +226,7 @@ class FakeKeep:
         self.seen_hashes: set[str] = set()
         self.results: dict = {}
         self.next_id = 100
+        self.placed: list = []
 
     def add_made(self, parent_id, made, hashes):
         stored = []
@@ -225,6 +244,7 @@ class FakeKeep:
             result=lambda edit_id, key: self.results.get((edit_id, key)),
             keep_result=lambda edit_id, key, text: self.results.__setitem__((edit_id, key), text),
             reload=lambda: None,
+            set_seen=self.placed.extend,
         )
 
 
@@ -317,6 +337,51 @@ async def test_learn_in_the_background():
     messages = system()
     await engine.apply(messages, [keep.edit], ask, record=False)
     assert messages[0]["content"].startswith("You are Assistant")
+
+
+async def test_learn_modes_apply_only_and_learn_only():
+    rename = Edit(9, "", "text", "on", clean_settings("text", {"find": "opencode", "replace": "Assistant"}), 5)
+    learn = made_edit("learn", 5, "names", model="m", instructions="rename", learn="apply", children=[rename])
+    keep = FakeKeep(learn)
+    engine = Engine(keep.store())
+    asked = []
+
+    async def ask(edit, messages):
+        asked.append(messages)
+        return json.dumps({"edits": [{"find": "Be brief.", "replace": "Be thorough."}]})
+
+    # apply only: its edits change the request, the model isn't asked about the paragraphs it hasn't read
+    messages = system()
+    outcome = await engine.apply(messages, [keep.edit], ask, record=False)
+    assert asked == [] and messages[0]["content"].startswith("You are Assistant") and outcome.changed == ["names"]
+    assert "3 paragraphs it hasn't read (apply only" in outcome.notes[0]
+    # learn only: the model reads them in the background, and the request goes out as the app sent it
+    dry = dataclasses.replace(keep.edit, settings={**keep.edit.settings, "learn": "learn"})
+    messages = system()
+    outcome = await engine.apply(messages, [dry], ask, record=False)
+    assert messages[0]["content"] == PROMPT and outcome.changed == [] and outcome.missed == []
+    assert "learning only, reading 3 new paragraphs" in outcome.notes[0]
+    assert "would have changed this request (2 places)" in outcome.notes[1]  # opencode, twice
+    for _ in range(100):
+        if len(keep.edit.children) == 2:
+            break
+        await asyncio.sleep(0.01)
+    assert len(asked) == 1 and keep.edit.children[1].settings["find"] == "Be brief."
+    assert keep.edit.children[1].settings["seen"] == ["", " Visit https://opencode.ai for help."]
+
+
+async def test_where_older_made_edits_were_found_is_kept_once():
+    old = Edit(9, "", "text", "on", clean_settings("text", {"find": "opencode", "replace": "Assistant"}), 5)
+    old_keep = Edit(10, "", "keep", "on", clean_settings("keep", {"find": r"\d{4}-\d\d-\d\d"}), 5)
+    learn = made_edit("learn", 5, "names", model="m", instructions="rename", learn="apply", children=[old, old_keep])
+    keep = FakeKeep(learn)
+    engine = Engine(keep.store())
+    for _ in range(2):
+        await engine.apply(system(), [keep.edit], None, record=False)
+    assert sorted(keep.placed) == [
+        (9, ["You are ", ", an agent.\n\nToday's date: 2026-11-06…"]),
+        (10, ["You are opencode, an agent.\n\nToday's date: ", "\n\nBe brief. Visit https://opencode.ai for help."]),
+    ]  # once each, though both requests matched
 
 
 # -- through QueueRouter ----------------------------------------------------------------------------------------
@@ -462,8 +527,16 @@ async def test_make_edits_learns_once_and_holds_for_approval(make_stack):
         assert len(stack.mock["learn_inputs"]) == 1  # nothing new: the model isn't asked
         page = (await c.get(f"/admin/edits/{names}")).text
         assert "Made by the model" in page and "opencode" in page and "3 paragraphs read" in page
-        # with approval on, what it makes next waits
+        assert 'where the model found it">You are </pre>' in page  # the text around it
+        assert 'where the model found it">, an agent.</pre>' in page
+        # changing what it made keeps where it was found
         csrf = csrf_of(page)
+        made = next(e for e in stack.app.state.store.list_edits() if e.id == names).children[0]
+        changed = {"csrf": csrf, "action": "save", "find": "opencode", "replace": "Assistant"}
+        await c.post(f"/admin/edits/{names}/made/{made.id}", data=changed)
+        made = next(e for e in stack.app.state.store.list_edits() if e.id == names).children[0]
+        assert made.settings["seen"] == ["You are ", ", an agent."] and made.settings["replace"] == "Assistant"
+        # with approval on, what it makes next waits
         form = {"csrf": csrf, "kind": "learn", "name": "names", "enabled": "on", "model": "mock-model"}
         form |= {"instructions": "Rename the app.", "wait": "on", "timeout_s": "30", "approve": "on"}
         await c.post(f"/admin/edits/{names}", data=form)
@@ -480,6 +553,13 @@ async def test_make_edits_learns_once_and_holds_for_approval(make_stack):
         await c.post(f"/admin/edits/{names}/reread", data={"csrf": csrf})
         await c.post("/v1/chat/completions", headers=stack.headers, json=chat())
         assert len(stack.mock["learn_inputs"]) == 3 and "Assistant" in sent(stack)
+        # apply only: a new paragraph isn't sent to the model, the made edits still apply
+        await c.post(f"/admin/edits/{names}", data={**form, "learn": "apply"})
+        await c.post("/v1/chat/completions", headers=stack.headers, json=chat(system_text=PROMPT + "\n\nNew."))
+        assert len(stack.mock["learn_inputs"]) == 3 and "Assistant" in sent(stack)
+        page = (await c.get(f"/admin/edits/{names}")).text
+        assert '<option value="apply" selected>' in page
+        assert "(apply only)" in (await c.get("/admin/edits")).text
 
 
 async def test_highlighted_changes_need_content_logging_and_permission(make_stack):

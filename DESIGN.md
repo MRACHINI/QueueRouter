@@ -1843,6 +1843,19 @@ v0.68.0: prompt edits (app/edits.py, app/admin/edit_routes.py).
   forget all), kept rewrites (forget). The alias, group and client editors pick edits with an ordered picker
   (`data-choices="edit-choices"`, `data-strict`). Deleting an edit removes it everywhere it's used.
 
+v0.69.0: made edits show where they were found; "make edits" learns and applies separately.
+- Asked for: the context of what the model picked out (a bare find text is hard to place), and turning the model
+  on or off apart from whether its edits apply.
+- `settings.seen` = [text before, text after] (`around`: up to 200 characters and 3 lines each side, "…" where cut),
+  taken by `parse_made` inside the paragraph the match is in (the paragraphs sent are not next to each other).
+  Made edits from 0.68 get it the first time they match a request (`Run.first_spot`; keep patterns by searching
+  the system texts), written once per start (`Engine.placed`, `Store.set_made_seen` with `json_set`). An admin's
+  change to a made edit keeps it. The editor shows it above and below the find box.
+- `settings.learn`: both (as before) / apply (no model call: paragraphs not read are only noted) / learn (the call
+  runs in the background, never waited for; the request is unchanged and its made edits run on a copy of the
+  system messages to note "would have changed this request (N places)"; neither changed nor missed). Try it notes
+  the mode; the Edits list shows it.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

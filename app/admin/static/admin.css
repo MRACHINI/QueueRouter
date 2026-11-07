@@ -376,3 +376,10 @@ ol.by-edit { padding-left: 20px; }
 ol.by-edit li { margin-bottom: 10px; }
 table.made textarea { min-height: 2.4em; font-size: 0.8rem; }
 .edits-table td { vertical-align: top; }
+form.made-edit pre.seen { margin: 0; padding: 2px 8px; font-size: 0.75rem; color: var(--muted); white-space: pre-wrap; border: 0; border-left: 2px solid var(--border); border-radius: 0; background: none; }
+.alias-editor fieldset.card > * { min-width: 0; } /* a long option or value mustn't widen the page on a phone */
+select { max-width: 100%; }
+@media (max-width: 760px) {
+  table.cards.made td.made-what[data-label] { display: block; text-align: left; }
+  table.cards.made td.made-what[data-label]::before { display: block; margin-bottom: 4px; }
+}

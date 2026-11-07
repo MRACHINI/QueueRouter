@@ -49,8 +49,10 @@ from a **web admin UI**.
   prompt, instead of it, or only when there is none), *model: rewrite* (a model you pick rewrites the prompt, or
   only the parts a pattern finds, by your instructions; its result is kept, so a text is rewritten once) and
   *model: make edits* (a model reads the prompt by paragraph and makes text and pattern edits of its own, listed
-  under it to change, turn off, delete or approve; it reads only paragraphs it hasn't read, and marks parts that
-  change between requests, like a date, so they don't count as new). A model edit waits for its model or works
+  under it to change, turn off, delete or approve, each shown with the text before and after where it was found;
+  it reads only paragraphs it hasn't read, and marks parts that change between requests, like a date, so they
+  don't count as new; it can *learn and apply*, *apply only* (no model calls) or *learn only* (a dry run: the
+  Live tab notes what it would have changed)). A model edit waits for its model or works
   in the background for the next requests; its request is a row of its own, so its cost counts. **Try it** shows an
   edit's changes on a pasted or logged prompt, highlighted; the **Live** tab lists the requests edits changed (and
   attached edits that found nothing), and for clients with content logging on, each request's changes

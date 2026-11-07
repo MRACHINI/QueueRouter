@@ -544,6 +544,7 @@ def create_app(
             result=store.edit_result,
             keep_result=store.keep_edit_result,
             reload=reload,
+            set_seen=store.set_made_seen,
         )
     )
 

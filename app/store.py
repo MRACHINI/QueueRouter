@@ -2032,6 +2032,15 @@ class Store:
         self._update("prompt_edits", edit_id, {"state", "settings"}, fields)
         self.audit(actor, "edit.made.update", f"{parent_id}/{edit_id}", {k: v for k, v in fields.items()})
 
+    def set_made_seen(self, fills: list[tuple[int, list[str]]]) -> None:
+        """Where made edits were found (the text before and after), for those made before it was kept."""
+        with self.tx() as db:
+            db.executemany(
+                "UPDATE prompt_edits SET settings = json_set(settings, '$.seen', json(?)) "
+                "WHERE id = ? AND parent_id IS NOT NULL AND json_valid(settings)",
+                [(json.dumps(seen, ensure_ascii=False), edit_id) for edit_id, seen in fills],
+            )
+
     def delete_made_edit(self, parent_id: int, edit_id: int | None, actor: str) -> None:
         """One made edit, or (``edit_id`` None) all of them and what was read: the model reads it all again."""
         with self.tx() as db:

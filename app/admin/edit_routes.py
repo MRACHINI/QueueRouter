@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .. import edits as edits_mod
-from ..edits import ADD_LABELS, ADD_MODES, KIND_LABELS, KINDS, EditError
+from ..edits import ADD_LABELS, ADD_MODES, KIND_LABELS, KINDS, LEARN_LABELS, LEARN_MODES, EditError
 from ..store import Store
 
 EDIT_NAME = re.compile(r"[^\x00-\x1f\x7f]{1,64}")
@@ -150,6 +150,8 @@ def mount_edit_pages(app: FastAPI, store: Store, h: Helpers) -> None:
             kind_labels=KIND_LABELS,
             add_modes=ADD_MODES,
             add_labels=ADD_LABELS,
+            learn_modes=LEARN_MODES,
+            learn_labels=LEARN_LABELS,
             choices=h.model_choices(),
             users=store.edit_users().get(edit.id, []) if edit.id is not None else [],
             made=made,
@@ -362,6 +364,8 @@ def mount_edit_pages(app: FastAPI, store: Store, h: Helpers) -> None:
             else:
                 kept = {"all": "on", "case": "on" if child.settings.get("case", True) else ""}
                 settings = settings_form(child.kind, {**form, **kept})
+                if child.settings.get("seen"):  # where the model found it, as it was
+                    settings["seen"] = child.settings["seen"]
                 store.update_made_edit(edit_id, made_id, session.user.username, settings=settings)
         except EditError as exc:
             return editor(request, session, edit, f"Made edit #{made_id}: {exc}")
