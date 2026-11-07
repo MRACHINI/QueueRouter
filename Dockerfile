@@ -6,6 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Debian's security fixes published since the base image was built (2026-11: zlib's CVE-2026-85091), so the
+# scan in CI (fixable HIGH and CRITICAL findings fail it) passes before the base image is rebuilt with them.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin queuerouter \
     && mkdir /data && chown 10001:10001 /data && chmod 700 /data
 

@@ -1989,6 +1989,11 @@ v0.74.0: answer rules, what an alias's answer check reads, and the refusal field
   the checker, and the built-in refusal check (`is_refusal`) treats it as a refusal; before, such an answer read as
   empty.
 
+v0.74.1: the image applies Debian's security fixes when it's built. 0.74.0's CI scan failed on two HIGH findings in
+the base image's zlib (CVE-2026-85091 and CVE-2026-76844), fixed in Debian but not yet in any python:3.14-slim, so
+no 0.74.0 image was published. The Dockerfile now runs `apt-get upgrade` on the pinned base; the scanned image is
+still the one that ships. Same features as 0.74.0.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
