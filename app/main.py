@@ -2372,8 +2372,8 @@ def create_app(
                 [t.upstream.name for t in pinned if t.upstream.name in offered_by.get(target, [])]
                 or [t.upstream.name for t in pinned]
             )  # where it's sent, not what to
-            result[alias.name] = {
-                "name": f"{alias.name}{SEPARATOR}{on}" if on else alias.name,
+            result[alias.name] = {  # shown by its display name, if it has one; apps send its name (the key)
+                "name": f"{alias.shown}{SEPARATOR}{on}" if on else alias.shown,
                 **({"limit": limits} if limits else {}),
             }
             plain = alias.council == "off"  # a council's members and judge are asked as they are

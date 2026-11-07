@@ -3,7 +3,7 @@
 {% from "picker.html" import picker %}
 {% block content %}
 <p class="small"><a href="/admin/models">← Models &amp; aliases</a></p>
-<h1>{% if new %}New alias{% else %}Alias <code>{{ a.name }}</code>{% endif %}</h1>
+<h1>{% if new %}New alias{% else %}Alias {% if a.label %}{{ a.label }} {% endif %}<code>{{ a.name }}</code>{% endif %}</h1>
 <p class="muted small">Pick models by typing part of a name: the list shows each model's providers and context size
 (hidden ones too: an alias may use a model hidden from the lists). Press Enter or click to add; × removes; drag to
 reorder where order matters. A name no provider lists can be typed and added with Enter. When several providers offer
@@ -16,10 +16,13 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
 
   <fieldset class="card">
     <legend>Model</legend>
-    {% if new %}
     <label>Alias name <input name="name" value="{{ a.name }}" required placeholder="e.g. coder" pattern="[A-Za-z0-9][A-Za-z0-9._:/\-]{0,127}" autocomplete="off">
-      <small class="muted">The name apps use, e.g. in opencode's model list.</small></label>
-    {% endif %}
+      <small class="muted">The ID apps send as the model (letters, digits and . _ : / -, no spaces).{% if not new %}
+      Renaming it: other aliases, client and group model lists, prompt edits, schedules and queued jobs follow, and
+      opencode gets the new name with its model list; apps set to the old name by hand must be changed.{% endif %}</small></label>
+    <label>Display name <input name="label" value="{{ a.label or '' }}" maxlength="64" placeholder="optional, e.g. Coder (GLM + check)" autocomplete="off">
+      <small class="muted">What opencode's model list and the Models page show; spaces are fine. Apps still send the
+      alias name.</small></label>
     <label>Target model {{ picker("target_model", a.target_model, "single", "Search models…") }}
       <small class="muted">Where requests go (and, with a council on planning steps, the model for every other step).
       Another alias works too: the request is forwarded to it and handled as that alias handles it (its council or

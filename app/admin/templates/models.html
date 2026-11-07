@@ -21,7 +21,7 @@ other aliases: the request is forwarded to them, and each handles it its own way
   <tbody>
   {% for a in aliases %}
   <tr id="alias-{{ a.name }}">
-    <td data-label="Alias"><a href="/admin/aliases/{{ a.id }}"><strong><code>{{ a.name }}</code></strong></a>{% if not a.enabled %} <span class="badge">disabled</span>{% endif %}
+    <td data-label="Alias"><a href="/admin/aliases/{{ a.id }}">{% if a.label %}<strong>{{ a.label }}</strong> <code>{{ a.name }}</code>{% else %}<strong><code>{{ a.name }}</code></strong>{% endif %}</a>{% if not a.enabled %} <span class="badge">disabled</span>{% endif %}
       {% if a.notes %}<div class="small muted">{{ a.notes }}</div>{% endif %}</td>
     <td data-label="Sends to" class="small">{{ sent(a.target_model) }}{% for fb in a.fallbacks %} → {{ sent(fb) }}{% endfor %}
       <div class="muted">{% if a.target_model in alias_names %}its providers: those of {{ a.target_model }}{% elif a.upstream_ids %}on {% for uid in a.upstream_ids %}{{ upstream_names.get(uid, uid) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}on any upstream{% endif %}</div>

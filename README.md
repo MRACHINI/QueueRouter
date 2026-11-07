@@ -30,7 +30,10 @@ from a **web admin UI**.
   `/v1/models` with the target's context size. An alias's model or fallbacks can be other aliases: the request
   is forwarded to that alias and handled its way (council, orchestrator, answer check, its own fallbacks); if
   it runs out, the first alias's next fallbacks follow. Loops are refused. A bare name that is both an alias
-  and a provider's model means the alias, as in requests; `model@provider` is the model.
+  and a provider's model means the alias, as in requests; `model@provider` is the model. An alias can have a
+  display name (spaces are fine) that opencode's model list and the Models page show, while apps send its name;
+  renaming an alias takes along what QueueRouter keeps that names it (other aliases, client and group model
+  lists, prompt edits, schedules and queued jobs, its settings on the Models page).
 - **Fallback chains**: an alias can list backup models, used when the first is unavailable,
   keeps failing, can't fit the prompt, or (opt-in) refuses — detected from content-policy errors,
   `finish_reason: content_filter` or a reply opening with a refusal. The request is resent

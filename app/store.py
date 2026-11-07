@@ -610,6 +610,10 @@ MIGRATIONS: list[str] = [
     CREATE INDEX requests_edited ON requests (ts) WHERE edits IS NOT NULL;
     ALTER TABLE request_content ADD COLUMN edits TEXT;
     """,
+    # 43: an alias's display name (opencode's model list, the Models page); its name stays the ID apps send
+    """
+    ALTER TABLE aliases ADD COLUMN label TEXT NOT NULL DEFAULT '';
+    """,
 ]
 HOURLY_USAGE = 40  # the migration that added usage_hourly
 
@@ -812,6 +816,11 @@ class Alias:
     check_model: str = ""  # blank = the target model
     check_instructions: str = ""
     edits: tuple[int, ...] = ()  # prompt edits, in order (app/edits.py)
+    label: str = ""  # display name (opencode, the Models page); blank = the name. Apps always send the name
+
+    @property
+    def shown(self) -> str:
+        return self.label or self.name
 
 
 ROLES = ("viewer", "operator", "admin", "owner")  # ascending privilege
@@ -1798,6 +1807,7 @@ class Store:
                 r["check_model"] or "",
                 r["check_instructions"] or "",
                 tuple(i for i in json.loads(r["edits"] or "[]") if isinstance(i, int)),
+                r["label"] or "",
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1832,6 +1842,7 @@ class Store:
         check_model: str = "",
         check_instructions: str = "",
         edits: tuple[int, ...] = (),
+        label: str = "",
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
@@ -1839,8 +1850,8 @@ class Store:
                 "compact, compact_model, virtual_context, council, council_members, council_judge, council_when, "
                 "council_instructions, council_search, council_search_max, council_search_results, council_fetch, "
                 "orch_rounds, orch_tasks, orch_seconds, council_roles, check_answers, check_model, "
-                "check_instructions, edits, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "check_instructions, edits, label, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     target_model,
@@ -1869,6 +1880,7 @@ class Store:
                     check_model,
                     check_instructions,
                     json.dumps(list(edits)),
+                    label,
                     time.time(),
                 ),
             )
@@ -1906,9 +1918,84 @@ class Store:
             "check_model",
             "check_instructions",
             "edits",
+            "label",
         }
         self._update("aliases", alias_id, allowed, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)
+
+    def rename_alias(self, alias_id: int, name: str, actor: str, own_settings: bool = True) -> None:
+        """The alias's name (the ID apps send) becomes ``name``, and what QueueRouter keeps that names it follows:
+        other aliases (model, fallbacks, council members and judge, roles, summary and checker models), the model
+        lists of clients and groups, prompt edits' models, schedules and queued jobs, and (``own_settings``: the
+        old name isn't also a provider's model, whose settings these would be) its score, thinking levels, price
+        and limits set on the Models page. One transaction; IntegrityError when another alias has the name. The
+        request log keeps the name each request asked for; usage counts the real models, so it has nothing."""
+        with self.tx() as db:
+            row = db.execute("SELECT name FROM aliases WHERE id = ?", (alias_id,)).fetchone()
+            if row is None:
+                raise KeyError(alias_id)
+            old = row["name"]
+            if old == name:
+                return
+            db.execute("UPDATE aliases SET name = ? WHERE id = ?", (name, alias_id))
+
+            def one(value: str) -> str:
+                return name if value == old else value
+
+            def many(text: str | None) -> str:
+                return json.dumps([one(v) for v in json.loads(text or "[]")])
+
+            def role(line: str) -> str:  # "member = role: instructions"
+                member, sep, rest = line.partition("=")
+                return f"{name} ={rest}" if sep and member.strip() == old else line
+
+            for a in db.execute("SELECT * FROM aliases").fetchall():
+                roles = "\n".join(role(line) for line in (a["council_roles"] or "").splitlines())
+                db.execute(
+                    "UPDATE aliases SET target_model = ?, fallbacks = ?, council_members = ?, council_judge = ?, "
+                    "compact_model = ?, check_model = ?, council_roles = ? WHERE id = ?",
+                    (
+                        one(a["target_model"]),
+                        many(a["fallbacks"]),
+                        many(a["council_members"]),
+                        one(a["council_judge"] or ""),
+                        one(a["compact_model"] or ""),
+                        one(a["check_model"] or ""),
+                        roles,
+                        a["id"],
+                    ),
+                )
+            for table in ("clients", "client_groups"):
+                for owner in db.execute(f"SELECT id, policy FROM {table}").fetchall():  # noqa: S608
+                    policy = ClientPolicy.from_json(owner["policy"])
+                    if old in policy.allowed_models:
+                        moved = replace(policy, allowed_models=tuple(one(m) for m in policy.allowed_models))
+                        db.execute(f"UPDATE {table} SET policy = ? WHERE id = ?", (moved.to_json(), owner["id"]))  # noqa: S608
+            for edit in db.execute("SELECT id, settings FROM prompt_edits").fetchall():
+                settings = json.loads(edit["settings"] or "{}")
+                if settings.get("model") == old:
+                    settings["model"] = name
+                    db.execute(
+                        "UPDATE prompt_edits SET settings = ? WHERE id = ?",
+                        (json.dumps(settings, ensure_ascii=False), edit["id"]),
+                    )
+            for table, where in (("schedules", ""), ("jobs", " WHERE status = 'queued'")):
+                for job in db.execute(f"SELECT id, request FROM {table}{where}").fetchall():  # noqa: S608
+                    try:
+                        body = json.loads(self.reveal(job["request"]) or "")
+                    except ValueError:
+                        continue
+                    if isinstance(body, dict) and body.get("model") == old:
+                        body["model"] = name
+                        sealed = self.encrypt(json.dumps(body))
+                        db.execute(f"UPDATE {table} SET request = ? WHERE id = ?", (sealed, job["id"]))  # noqa: S608
+            if own_settings:
+                for table in ("model_scores", "model_thinking", "model_prices", "model_limits"):
+                    db.execute(
+                        f"UPDATE OR REPLACE {table} SET model = ? WHERE model = ? AND upstream_id = ?",  # noqa: S608
+                        (name, old, EVERY),
+                    )
+        self.audit(actor, "alias.rename", old, {"to": name})
 
     def delete_alias(self, alias_id: int, actor: str) -> None:
         with self.tx() as db:

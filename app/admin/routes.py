@@ -91,6 +91,7 @@ TWO_FA_COOKIE, TWO_FA_TTL_S = "qr_2fa", 300
 ENABLED_COMPACT_MODES = ("off", "trim", "summarise")
 ALIAS_ERRORS = {  # what was wrong in the alias editor
     "name": "An alias name uses letters, digits and . _ : / - (up to 128 characters, starting with a letter or digit).",
+    "label": "A display name is up to 64 characters, without |.",
     "target_model": "Choose the model this alias sends to (not the alias itself).",
     "fallbacks": "Up to 10 fallback models.",
     "compact": "Unknown compaction mode.",
@@ -1952,10 +1953,14 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         store.audit(session.user.username, "prices.refresh", "models.dev", {"ok": ok})
         return back("/admin/models#pricing", "saved" if ok else None, None if ok else "refresh_failed")
 
-    def alias_fields(form: dict, name: str) -> dict:
+    def alias_fields(form: dict, name: str, old: str | None = None) -> dict:
+        """The editor's fields, checked (``old``: the alias's name before a rename to ``name``)."""
         target = str(form.get("target_model", "")).strip()
         if not target or len(target) > 200 or target == name:  # an alias pointing at itself reaches no model
             raise ValueError("target_model")
+        label = " ".join(str(form.get("label", "")).split())
+        if len(label) > LABEL_MAX or "|" in label:  # "|" separates the parts of opencode's names
+            raise ValueError("label")
         known = {u.id for u in store.list_upstreams()}
         upstream_ids = tuple(int(v) for k, v in form.items() if k.startswith("upstream_") and int(v) in known)
         params = _rules_text(form)
@@ -1984,9 +1989,20 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             raise ValueError("council_members")
         if council != "off" and len(members) < COUNCIL_MIN:
             raise ValueError("council_members")
-        # its model and fallbacks may be other aliases (requests are forwarded to them), never leading back around
+        # its model and fallbacks may be other aliases (requests are forwarded to them), never leading back around;
+        # renamed, the others that used its old name use the new one
         draft = SimpleNamespace(name=name, target_model=target, fallbacks=fallbacks)
-        aliases = {a.name: a for a in store.list_aliases() if a.enabled} | {name: draft}
+        others = [a for a in store.list_aliases() if a.enabled and a.name != (old or name)]
+        if old and old != name:
+            others = [
+                SimpleNamespace(
+                    name=a.name,
+                    target_model=name if a.target_model == old else a.target_model,
+                    fallbacks=tuple(name if f == old else f for f in a.fallbacks),
+                )
+                for a in others
+            ]
+        aliases = {a.name: a for a in others} | {name: draft}
         if loop := loop_of(draft, aliases):
             raise AliasLoop(
                 f"These aliases use each other in a loop: {' → '.join(loop)}. An alias can't lead back to itself."
@@ -2001,6 +2017,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         edits = edit_routes.edit_ids(form, store)
         return {
             "edits": edits,
+            "label": label,
             "target_model": target,
             "upstream_ids": upstream_ids,
             "notes": str(form.get("notes", ""))[:300],
@@ -2038,7 +2055,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 
         return SimpleNamespace(
             id=existing.id if existing else None,
-            name=existing.name if existing else str(form.get("name", "")).strip(),
+            name=str(form.get("name", existing.name if existing else "")).strip(),
+            label=str(form.get("label", "")),
             target_model=str(form.get("target_model", "")).strip(),
             upstream_ids=tuple(int(v) for k, v in form.items() if k.startswith("upstream_") and str(v).isdecimal()),
             notes=str(form.get("notes", "")),
@@ -2102,7 +2120,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def alias_new(request: Request):
         session = require(request, "admin")
         empty = SimpleNamespace(
-            id=None, name="", target_model="", upstream_ids=(), notes="", params="", fallbacks=[],
+            id=None, name="", label="", target_model="", upstream_ids=(), notes="", params="", fallbacks=[],
             fallback_on=DEFAULT_TRIGGERS, compact="off", compact_model="", virtual_context=None, council="off",
             council_members=[], council_judge="", council_when="planning", council_instructions="",
             council_search=False, council_search_max=3, council_search_results=5, council_fetch=False,
@@ -2140,14 +2158,16 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         existing = next((a for a in store.list_aliases() if a.id == alias_id), None)
         if existing is None:
             return back("/admin/models", error="invalid")
+        name = str(form.get("name", existing.name)).strip()
         try:
-            store.update_alias(
-                alias_id,
-                session.user.username,
-                enabled=form.get("enabled") == "on",
-                **alias_fields(form, existing.name),
-            )
-        except (RulesError, ValueError, KeyError) as exc:
+            if not ALIAS_NAME.fullmatch(name):
+                raise ValueError("name")
+            fields = alias_fields(form, name, existing.name)
+            if name != existing.name:  # renamed: what QueueRouter keeps that names it follows (store.rename_alias)
+                listed = {m for ids in ctx.models_by_upstream().values() for m in ids}
+                store.rename_alias(alias_id, name, session.user.username, own_settings=existing.name not in listed)
+            store.update_alias(alias_id, session.user.username, enabled=form.get("enabled") == "on", **fields)
+        except (RulesError, ValueError, KeyError, sqlite3.IntegrityError) as exc:
             return alias_page(request, session, alias_from_form(form, existing), alias_error(exc))
         ctx.reload()
         return back("/admin/models", "saved")
@@ -2504,6 +2524,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 CLIENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 GROUP_NAME = re.compile(r"[^\x00-\x1f\x7f]{1,64}")  # shown on pages only: any text
 ALIAS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+LABEL_MAX = 64  # characters of an alias's display name
 URL = re.compile(r"https?://[^\s/?#]+(/[^\s?#]*)?")
 WEBHOOK_URL = re.compile(r"https?://[^\s/?#]+\S*")
 

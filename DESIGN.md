@@ -1952,6 +1952,21 @@ v0.72.0: a streamed answer's end waits for the usage behind it; an app that leav
 - A review by agents, each finding checked by another, found the forwarded rows, the several-choices cases,
   usage from along the way, the time to first byte and two missing tests; all fixed here.
 
+v0.73.0: an alias's display name, and renaming an alias in place.
+- Asked for: a name for an alias apart from its ID, with spaces, and renaming one.
+- `aliases.label` (migration 43): shown in opencode's model list (``label|Provider``, the key stays the alias
+  name, which apps send) and on the Models page and the alias editor. Up to 64 characters, runs of whitespace made
+  one, no "|" (it separates the parts of opencode's names). Not in `/v1/models` (an app that took a "name" for the
+  ID would send it) or in the model pickers (they match what's typed against the label; the ID is what's typed).
+- The alias name (the ID) can now be changed in the editor, with the same rules as a new one (no spaces: it's what
+  apps send). `Store.rename_alias`, one transaction, also changes what names it: other aliases' model, fallbacks,
+  council members, judge, roles lines, summary and checker models; the model lists of clients and groups; prompt
+  edits' model; schedules and queued jobs (their requests, decrypted and encrypted again); and, unless a provider
+  also lists the old name (they'd be that model's), its score, thinking levels, price and limits set for every
+  provider. Exact names only: `name@provider` is a provider's model. The editor checks loops as they'd be after the
+  rename. The request log keeps the name each request asked for; usage is counted by the real model, so it needs
+  nothing. Apps set to the old name by hand get 404 (opencode gets the new name with its model list).
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
