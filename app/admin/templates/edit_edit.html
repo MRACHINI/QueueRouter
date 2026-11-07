@@ -78,6 +78,10 @@
       <option value="keep" {% if s.on_fail != "refuse" %}selected{% endif %}>send the prompt without the rewrite</option>
       <option value="refuse" {% if s.on_fail == "refuse" %}selected{% endif %}>refuse the request (502)</option>
     </select></label>
+    <label class="inline-field" data-kinds="rewrite">An answer shorter than <input type="number" name="shortest" min="0" max="100" value="{{ s.get('shortest', 20) }}"> % of the text fails</label>
+    <small class="muted" data-kinds="rewrite">As when the model fails (above), and it isn't kept: a model that answered the
+      prompt instead of rewriting it ("Understood, how can I help?"). 0: any answer goes, for instructions that cut most
+      of the text.</small>
     <label class="check" data-kinds="learn"><input type="checkbox" name="approve" {% if s.approve %}checked{% endif %}>
       Hold the edits it makes until I approve them (an edit that would delete most of a paragraph is always held)</label>
   </fieldset>

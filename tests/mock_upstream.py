@@ -260,26 +260,30 @@ def create_mock(limit: int = 2) -> FastAPI:
                 return JSONResponse({"error": {"message": "checker down"}}, status_code=state["check_status"])
             if state.get("check_delay"):
                 await asyncio.sleep(state["check_delay"])
-            answer = str(body["messages"][1]["content"]).split("<answer>")[-1]
+            answer = str(body["messages"][1]["content"]).split("<answer>")[-1].split("</answer>")[0]
             bad = [w for w in state.get("check_fail", []) if w in answer]
             body["mock_content"] = state.get("check_reply") or (f"FAIL: it says {bad[0]}" if bad else "PASS")
             body["mock_delay"] = 0.01
-        # Prompt edits (app/edits.py): a rewrite answers state["rewrite_reply"] (else the text upper-cased); a "make
-        # edits" request answers state["learn_replies"] in turn (the last one again after that); state["*_status"]
-        # fails them, state["*_delay"] slows them. Every chat request's body: state["chat_bodies"].
+        # Prompt edits (app/edits.py): a rewrite answers state["rewrite_reply"] (else the text upper-cased; the text is
+        # what's inside its tags, and state["rewrite_inputs"] holds it); a "make edits" request answers
+        # state["learn_replies"] in turn (the last one again after that); state["*_status"] fails them,
+        # state["*_delay"] slows them. Every chat request's body: state["chat_bodies"].
         state.setdefault("chat_bodies", []).append(body)
         first_text = str(first.get("content", ""))
         for kind, marker in (("rewrite", "You rewrite part of the system prompt"), ("learn", "You write edits for")):
             if not first_text.startswith(marker):
                 continue
             asked = state.setdefault(f"{kind}_inputs", [])
-            asked.append(body["messages"][1]["content"])
+            text = str(body["messages"][1]["content"])
+            if kind == "rewrite" and (quoted := re.search(r"<(prompt(?:_\d+)?)>\n(.*)\n</\1>", text, re.S)):
+                text = quoted.group(2)
+            asked.append(text)
             if state.get(f"{kind}_status"):
                 return JSONResponse({"error": {"message": f"{kind} down"}}, status_code=state[f"{kind}_status"])
             if state.get(f"{kind}_delay"):
                 await asyncio.sleep(state[f"{kind}_delay"])
             if kind == "rewrite":
-                body["mock_content"] = state.get("rewrite_reply") or body["messages"][1]["content"].upper()
+                body["mock_content"] = state.get("rewrite_reply") or text.upper()
             else:
                 replies = state.get("learn_replies") or ['{"edits": [], "keep": []}']
                 body["mock_content"] = replies[min(len(asked) - 1, len(replies) - 1)]

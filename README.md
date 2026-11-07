@@ -37,7 +37,8 @@ from a **web admin UI**.
   unchanged.
 - **Answer checks** (opt-in per alias): a checker model you pick reads each plain-text answer
   before the app gets it, with your instructions, the user's last message and the answer (not the
-  rest of the conversation), and replies PASS or FAIL with a reason. A failed answer never reaches
+  rest of the conversation), quoted as text to judge, never as instructions to follow, and replies
+  PASS or FAIL with a reason. A failed answer never reaches
   the app: the same request goes to the alias's next model, and the Requests page says why (the
   discarded answer and the check are rows of their own, so their cost counts). Answers that call
   tools, and the last model's, aren't checked; a checked answer arrives whole once it passes, not
@@ -47,7 +48,9 @@ from a **web admin UI**.
   the client's). They touch the app's system and developer messages only. Kinds: *text* (find and replace, or
   delete), *pattern* (a regular expression, for parts that change between requests), *add* (before or after the
   prompt, instead of it, or only when there is none), *model: rewrite* (a model you pick rewrites the prompt, or
-  only the parts a pattern finds, by your instructions; its result is kept, so a text is rewritten once) and
+  only the parts a pattern finds, by your instructions; its result is kept, so a text is rewritten once, and an
+  answer far shorter than the text, like a model replying to the prompt instead of rewriting it, counts as a
+  failure) and
   *model: make edits* (a model reads the prompt by paragraph and makes text and pattern edits of its own, listed
   under it to change, turn off, delete or approve, each shown with the text before and after where it was found;
   it reads only paragraphs it hasn't read, and marks parts that change between requests, like a date, so they
