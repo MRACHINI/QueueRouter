@@ -103,6 +103,7 @@ from .store import DataDirError, hash_key
 from .upstream import (
     BUSY_STATUS,
     FAILURE_STATUS,
+    AnswerEnd,
     UsageChunkFilter,
     UsageSniffer,
     claude_headers,
@@ -4699,6 +4700,22 @@ def create_app(
         sniffer = UsageSniffer()
         held_back = UsageChunkFilter() if adm.strip_usage else None
         captured = bytearray() if adm.log_request is not None else None
+        end = AnswerEnd()  # the answer's end waits for the usage right behind it (app/upstream.py)
+
+        def to_app(chunk: bytes) -> bytes:
+            """What of ``chunk`` goes to the app: without QueueRouter's own usage chunk, if it asked for it. The
+            first of the answer that does is the request's time to first byte (an end held for its usage counts
+            when it goes)."""
+            chunk = held_back.feed(chunk) if held_back is not None and chunk else chunk
+            if chunk and rlog.fields["ttft_ms"] is None:
+                rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
+            return chunk
+
+        def idle() -> float:  # while the end waits, a tick also comes when its wait is up (then it goes on)
+            if end.holding:
+                return max(0.01, min(keepalive_s(), end.left(time.monotonic())))
+            return keepalive_s()
+
         try:
             async with contextlib.aclosing(chained(adm)) as events:
                 async for event in events:
@@ -4732,9 +4749,8 @@ def create_app(
                         yield sse_error(event.message, event.status, event.kind)
                         return
                     elif isinstance(event, Forward) and adm.forward is not None:  # the alias after its models answers
-                        outcome = "forwarded"
                         forwarded = await adm.forward(event.hop, adm.request_id, adm.place)
-                        status = forwarded.status_code
+                        outcome, status = "forwarded", forwarded.status_code  # its own row says how it ends
                         async for chunk in passed_on(forwarded, event.hop.alias):
                             yield chunk
                         return
@@ -4754,56 +4770,72 @@ def create_app(
                         # passed on): keep-alives between events keep apps and proxies from giving up on the stream
                         sse = response.headers.get("content-type", "").startswith("text/event-stream")
                         between = True  # what the app got so far ends with a whole event
-                        idle = keepalive_s() if sse else None
                         unfed = None  # an answer held back for its check was timed as it came: not again now
                         if (timed := getattr(response, "sniffer", None)) is not None:
                             sniffer, unfed = timed, response.prefix
                         try:
                             async with contextlib.aclosing(
-                                within(response.aiter_bytes(), adm.deadline, idle)
+                                within(response.aiter_bytes(), adm.deadline, idle if sse else None)
                             ) as chunks:
                                 async for chunk in chunks:
-                                    if not chunk:
+                                    if chunk:
+                                        if chunk is unfed:
+                                            unfed = None
+                                        else:
+                                            sniffer.feed(chunk, time.monotonic())
+                                        if captured is not None and len(captured) < CONTENT_CAPTURE_MAX:
+                                            captured += chunk
+                                        if sse:
+                                            chunk = end.take(chunk, sniffer, time.monotonic())
+                                    elif end.holding and not end.left(now := time.monotonic()):
+                                        chunk = end.release(now)  # nothing came soon after the end: it goes as it is
+                                    else:
                                         if between:
                                             yield KEEPALIVE
                                         continue
-                                    if chunk is unfed:
-                                        unfed = None
-                                    else:
-                                        sniffer.feed(chunk, time.monotonic())
-                                    if rlog.fields["ttft_ms"] is None:
-                                        rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
-                                    if captured is not None and len(captured) < CONTENT_CAPTURE_MAX:
-                                        captured += chunk
-                                    if held_back is not None:
-                                        chunk = held_back.feed(chunk)
-                                    if chunk:
+                                    if chunk := to_app(chunk):
                                         between = chunk.endswith((b"\n\n", b"\r\n\r\n"))
                                         yield chunk
                                     if adm.expired():
                                         outcome, status = "timeout", 504
+                                        if rest := to_app(end.release()):
+                                            yield rest
                                         yield MID_STREAM + sse_error(
                                             "request exceeded this key's total time limit", 504, "request_timeout"
                                         )
                                         return
                         except httpx.HTTPError as exc:
                             status = 502
+                            if rest := to_app(end.release()):  # the end the provider sent goes before the error
+                                yield rest
                             yield MID_STREAM + sse_error(f"upstream stream interrupted: {type(exc).__name__}", 502)
                             return
                         except TimeoutError:  # the stream stalled past the key's total time limit
                             outcome, status = "timeout", 504
+                            if rest := to_app(end.release()):
+                                yield rest
                             yield MID_STREAM + sse_error(
                                 "request exceeded this key's total time limit", 504, "request_timeout"
                             )
                             return
+                        if rest := to_app(end.release()):  # a stream that ended while its end waited
+                            yield rest
                         if held_back is not None and (rest := held_back.flush()):
                             yield rest
                         outcome = "done"
                         return
         except (asyncio.CancelledError, GeneratorExit):
-            # Client disconnected: Starlette cancels us, or the generator is closed.
-            outcome = "cancelled"
-            rlog.fields["stopped"] = stopped_at(rlog.fields, sniffer.finish_reason is not None)
+            # Client disconnected: Starlette cancels us, or the generator is closed. An app that had the whole
+            # answer (its end goes once the usage behind it was read) and left before the stream's last bytes, as
+            # many do, got what it asked for: the request is done, with its tokens, not cancelled. A forwarded
+            # request's own row says how it ended; a time-out or an error already sent stays as it is.
+            if outcome == "error" and status == 200:
+                if response is not None and end.had_end(sniffer):
+                    outcome = "done"
+                else:
+                    outcome = "cancelled"
+                    answered = end.holding or (sniffer.finish_reason is not None and not end.went_on(sniffer))
+                    rlog.fields["stopped"] = stopped_at(rlog.fields, answered)
             raise
         except httpx.HTTPError as exc:  # reading an error body or the stream's start, before any of it was sent
             status = 502
@@ -4892,19 +4924,20 @@ def own_entry(public: str, entry: dict, thinking: thinking_mod.Thinking | None, 
 
 
 async def within(
-    chunks: AsyncIterator[bytes], deadline: float | None, idle: float | None = None
+    chunks: AsyncIterator[bytes], deadline: float | None, idle: float | Callable[[], float] | None = None
 ) -> AsyncIterator[bytes]:
     """``chunks`` until the monotonic ``deadline`` (None: no limit); TimeoutError once it passes, also while a
-    stalled provider sends nothing (checking only between chunks would wait for its read timeout). With ``idle``,
-    an empty chunk whenever nothing came for that long: the caller's cue for a keep-alive. The read in progress
-    goes on meanwhile."""
+    stalled provider sends nothing (checking only between chunks would wait for its read timeout). With ``idle``
+    (seconds, or a function giving them, asked before each wait), an empty chunk whenever nothing came for that
+    long: the caller's cue for a keep-alive. The read in progress goes on meanwhile."""
     iterator = chunks.__aiter__()
     pending: asyncio.Future | None = None
     try:
         while True:
             if pending is None:
                 pending = asyncio.ensure_future(anext(iterator, None))
-            limits = [idle] if idle else []
+            wait = idle() if callable(idle) else idle
+            limits = [wait] if wait else []
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

@@ -4,6 +4,7 @@ Request body extras (all optional) steer its behaviour:
   "mock_delay":   seconds between streamed chunks / before a non-stream reply (default 0.05)
   "mock_chunks":  number of content chunks to stream (default 5)
   "mock_think":   stream this many reasoning_content chunks first (default 0)
+  "mock_usage_delay" / "mock_done_delay": seconds before the usage chunk / the final [DONE] of a stream
   "mock_status":  force this HTTP status
   "mock_fail":    fail this many times per "mock_key" with 503 before succeeding
   state["daily_quota"]: answer every request with a daily-quota 429 (set on the mock's state)
@@ -489,7 +490,11 @@ def create_mock(limit: int = 2) -> FastAPI:
                     },
                 }
                 if (body.get("stream_options") or {}).get("include_usage"):  # like most providers: only if asked
+                    if body.get("mock_usage_delay"):  # a provider whose usage comes a moment after the end
+                        await asyncio.sleep(body["mock_usage_delay"])
                     yield f"data: {json.dumps(usage)}\n\n"
+                if body.get("mock_done_delay"):
+                    await asyncio.sleep(body["mock_done_delay"])
                 yield "data: [DONE]\n\n"
                 finished = True
             finally:

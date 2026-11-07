@@ -1929,6 +1929,29 @@ v0.71.0: the same for compaction and the council's judge (app/quoting.py holds `
   - Left as it is: a rewrite edit saved before 0.70 that condenses a prompt on purpose (answers under 20%) now
     fails until its share is set to 0; the editor says so and the note names the reason.
 
+v0.72.0: a streamed answer's end waits for the usage behind it; an app that leaves at the end is done.
+- Seen live: rows "cancelled after answer" in red. Many apps hang up as soon as they have the chunk with the
+  finish_reason, before the provider's usage chunk and [DONE]. QueueRouter stopped reading there, so those requests
+  had no token counts (their cost, the key's token limits and the Usage page missed them) and counted as cancelled.
+- Reading the rest after the app hung up was rejected: the hang-up often cancels the read in progress (the stream
+  is then lost), and the provider's slot is released meanwhile. Instead `AnswerEnd` (app/upstream.py) holds back
+  the end, from the chunk with the finish_reason, until the usage has been read (or [DONE], or the stream's end),
+  and passes it on together: the app can't have the end before the usage is read. The wait is at most `END_WAIT_S`
+  (1 s) with nothing coming (`within()` takes the idle interval as a function, so a tick comes when the end's
+  wait is up; a tick before that, with a short keep-alive interval, is an ordinary keep-alive) and `END_MAX_S`
+  (3 s) in all over the stream. Only usage read at or after the end counts (the sniffer counts finish_reason and
+  usage lines; a provider's running counts along the way don't end the wait). With several choices, more of the
+  answer coming after one choice's end lets what was held go at once, and the next end waits again. Usually the
+  usage comes in the same read, so nothing waits. On a time-out or a provider error the end goes before the
+  error event. Time to first byte now counts from the first bytes that went to the app.
+- An app that leaves once it had the end (it went, and none of the answer came after it): outcome "done" (not
+  red, not counted as cancelled), with its tokens. One that leaves while the end waits (it didn't get it) stays
+  "cancelled after answer"; one that leaves while another choice goes on, "cancelled mid-answer". A time-out or
+  an error already sent, or a forwarded request (its own row says how it ended), keeps its outcome; before, a
+  forwarded stream's row became "cancelled" too and counted again in usage, as an error.
+- A review by agents, each finding checked by another, found the forwarded rows, the several-choices cases,
+  usage from along the way, the time to first byte and two missing tests; all fixed here.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

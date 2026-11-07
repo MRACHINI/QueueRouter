@@ -189,7 +189,9 @@ from a **web admin UI**.
   sees `X-QueueRouter-Logging: on`.
 - **Usage tracking**: request log (metadata only, never content) and usage per hour and per day for each client and
   model, CSV export (per client, or per client and model). Usage from before 0.65 is per day only, except for
-  the days the request log still held when you upgraded.
+  the days the request log still held when you upgraded. A streamed answer's end waits a moment for the usage the
+  provider sends right after it, so an app that hangs up as soon as it has the end still leaves its token counts
+  (and counts as done, not cancelled).
 - **Cost at official prices**: what your tokens would have cost on the model makers' own APIs
   (prices from [models.dev](https://models.dev), refreshed daily; cached prompt tokens at the
   cached rate, tokens written to Claude's cache at 1.25 × the input price), and how much your flat-rate plan saves. Per-model overrides on the Models page;

@@ -153,6 +153,8 @@ class UsageSniffer:
         self.cached_tokens: int | None = None
         self.cache_write_tokens: int | None = None
         self.finish_reason: str | None = None
+        self.finishes = 0  # finish_reason lines seen (one per choice that ended)
+        self.usages = 0  # usage lines with counts seen
         self.first_token_at: float | None = None
         self.answer_at: float | None = None
         self.last_token_at: float | None = None
@@ -170,12 +172,14 @@ class UsageSniffer:
                 self._time(line, now)
             if b'"finish_reason"' in line and (reason := finish_reason_from_body(line)):
                 self.finish_reason = reason
+                self.finishes += 1
             if b'"usage"' in line:
                 payload = line[5:].strip()
                 prompt, completion, cached, written = usage_from_body(payload)
                 if prompt is not None or completion is not None:
                     self.prompt_tokens, self.completion_tokens = prompt, completion
                     self.cached_tokens, self.cache_write_tokens = cached, written
+                    self.usages += 1
 
     def _time(self, line: bytes, now: float) -> None:
         thinking = _RESPONSES_REASONING.search(line) is not None  # its reasoning comes as a "delta" too
@@ -204,6 +208,77 @@ class UsageSniffer:
         if (self.completion_tokens or 0) >= MIN_SPEED_TOKENS and span >= MIN_SPEED_S:
             fields["tokens_per_s"] = round(self.completion_tokens / span, 1)
         return fields
+
+
+END_WAIT_S = 1.0  # the end of a streamed answer waits at most this long without anything coming for its usage...
+END_MAX_S = 3.0  # ...and ends wait this long in all over a stream
+END_MAX_BYTES = 256_000
+
+
+class AnswerEnd:
+    """Holds back the end of a streamed answer (a chunk with a new finish_reason) until the usage chunk the
+    provider sends right after it, or the stream's end, has come. Many apps hang up as soon as they have the end;
+    before the usage was read, that left the request without its token counts (its cost and limits missed them).
+    If more of the answer comes instead (another of several choices still going), what was held goes on at once
+    and the next finish_reason holds again. An end waits at most END_WAIT_S without anything coming, and ends wait
+    END_MAX_S in all over the stream. The caller's idle ticks come by ``left``: one with time left is an ordinary
+    keep-alive, one without calls ``release``."""
+
+    def __init__(self) -> None:
+        self.held = b""
+        self.since: float | None = None  # when the end being held began to wait
+        self.spent = 0.0  # seconds ends waited in this stream
+        self.ended_at: float | None = None  # when an end last went to the app as the end
+        self.finishes = self.usages = 0  # the sniffer's counts as of the last chunk taken...
+        self.tokens_at: float | None = None  # ...and its last answer token
+
+    @property
+    def holding(self) -> bool:
+        return self.since is not None
+
+    def left(self, now: float) -> float:
+        """How much longer the end may wait for its usage (0: it goes now)."""
+        if self.since is None:
+            return 0.0
+        waited = now - self.since
+        return max(0.0, min(END_WAIT_S - waited, END_MAX_S - self.spent - waited))
+
+    def take(self, chunk: bytes, sniffer: UsageSniffer, now: float) -> bytes:
+        """What of ``chunk`` (already fed to ``sniffer``) goes to the app now: nothing while an end waits."""
+        new_finish, new_usage = sniffer.finishes > self.finishes, sniffer.usages > self.usages
+        more = sniffer.last_token_at != self.tokens_at  # the chunk carries more of the answer
+        self.finishes, self.usages, self.tokens_at = sniffer.finishes, sniffer.usages, sniffer.last_token_at
+        out = b""
+        if self.since is not None and more:  # the answer goes on (another of several choices): that wasn't its end
+            out = self.release(now, ended=False)
+        if self.since is None:
+            if not new_finish or self.spent >= END_MAX_S:
+                return out + chunk
+            self.since = now
+        self.held += chunk
+        if new_usage or b"[DONE]" in self.held or not self.left(now) or len(self.held) > END_MAX_BYTES:
+            return out + self.release(now)
+        return out
+
+    def release(self, now: float | None = None, ended: bool = True) -> bytes:
+        """What was held back (b"" if nothing): its usage came, the stream ended, or nothing came soon after."""
+        held, self.held = self.held, b""
+        if self.since is not None:
+            now = time.monotonic() if now is None else now
+            self.spent += now - self.since
+            self.since = None
+            if ended:
+                self.ended_at = now
+        return held
+
+    def went_on(self, sniffer: UsageSniffer) -> bool:
+        """More of the answer came after its end last went to the app (another of several choices)."""
+        tokens = sniffer.last_token_at
+        return self.ended_at is not None and tokens is not None and tokens > self.ended_at
+
+    def had_end(self, sniffer: UsageSniffer) -> bool:
+        """The app has had the end of the answer: it went, and none of the answer came after it."""
+        return self.since is None and self.ended_at is not None and not self.went_on(sniffer)
 
 
 class UsageChunkFilter:
