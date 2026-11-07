@@ -23,6 +23,7 @@ from datetime import date, timedelta
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from .answer_rules import DEFAULT_ANSWER_KINDS, Rule, kinds_of
 from .config import PRIORITIES, SECRET_TUNABLES, TUNABLES, ClientPolicy, Settings, parse_access_keys
 from .edits import Edit
 from .names import EVERY
@@ -614,6 +615,26 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE aliases ADD COLUMN label TEXT NOT NULL DEFAULT '';
     """,
+    # 44: answer rules (app/answer_rules.py): an alias's own checks of its answers by text or pattern, attached in
+    # order; and what an alias's answer check reads (text answers, ones that call tools, empty ones)
+    """
+    CREATE TABLE answer_rules (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        find TEXT NOT NULL,
+        match_case INTEGER NOT NULL DEFAULT 0,
+        scope TEXT NOT NULL DEFAULT 'start',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        notes TEXT NOT NULL DEFAULT '',
+        hits INTEGER NOT NULL DEFAULT 0,
+        last_hit REAL,
+        created_at REAL NOT NULL
+    );
+    CREATE UNIQUE INDEX answer_rules_name ON answer_rules (name);
+    ALTER TABLE aliases ADD COLUMN answer_rules TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE aliases ADD COLUMN check_kinds TEXT NOT NULL DEFAULT '["text", "empty"]';
+    """,
 ]
 HOURLY_USAGE = 40  # the migration that added usage_hourly
 
@@ -817,6 +838,8 @@ class Alias:
     check_instructions: str = ""
     edits: tuple[int, ...] = ()  # prompt edits, in order (app/edits.py)
     label: str = ""  # display name (opencode, the Models page); blank = the name. Apps always send the name
+    answer_rules: tuple[int, ...] = ()  # its answer rules, in order (app/answer_rules.py)
+    check_kinds: tuple[str, ...] = DEFAULT_ANSWER_KINDS  # what its answer check reads
 
     @property
     def shown(self) -> str:
@@ -1808,6 +1831,8 @@ class Store:
                 r["check_instructions"] or "",
                 tuple(i for i in json.loads(r["edits"] or "[]") if isinstance(i, int)),
                 r["label"] or "",
+                tuple(i for i in json.loads(r["answer_rules"] or "[]") if isinstance(i, int)),
+                kinds_of(json.loads(r["check_kinds"] or "[]")),
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1843,6 +1868,8 @@ class Store:
         check_instructions: str = "",
         edits: tuple[int, ...] = (),
         label: str = "",
+        answer_rules: tuple[int, ...] = (),
+        check_kinds: tuple[str, ...] = DEFAULT_ANSWER_KINDS,
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
@@ -1884,6 +1911,10 @@ class Store:
                     time.time(),
                 ),
             )
+            db.execute(
+                "UPDATE aliases SET answer_rules = ?, check_kinds = ? WHERE id = ?",
+                (json.dumps(list(answer_rules)), json.dumps(list(check_kinds)), cur.lastrowid),
+            )
         self.audit(
             actor,
             "alias.create",
@@ -1893,7 +1924,8 @@ class Store:
         return cur.lastrowid
 
     def update_alias(self, alias_id: int, actor: str, **fields: object) -> None:
-        for name in ("upstream_ids", "fallbacks", "fallback_on", "council_members", "edits"):
+        lists = ("upstream_ids", "fallbacks", "fallback_on", "council_members", "edits", "answer_rules", "check_kinds")
+        for name in lists:
             if name in fields:
                 fields[name] = json.dumps(list(fields[name]))
         allowed = {"target_model", "upstream_ids", "enabled", "notes", "params", "fallbacks", "fallback_on"}
@@ -1919,6 +1951,8 @@ class Store:
             "check_instructions",
             "edits",
             "label",
+            "answer_rules",
+            "check_kinds",
         }
         self._update("aliases", alias_id, allowed, fields)
         self.audit(actor, "alias.update", str(alias_id), fields)
@@ -2001,6 +2035,82 @@ class Store:
         with self.tx() as db:
             db.execute("DELETE FROM aliases WHERE id = ?", (alias_id,))
         self.audit(actor, "alias.delete", str(alias_id))
+
+    # -- answer rules (app/answer_rules.py) ----------------------------------------------------
+
+    def list_rules(self) -> list[Rule]:
+        return [
+            Rule(
+                r["id"],
+                r["name"],
+                r["kind"],
+                r["find"],
+                bool(r["match_case"]),
+                r["scope"],
+                bool(r["enabled"]),
+                r["notes"],
+                r["hits"],
+                r["last_hit"],
+                r["created_at"],
+            )
+            for r in self.query("SELECT * FROM answer_rules ORDER BY name COLLATE NOCASE")
+        ]
+
+    def create_rule(self, actor: str, enabled: bool = True, **rule: object) -> int:
+        """``rule``: name, kind, find, case, scope, notes (answer_rules.clean_rule). IntegrityError: the name is
+        taken."""
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT INTO answer_rules (name, kind, find, match_case, scope, enabled, notes, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (rule["name"], rule["kind"], rule["find"], int(bool(rule["case"])), rule["scope"], int(enabled),
+                 rule.get("notes", ""), time.time()),
+            )  # fmt: skip
+        self.audit(actor, "rule.create", str(rule["name"]))
+        return cur.lastrowid
+
+    def update_rule(self, rule_id: int, actor: str, enabled: bool = True, **rule: object) -> None:
+        with self.tx() as db:
+            cur = db.execute(
+                "UPDATE answer_rules SET name = ?, kind = ?, find = ?, match_case = ?, scope = ?, enabled = ?, "
+                "notes = ? WHERE id = ?",
+                (rule["name"], rule["kind"], rule["find"], int(bool(rule["case"])), rule["scope"], int(enabled),
+                 rule.get("notes", ""), rule_id),
+            )  # fmt: skip
+            if cur.rowcount == 0:
+                raise KeyError(rule_id)
+        self.audit(actor, "rule.update", str(rule_id), {"name": rule["name"], "enabled": enabled})
+
+    def delete_rule(self, rule_id: int, actor: str) -> None:
+        """The rule, and its place in aliases."""
+        with self.tx() as db:
+            row = db.execute("SELECT name FROM answer_rules WHERE id = ?", (rule_id,)).fetchone()
+            if row is None:
+                raise KeyError(rule_id)
+            db.execute("DELETE FROM answer_rules WHERE id = ?", (rule_id,))
+            for alias in db.execute("SELECT id, answer_rules FROM aliases").fetchall():
+                ids = json.loads(alias["answer_rules"] or "[]")
+                if rule_id in ids:
+                    kept = json.dumps([i for i in ids if i != rule_id])
+                    db.execute("UPDATE aliases SET answer_rules = ? WHERE id = ?", (kept, alias["id"]))
+        self.audit(actor, "rule.delete", row["name"])
+
+    def rule_users(self) -> dict[int, list[str]]:
+        """Rule id -> the aliases that use it."""
+        used: dict[int, list[str]] = {}
+        for alias in self.list_aliases():
+            for i in alias.answer_rules:
+                used.setdefault(i, []).append(alias.name)
+        return used
+
+    def add_rule_hits(self, hits: dict[int, tuple[int, float]]) -> None:
+        if not hits:
+            return
+        with self.tx() as db:
+            db.executemany(
+                "UPDATE answer_rules SET hits = hits + ?, last_hit = MAX(COALESCE(last_hit, 0), ?) WHERE id = ?",
+                [(n, at, i) for i, (n, at) in hits.items()],
+            )
 
     # -- prompt edits (app/edits.py) -----------------------------------------------------------
 

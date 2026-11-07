@@ -10,6 +10,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
+from .answer_rules import Rule
 from .config import Bootstrap, ClientKey, Settings, with_group
 from .edits import Edit
 from .names import ModelNames
@@ -53,6 +54,7 @@ class Snapshot:
     # key_hash -> (name, "disabled" / "expired"): named on the Requests page when such a key is refused
     inactive_clients: dict[str, tuple[str, str]] = field(default_factory=dict)
     edits: dict[int, Edit] = field(default_factory=dict)  # prompt edits by id (app/edits.py), with what models made
+    rules: dict[int, Rule] = field(default_factory=dict)  # answer rules by id (app/answer_rules.py)
 
     @property
     def configured(self) -> bool:
@@ -98,6 +100,7 @@ def load_snapshot(store: Store) -> Snapshot:
         names=names,
         inactive_clients=inactive,
         edits={e.id: e for e in store.list_edits()},
+        rules={r.id: r for r in store.list_rules()},
     )
 
 

@@ -31,6 +31,7 @@ from .. import cron as cron_mod
 from .. import jobs as jobs_mod
 from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
+from ..answer_rules import ANSWER_KIND_LABELS, ANSWER_KINDS, DEFAULT_ANSWER_KINDS, RULES_PER_ALIAS
 from ..auth import AuthGuard, client_ip, how_long, ignored_proxy
 from ..backup import MAX_UPLOAD_BYTES, RestoreError, backup_path, list_backups, make_archive, stage_restore
 from ..catalog import make_filter, parse_filter
@@ -73,7 +74,7 @@ from ..store import ROLES, Store
 from ..thinking import EFFORTS as THINKING_EFFORTS
 from ..upstream import UA_MODES
 from ..websearch import PROVIDERS as SEARCH_PROVIDERS
-from . import edit_routes, periods
+from . import edit_routes, periods, rule_routes
 from .charts import lines, usage_charts
 from .security import (
     AdminSession,
@@ -101,6 +102,9 @@ ALIAS_ERRORS = {  # what was wrong in the alias editor
     "council_members": "A council needs 1 to 64 members.",
     "check": "Checking answers needs instructions and at least one fallback model (a failed answer goes to the "
     "next model).",
+    "answer_rules": f"Answer rules need at least one fallback model (a failed answer goes to the next model), and "
+    f"an alias takes up to {RULES_PER_ALIAS} of them.",
+    "check_kinds": "Tick at least one kind of answer for the check to read.",
     "council_search_max": "Searches per member: 1 to 10.",
     "council_search_results": "Results per search: 1 to 10.",
     "orch_rounds": "Orchestrator rounds: 1 to 30.",
@@ -2014,10 +2018,21 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             raise ValueError("check")
         if check_answers and not (check_instructions and fallbacks):
             raise ValueError("check")
+        answer_rules = rule_routes.rule_ids(form, store)
+        if answer_rules and not fallbacks:
+            raise ValueError("answer_rules")
+        # unticked boxes aren't sent: "kinds" says the editor showed them (a form without them keeps the default)
+        check_kinds = tuple(k for k in ANSWER_KINDS if form.get(f"kind_{k}") == "on")
+        if "kinds" not in form:
+            check_kinds = check_kinds or DEFAULT_ANSWER_KINDS
+        elif (answer_rules or check_answers) and not check_kinds:
+            raise ValueError("check_kinds")
         edits = edit_routes.edit_ids(form, store)
         return {
             "edits": edits,
             "label": label,
+            "answer_rules": answer_rules,
+            "check_kinds": check_kinds or DEFAULT_ANSWER_KINDS,
             "target_model": target,
             "upstream_ids": upstream_ids,
             "notes": str(form.get("notes", ""))[:300],
@@ -2083,6 +2098,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             check_model=str(form.get("check_model", "")).strip(),
             check_instructions=str(form.get("check_instructions", "")),
             edits=items("edits"),
+            answer_rules=items("answer_rules"),
+            check_kinds=tuple(k for k in ANSWER_KINDS if form.get(f"kind_{k}") == "on"),
             enabled=form.get("enabled") == "on" if existing else True,
         )
 
@@ -2102,6 +2119,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             upstreams=store.list_upstreams(),
             choices=ctx.model_choices(),
             edit_choices=edit_routes.edit_choices(store),
+            rule_choices=rule_routes.rule_choices(store),
+            answer_kinds=ANSWER_KINDS,
+            answer_kind_labels=ANSWER_KIND_LABELS,
             search_on=store.get_tunables().get("search_provider", "off") not in ("", "off"),
         )
 
@@ -2125,7 +2145,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             council_members=[], council_judge="", council_when="planning", council_instructions="",
             council_search=False, council_search_max=3, council_search_results=5, council_fetch=False,
             orch_rounds=6, orch_tasks=8, orch_seconds=300, council_roles="", check_answers=False, check_model="",
-            check_instructions="", edits=(), enabled=True,
+            check_instructions="", edits=(), enabled=True, answer_rules=(), check_kinds=DEFAULT_ANSWER_KINDS,
         )  # fmt: skip
         return alias_page(request, session, empty)
 
@@ -2181,11 +2201,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 
     # -- prompt edits (app/admin/edit_routes.py) -------------------------------------------------------------------
 
-    edit_routes.mount_edit_pages(
-        app,
-        store,
-        edit_routes.Helpers(page, require, require_post, back, ctx.reload, ctx.model_choices, ctx.model_label),
-    )
+    helpers = edit_routes.Helpers(page, require, require_post, back, ctx.reload, ctx.model_choices, ctx.model_label)
+    edit_routes.mount_edit_pages(app, store, helpers)
+    rule_routes.mount_rule_pages(app, store, helpers)
 
     # -- playground ----------------------------------------------------------------------
 

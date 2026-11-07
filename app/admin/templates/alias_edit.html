@@ -10,6 +10,7 @@ reorder where order matters. A name no provider lists can be typed and added wit
 the same model, it is also listed as <code>model@provider</code>: that choice is only sent to that provider.</p>
 <script type="application/json" id="model-choices">{{ choices | tojson }}</script>
 <script type="application/json" id="edit-choices">{{ edit_choices | tojson }}</script>
+<script type="application/json" id="rule-choices">{{ rule_choices | tojson }}</script>
 
 <form method="post" action="{% if new %}/admin/aliases{% else %}/admin/aliases/{{ a.id }}{% endif %}" class="alias-editor">
   <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -56,16 +57,31 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
 
   <fieldset class="card">
     <legend>Answer check</legend>
+    <p class="small muted">An answer from any of this alias's models but the last is checked before the app gets it, in
+    this order: the rules below, the built-in refusal phrases (with the "refused" trigger above), then the checker
+    model if it's on. The first that fails it sends the same request to the next fallback model (needs one), and the
+    Requests page says why. The last model's answer isn't checked: nothing is left to fall back to.</p>
+    <label>Rules, in order {{ picker("answer_rules", a.answer_rules, "multi", "Add an answer rule…", True, "rule-choices", True) }}
+      <small class="muted">Exact text or a pattern (made on the <a href="/admin/rules">Rules</a> page): the first that
+      matches fails the answer. They cost nothing and take no time. When they all look at the start of the answer and
+      the checker model is off, only that start is held back before the answer streams on.</small></label>
+    <fieldset class="plain"><legend class="small muted">What it reads</legend>
+      <input type="hidden" name="kinds" value="shown">
+      <div class="row wrap">{% for k in answer_kinds %}
+        <label class="check"><input type="checkbox" name="kind_{{ k }}" {% if k in a.check_kinds %}checked{% endif %}> {{ answer_kind_labels[k] }}</label>
+      {% endfor %}</div>
+      <small class="muted">An answer of a kind that isn't ticked passes on as it comes. An answer that calls tools is read
+      with its calls, as <code>[tool call] name(arguments)</code>; in an agent most steps are such answers, so each
+      would wait for the check (and for a checker model, pay for one more request). A refusal some providers put in a
+      field of its own counts as the answer's text.</small></fieldset>
     <label class="check"><input type="checkbox" name="check_answers" {% if a.check_answers %}checked{% endif %}>
-      A checker model reads each plain-text answer before the app gets it</label>
+      A checker model reads the answer too</label>
     <label>Checker model {{ picker("check_model", a.check_model, "single", "blank = the target model") }}
       <small class="muted">Prefer a small, fast model, ideally on another provider (it uses a slot).</small></label>
     <label>Instructions <textarea name="check_instructions" rows="4" maxlength="4000" placeholder="e.g. Fail the answer if it refuses, lectures, or doesn't do what was asked. Fail it if it isn't in the user's language.">{{ a.check_instructions }}</textarea>
       <small class="muted">The checker sees these, the user's last message and the answer, not the rest of the
-      conversation, and answers PASS or FAIL with a reason. FAIL: the same request goes to the next fallback model
-      (needs one), and the Requests page says why. Answers that call tools aren't checked, nor is the last model's
-      answer (nothing is left to fall back to). A checked answer reaches the app all at once once it's checked, not
-      word by word; if the checker fails or takes over two minutes, the answer goes through.</small></label>
+      conversation, and answers PASS or FAIL with a reason. A checked answer reaches the app all at once once it's
+      checked, not word by word; if the checker fails or takes over two minutes, the answer goes through.</small></label>
   </fieldset>
 
   <fieldset class="card">

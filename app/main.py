@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 from . import (
     __version__,
     answer_check,
+    answer_rules,
     anthropic_api,
     claude,
     content_log,
@@ -59,7 +60,7 @@ from .circuit import Circuits
 from .compaction import Plans
 from .compaction import compact as compact_request
 from .config import PRIORITIES, Bootstrap, ClientKey, ClientPolicy, Settings
-from .fallback import Replay, hold_answer, is_policy_error, is_refusal_text, message_text, sniff_stream
+from .fallback import Replay, answer_of, hold_answer, is_policy_error, is_refusal, sniff_stream
 from .limits import OVERFLOW_STATUS, ModelLimits, error_message, output_limit_of, overflow_body, overflow_of
 from .names import EVERY, SEPARATOR, PublicIds, providers, public_ids
 from .opencode import (
@@ -309,11 +310,19 @@ class Admission:
 
 @dataclass(frozen=True)
 class Check:
-    """An alias's answer check: who checks, how, and as which client (the check is made as that client)."""
+    """An alias's answer check: its rules (app/answer_rules.py), then its checker model if it has one (who checks, how,
+    and as which client: the check is made as that client), and which answers it reads."""
 
-    model: str
+    model: str | None  # None: rules only
     instructions: str
     client: ClientKey
+    rules: tuple[answer_rules.Rule, ...] = ()
+    kinds: tuple[str, ...] = answer_rules.DEFAULT_ANSWER_KINDS
+
+    @property
+    def whole(self) -> bool:
+        """It reads whole answers (a checker, or a rule that looks anywhere); else only their start."""
+        return self.model is not None or any(rule.whole for rule in self.rules)
 
 
 @dataclass(frozen=True)
@@ -548,6 +557,7 @@ def create_app(
             set_seen=store.set_made_seen,
         )
     )
+    rule_hits: dict[int, tuple[int, float]] = {}  # answer rule id -> (answers it failed, when last), till written
 
     def summary() -> dict:
         s = snapshot.settings
@@ -709,6 +719,13 @@ def create_app(
                 await asyncio.to_thread(store.add_edit_hits, hits)
             except Exception as exc:
                 log.error(json.dumps({"event": "edit_hits_write_failed", "error": repr(exc)[:200]}))
+        if rule_hits:  # how often each answer rule failed an answer (Rules page)
+            taken = dict(rule_hits)
+            rule_hits.clear()
+            try:
+                await asyncio.to_thread(store.add_rule_hits, taken)
+            except Exception as exc:
+                log.error(json.dumps({"event": "rule_hits_write_failed", "error": repr(exc)[:200]}))
 
     def restore_rate_windows() -> None:
         """After a restart, rebuild the last 24 h of rate-limit windows from the request log."""
@@ -2099,7 +2116,7 @@ def create_app(
                                     refused, replay = await sniff_stream(response)
                                 else:
                                     content = await response.aread()
-                                    refused = is_refusal_text(*message_text(content))
+                                    refused = is_refusal(answer_of(content))
                                     replay = Replay(response, content, complete=True)
                                 held = None
                                 if refused:
@@ -2124,11 +2141,14 @@ def create_app(
     async def check_answer(
         adm: Admission, step: Step, got: Got, events: AsyncIterator, triggers: frozenset[str]
     ) -> AsyncIterator[Checking | tuple[Got | None, str]]:
-        """An alias's answer check (app/answer_check.py): the answer is held back whole while it comes, then its
-        checker reads it. Yields ``Checking`` while waiting, then (the ``Got`` to pass on, "") or (None, why it
-        failed: the next model's turn). An answer that calls tools, or that still runs when the key's time is up,
-        is passed on at once, unchecked. Once all of it is read, ``events`` (the attempt) is closed so its slot is
-        free meanwhile, for the checker's request too."""
+        """An alias's answer check: its rules (app/answer_rules.py), the built-in refusal phrases, then its checker
+        model (app/answer_check.py). The answer is held back while it comes, whole, or only its start when that's
+        all its rules read (the rest then streams on). Yields ``Checking`` while waiting, then (the ``Got`` to pass
+        on, "") or (None, why it failed: the next model's turn). An answer of a kind it doesn't read (one that calls
+        tools, unless ticked), or that still runs when the key's time is up, is passed on at once, unchecked. Once
+        all of it is read, ``events`` (the attempt) is closed so its slot is free meanwhile, for the checker's
+        request too."""
+        check = adm.check
         stream = bool(adm.rlog.fields["stream"])
         timed = UsageSniffer() if stream else None  # the answer's real times, as it comes (the app sees it later)
         held = None
@@ -2139,6 +2159,8 @@ def create_app(
                 keepalive_s(),
                 adm.deadline,
                 (lambda chunk: timed.feed(chunk, time.monotonic())) if timed else None,
+                tools="tools" in check.kinds,
+                start=None if check.whole else answer_rules.START_CHARS,
             )
             async with contextlib.aclosing(reads) as items:
                 async for item in items:
@@ -2154,20 +2176,35 @@ def create_app(
             return
         replay = held.replay
         replay.sniffer = timed
-        if held.acting or not held.whole:
-            if not held.acting:
-                add_note(adm.rlog, "answer_check", f"{step.model}: not checked (no time left)")
+        answer = held.answer
+        if answer.kind not in check.kinds:  # e.g. it calls tools, not ticked: passed on as it comes
             yield Got(replay, got.target), ""
             return
-        await events.aclose()  # all of it is read: the slot is free
+        if check.whole and not held.whole:
+            add_note(adm.rlog, "answer_check", f"{step.model}: not checked (no time left)")
+            yield Got(replay, got.target), ""
+            return
+        if held.whole:
+            await events.aclose()  # all of it is read: the slot is free
         answered = time.monotonic()
         try:
-            if "refused" in triggers and is_refusal_text(held.text, held.finish):
+            shown = answer.shown()
+            if rule := answer_rules.first_match(check.rules, shown):
+                count, _ = rule_hits.get(rule.id, (0, 0.0))
+                rule_hits[rule.id] = (count + 1, time.time())  # for the Rules page
+                add_note(adm.rlog, "answer_check", f"{step.model}: rule '{rule.name}' matched")
+                note_discarded(adm, step, held, timed, answered, "failed answer rule", f"rule: {rule.name}")
+                await replay.aclose()
+                yield None, f"rule: {rule.name}"
+                return
+            if "refused" in triggers and is_refusal(answer):
                 note_discarded(adm, step, held, timed, answered, "refused")
                 await replay.aclose()
                 yield None, "refused"
                 return
-            check = adm.check
+            if check.model is None:  # rules only, and they passed it
+                yield Got(replay, got.target), ""
+                return
             limit = answer_check.TIMEOUT_S
             if adm.deadline is not None:
                 limit = min(limit, adm.deadline - answered)
@@ -2177,7 +2214,7 @@ def create_app(
                 return
             adm.rlog.fields["stage"] = "checking"
             yield Checking(f"checking the answer of {step.model}")
-            payload = answer_check.check_payload(check.model, check.instructions, step.body, held.text)
+            payload = answer_check.check_payload(check.model, check.instructions, step.body, shown)
             task = asyncio.ensure_future(
                 internal_completion(
                     check.client,
@@ -4366,9 +4403,12 @@ def create_app(
             triggers = frozenset()
         more = len(entries) > 1 or hop is not None  # something to move on to
         check = None  # the alias's answer check: chat completions from apps (not QueueRouter's own requests)
-        if alias and alias.check_answers and more and alias.check_instructions.strip():
-            if not internal and path == "chat/completions" and isinstance(payload, dict):
-                check = Check(alias.check_model or alias.target_model, alias.check_instructions, client)
+        if alias and more and not internal and path == "chat/completions" and isinstance(payload, dict):
+            rules = tuple(r for i in alias.answer_rules if (r := snapshot.rules.get(i)) is not None and r.enabled)
+            checker = alias.check_answers and alias.check_instructions.strip()
+            if rules or checker:
+                model = (alias.check_model or alias.target_model) if checker else None
+                check = Check(model, alias.check_instructions, client, rules, alias.check_kinds)
         param_changes = []
         strip_usage = False  # usage asked for here, not by the app: its chunk is left out of the app's stream
         if isinstance(payload, dict):

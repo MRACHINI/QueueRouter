@@ -1967,6 +1967,28 @@ v0.73.0: an alias's display name, and renaming an alias in place.
   rename. The request log keeps the name each request asked for; usage is counted by the real model, so it needs
   nothing. Apps set to the old name by hand get 404 (opencode gets the new name with its model list).
 
+v0.74.0: answer rules, what an alias's answer check reads, and the refusal field.
+- Asked for: choosing what the checker reads (tool calls too), and a "dumb" check by exact text or pattern, several
+  in order, the first match refusing the answer.
+- Answer rules (app/answer_rules.py, table `answer_rules`, migration 44): made on the Rules page, attached in order
+  to aliases (`aliases.answer_rules`, ids). Kinds: contains, starts with, pattern (the `regex` module, MULTILINE,
+  0.25 s limit: a slower pattern is no match); match case or not (not: ' and ’ the same too); where: at the start
+  (the first `START_CHARS`, 400, characters) or anywhere. An alias's check runs its rules first (the first match
+  fails the answer: the Requests page's fallback says "rule: <name>", the discarded answer is a row "failed answer
+  rule", and the rule's count and last time show on the Rules page), then the built-in refusal phrases (with the
+  "refused" trigger), then its checker model, which is now optional. Rules need a fallback; the last model's answer
+  isn't checked. Try it runs the rules on a pasted answer, as an alias would or all of them.
+- How much is held back: the whole answer when there's a checker model or a rule that looks anywhere (as before);
+  else only its start (`hold_answer(start=...)`, until 400 characters came or it ended), then the rest streams on.
+- What the check reads (`aliases.check_kinds`): text answers, answers that call tools, empty answers (no text, no
+  calls: only thinking, or stopped by a filter); default text and empty, as before. An answer of a kind not ticked
+  passes on as it comes; one that calls tools, when ticked, is read whole with its calls (`[tool call]
+  name(arguments)`; the checker is told what such a line is). One `Answer` / `AnswerReader` (app/fallback.py) reads
+  text, the `refusal` field, and tool calls (pieces by index, legacy function_call) from replies and streams.
+- The `refusal` field (OpenAI's structured outputs, some providers): its text counts as the answer's for rules and
+  the checker, and the built-in refusal check (`is_refusal`) treats it as a refusal; before, such an answer read as
+  empty.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

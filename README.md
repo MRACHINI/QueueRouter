@@ -38,14 +38,22 @@ from a **web admin UI**.
   keeps failing, can't fit the prompt, or (opt-in) refuses — detected from content-policy errors,
   `finish_reason: content_filter` or a reply opening with a refusal. The request is resent
   unchanged.
-- **Answer checks** (opt-in per alias): a checker model you pick reads each plain-text answer
-  before the app gets it, with your instructions, the user's last message and the answer (not the
-  rest of the conversation), quoted as text to judge, never as instructions to follow, and replies
-  PASS or FAIL with a reason. A failed answer never reaches
-  the app: the same request goes to the alias's next model, and the Requests page says why (the
-  discarded answer and the check are rows of their own, so their cost counts). Answers that call
-  tools, and the last model's, aren't checked; a checked answer arrives whole once it passes, not
-  word by word. A checker that fails or takes over two minutes lets the answer through.
+- **Answer checks** (opt-in per alias), in order, the first that fails an answer deciding:
+  - *answer rules* (Rules page): exact text (contains, starts with) or a pattern, made once and attached in order
+    to aliases; looking at the start of the answer (only that much is held back before it streams on) or
+    anywhere in it (the whole answer is held back). They cost nothing. **Try it** shows which rule a pasted
+    answer hits;
+  - the built-in refusal phrases (the "refused" trigger), which also catch a refusal a provider puts in a field
+    of its own;
+  - a checker model you pick, which reads the answer with your instructions and the user's last message (not
+    the rest of the conversation), quoted as text to judge, never as instructions to follow, and replies PASS or
+    FAIL with a reason. A checked answer arrives whole once it passes; a checker that fails or takes over two
+    minutes lets the answer through.
+
+  A failed answer never reaches the app: the same request goes to the alias's next model, and the Requests page
+  says why (the discarded answer and the check are rows of their own, so their cost counts). Each alias picks what
+  its check reads: text answers, answers that call tools (read with their calls, as `[tool call]
+  name(arguments)`), empty answers. The last model's answer isn't checked.
 - **Prompt edits** (Edits page): changes to the system prompt of requests before they reach the model, made
   once and attached in order to aliases, client groups and clients (an alias's run first, then the group's, then
   the client's). They touch the app's system and developer messages only. Kinds: *text* (find and replace, or

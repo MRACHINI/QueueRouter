@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Answer rules{% endblock %}
+{% block content %}
+<h1>Answer rules</h1>
+<p class="muted small">Checks of an alias's answers by exact text or a pattern, for refusals or anything else you don't
+want to pass on. Make a rule here, then attach rules in order to aliases (alias editor, Answer check). An alias tries
+its rules first, then the built-in refusal phrases (its "refused" trigger), then its checker model if it has one: the
+first rule that matches fails the answer, and the same request goes to the alias's next model. Rules cost nothing and
+take no time; the last model's answer isn't checked (nothing is left to fall back to).</p>
+
+<p><a class="button" href="/admin/rules/new">Add rule</a></p>
+
+{% if rules %}
+<div class="table-wrap">
+<table class="cards">
+  <thead><tr><th>Name</th><th>Looks for</th><th>Used by</th><th class="num">Failed</th><th>Last</th></tr></thead>
+  <tbody>
+  {% for r in rules %}
+  <tr>
+    <td data-label="Name"><a href="/admin/rules/{{ r.id }}">{{ r.name }}</a>{% if not r.enabled %} <span class="badge">off</span>{% endif %}
+      {% if r.notes %}<div class="small muted">{{ r.notes }}</div>{% endif %}</td>
+    <td data-label="Looks for" class="small wrap-any">{{ r.summary() }}</td>
+    <td data-label="Used by" class="small">{% if users.get(r.id) %}{{ users[r.id] | join(", ") }}{% else %}<span class="muted">nothing yet</span>{% endif %}</td>
+    <td data-label="Failed" class="num">{{ "{:,}".format(r.hits) }}</td>
+    <td data-label="Last" class="small">{% if r.last_hit %}<time data-ts="{{ r.last_hit }}">{{ r.last_hit | int }}</time>{% else %}<span class="muted">—</span>{% endif %}
+      {% if r.enabled and users.get(r.id) and (r.last_hit or r.created_at) < quiet_before %} <span class="badge" title="It hasn't failed an answer for 30 days">quiet</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="small muted">Failed: how many answers it failed (the request then went to the alias's next model).</p>
+{% else %}
+<p class="muted">No rules yet.</p>
+{% endif %}
+
+<section class="card" id="try">
+  <h2>Try it</h2>
+  <p class="small muted">Paste an answer: see which rules match it, and the first, which fails it. As an alias tries
+  them (its rules, in its order), or all of them. The answer is read as a check reads it: a rule at the start sees its
+  first {{ start_chars }} characters.</p>
+  <form method="post" action="/admin/rules/try#try" class="alias-editor">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Answer <textarea name="answer" rows="5" placeholder="e.g. I'm sorry, but I can't help with that.">{{ tried.answer if tried else "" }}</textarea></label>
+    <label>As <select name="alias">
+      <option value="">every rule</option>
+      {% for a in aliases %}<option value="{{ a.name }}" {% if tried and tried.alias == a.name %}selected{% endif %}>alias {{ a.name }}</option>{% endfor %}
+    </select></label>
+    <div class="row"><button type="submit" class="secondary">Try</button></div>
+  </form>
+  {% if tried %}
+  <p class="notice {% if tried.first %}err{% else %}ok{% endif %}">{% if tried.first %}Fails the answer: <strong>{{ tried.first }}</strong>.{% else %}No rule matches: the answer would go on (to the built-in phrases and the checker, if the alias has them).{% endif %}</p>
+  {% if tried.rows %}
+  <ul class="small">
+    {% for row in tried.rows %}<li>{{ row.rule.name }}: {% if not row.rule.enabled %}<span class="muted">off</span>{% elif row.match %}<strong>matches</strong>{% else %}<span class="muted">no match</span>{% endif %}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% endif %}
+</section>
+{% endblock %}

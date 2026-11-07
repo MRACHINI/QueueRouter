@@ -28,6 +28,7 @@
       <a href="/admin/upstreams" {% if path.startswith("/admin/upstreams") %}aria-current="page"{% endif %}>Upstreams</a>
       <a href="/admin/models" {% if path == "/admin/models" %}aria-current="page"{% endif %}>Models</a>
       <a href="/admin/edits" {% if path.startswith("/admin/edits") %}aria-current="page"{% endif %}>Edits</a>
+      <a href="/admin/rules" {% if path.startswith("/admin/rules") %}aria-current="page"{% endif %}>Rules</a>
       <a href="/admin/settings" {% if path == "/admin/settings" %}aria-current="page"{% endif %}>Settings</a>
       <a href="/admin/audit" {% if path == "/admin/audit" %}aria-current="page"{% endif %}>Audit</a>
       {% if user.can("owner") %}<a href="/admin/backup" {% if path == "/admin/backup" %}aria-current="page"{% endif %}>Backup</a>{% endif %}
