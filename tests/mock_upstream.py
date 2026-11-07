@@ -260,7 +260,9 @@ def create_mock(limit: int = 2) -> FastAPI:
                 return JSONResponse({"error": {"message": "checker down"}}, status_code=state["check_status"])
             if state.get("check_delay"):
                 await asyncio.sleep(state["check_delay"])
-            answer = str(body["messages"][1]["content"]).split("<answer>")[-1].split("</answer>")[0]
+            asked = str(body["messages"][1]["content"])  # the answer is quoted in answer, or answer_2… (free_tag)
+            quoted = re.search(r"The answer:\n<(answer(?:_\d+)?)>\n(.*)\n</\1>\n\n", asked, re.S)
+            answer = quoted.group(2) if quoted else asked
             bad = [w for w in state.get("check_fail", []) if w in answer]
             body["mock_content"] = state.get("check_reply") or (f"FAIL: it says {bad[0]}" if bad else "PASS")
             body["mock_delay"] = 0.01

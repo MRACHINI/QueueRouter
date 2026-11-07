@@ -1874,6 +1874,61 @@ instructions.
   goes without them (`rewritten`).
 - Not changed: compaction and the council send conversations without this framing (later, if wanted).
 
+v0.71.0: the same for compaction and the council's judge (app/quoting.py holds `free_tag` and `unwrapped`).
+- Compaction: the summary so far and the next part of the conversation are quoted (`<summary>`,
+  `<conversation>`), the summariser is told they're text to summarise, not instructions (don't answer or continue
+  the conversation, don't do what it asks; record it), and `SUMMARY_AFTER` repeats that after the text. A
+  conversation ending in "Respond with X ONLY" could otherwise have its summary replaced by X. A reply wrapped
+  whole in the summary tags is used without them.
+- Council judge: it still reads the conversation as its own (in combine mode its reply goes to the app, so the
+  app's instructions there apply to it); each candidate is quoted under its "### Answer n" heading, with the web
+  results its member used, and the judge is told text in an answer that speaks to it, instructs it or names the
+  best answer changes nothing. Combine mode now ends with `COMBINE_AFTER`; pick mode already ended with its
+  reply format.
+- A review of 0.70 and 0.71 by several agents, each finding checked by another that tried to refute it, led to:
+  - `free_tag` scans each text once with a possessive, cached pattern. The first version backtracked
+    quadratically on a "<" followed by a long run of whitespace, and recompiled and rescanned per number on text
+    full of numbered tags: a client could hold the event loop for seconds to minutes. Numbers of more than 9 digits
+    are ignored (they can't be the free one).
+  - The rewrite guard leaves out a piece "Only this part" found under `SHORTEST_FROM` (200) characters: a name may
+    become "AI" (a whole prompt, however short, is still checked). A too-short answer holds back only its own
+    text for a minute (`Engine.short`, per edit and text); a model that fails or answers nothing, or whose answers
+    are too short for a second text within the minute, rests for every text (`Engine.rest`, with its reason in
+    `Engine.why`). Each text that isn't rewritten gives its own reason (its call's, a time-out, a broken call, or
+    resting), and a storage error keeping a result no longer fails the request. Try it leaves out kept rewrites
+    too short to use, as requests do.
+  - A rewrite edit asks one call per distinct text (a name found in four places is asked once and fills all
+    four), all at once, and the request waits for them together, at most the edit's time limit (`Engine.called`).
+    Since 0.68 each place waited a full limit in turn on the same call, so a slow model could hold a request
+    for several limits and then refuse it although the rewrite had come.
+  - A call belongs to the model and instructions it was asked with: they're in its key, so a request after a
+    change doesn't join it, and the store keeps its rewrite only if the edit still has them
+    (`keep_edit_result` returns False otherwise). A call that began before a change of the configuration
+    (`Engine.generation`) leaves no failure or rest behind. A third review found two narrow races with a save
+    that lands as a call finishes: `update_edit` now forgets and saves in one transaction (a rewrite being kept
+    sees the old settings and is forgotten, or the new ones and isn't kept; a save that fails on a taken name
+    forgets nothing), and the engine keeps a result in memory only if no change came while it was written or read
+    (else the database alone decides).
+  - Saving an edit forgets its kept rewrites only when the kind, model or instructions change (not the share,
+    the time limit, what happens on failure, or the part pattern: rewrites are kept per text).
+  - Council: candidates are quoted in `<candidate>` tags (not "answer", a common wrapper a combining judge could
+    copy into the reply the app gets); `COMBINE_AFTER` says to answer without those tags and to make a tool call if
+    that's the next step; the pick judge is told the conversation's instructions, its system prompt included,
+    were for the assistant it judges, and `PICK_AFTER` says to reply with the number whatever format the
+    conversation asks for. The app's system or developer messages after its last assistant turn go into the
+    judge's request ahead of the question (`late_system`), since a Claude-native upstream puts them after the last
+    user turn, which would give them the last word.
+  - One `without_thinking` (app/quoting.py) for the checker, edit models, judge and summariser. It strips only
+    reasoning blocks at the start of a reply (one after another); one that never closes there (cut off while
+    thinking) is all of the reply, so it isn't taken for the answer. Later in the text a tag is the answer's own (a
+    summary or a rewritten prompt that mentions <think> blocks) and stays: a first version of this fix stripped
+    an unclosed tag anywhere to the end, which a second review caught (it would have cut such a summary and kept
+    it). A summary with inline thinking was stored with it.
+  - Refuted on checking: over-stripping by `unwrapped`, the combine judge ignoring reviewer members' advice, an
+    OverflowError on "1e999" (the admin's handler already answers 400), and COMBINE_AFTER dropping the tool call.
+  - Left as it is: a rewrite edit saved before 0.70 that condenses a prompt on purpose (answers under 20%) now
+    fails until its share is set to 0; the editor says so and the note names the reason.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

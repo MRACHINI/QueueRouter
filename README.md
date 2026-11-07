@@ -49,8 +49,8 @@ from a **web admin UI**.
   delete), *pattern* (a regular expression, for parts that change between requests), *add* (before or after the
   prompt, instead of it, or only when there is none), *model: rewrite* (a model you pick rewrites the prompt, or
   only the parts a pattern finds, by your instructions; its result is kept, so a text is rewritten once, and an
-  answer far shorter than the text, like a model replying to the prompt instead of rewriting it, counts as a
-  failure) and
+  answer far shorter than its text, like a model replying to the prompt instead of rewriting it, counts as a
+  failure; a short piece "Only this part" found, like a name, may become anything) and
   *model: make edits* (a model reads the prompt by paragraph and makes text and pattern edits of its own, listed
   under it to change, turn off, delete or approve, each shown with the text before and after where it was found;
   it reads only paragraphs it hasn't read, and marks parts that change between requests, like a date, so they
@@ -98,7 +98,8 @@ from a **web admin UI**.
   last turns are always kept; the same cut is reused while it fits, so provider prompt caching keeps
   working. Shown on the Requests page ("compacted: trim 180k -> 95k").
   **Summarise** mode replaces the old part with a summary written by a model you choose (any size: long
-  histories are read in parts, each building on the summary so far); the summary is kept per conversation
+  histories are read in parts, each building on the summary so far; the conversation is quoted to it as text to
+  summarise, so requests in it are recorded, not followed); the summary is kept per conversation
   (in memory, or saved encrypted) and extended rather than rewritten, and updated in the background when a
   conversation near its limit goes quiet. An alias can also tell apps a bigger context than the model has
   (e.g. 1M), so opencode keeps the whole conversation while each request is fitted to the real model.
@@ -106,7 +107,8 @@ from a **web admin UI**.
   separately; its plans fill it in), so an indexing burst never makes chat requests wait.
 - **Model council** (per alias): on planning steps (the first step after your message, or opencode's plan
   agent) several models answer at once and a judge either **picks** the best answer or **combines** them into
-  one; tool steps use the alias's model alone. Mix providers so a council doesn't take all of one account's
+  one (each answer is quoted to the judge, so text in an answer can't steer it); tool steps use the alias's
+  model alone. Mix providers so a council doesn't take all of one account's
   slots. Streaming apps get their response at once (keep-alives while members work); the Requests page shows
   "council: pick 2/3: GLM-4.7", and the members' and judge's requests are tagged `#council`.
 - **Web search for council members**: with a search provider set up (Settings > Web search: Tavily, Brave or

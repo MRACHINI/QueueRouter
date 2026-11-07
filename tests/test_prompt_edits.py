@@ -4,6 +4,7 @@ attached to aliases, groups and clients; the Edits pages and the Live tab."""
 import asyncio
 import dataclasses
 import json
+import sqlite3
 import time
 
 import httpx
@@ -219,7 +220,7 @@ def test_diff_segments_and_changes():
 
 
 class FakeKeep:
-    """The engine's database, in memory; ``edit`` is the learn edit as the configuration has it now."""
+    """The engine's database, in memory; ``edit`` is the edit as the configuration has it now."""
 
     def __init__(self, edit):
         self.edit = edit
@@ -237,12 +238,20 @@ class FakeKeep:
         self.seen_hashes.update(hashes)
         return stored
 
+    def keep_result(self, edit_id, key, text, model=None, instructions=None):
+        """As the store does: not kept when the edit's model or instructions changed while it was being made."""
+        now = self.edit.settings
+        if (model, instructions) != (now.get("model"), now.get("instructions")):
+            return False
+        self.results[(edit_id, key)] = text
+        return True
+
     def store(self) -> EditStore:
         return EditStore(
             seen=lambda _id: set(self.seen_hashes),
             add_made=self.add_made,
             result=lambda edit_id, key: self.results.get((edit_id, key)),
-            keep_result=lambda edit_id, key, text: self.results.__setitem__((edit_id, key), text),
+            keep_result=self.keep_result,
             reload=lambda: None,
             set_seen=self.placed.extend,
         )
@@ -336,6 +345,165 @@ async def test_a_rewrite_model_gets_the_prompt_quoted_and_a_reply_too_short_fail
     for wrong in ("abc", "150", "-1"):
         with pytest.raises(EditError):
             clean_settings("rewrite", {"model": "m", "instructions": "x", "shortest": wrong})
+
+
+async def test_a_too_short_answer_holds_back_only_its_own_text():
+    rewrite = made_edit("rewrite", 3, "tone", model="m", instructions="be formal", on_fail="refuse")
+    keep = FakeKeep(rewrite)
+    engine = Engine(keep.store())
+    first, second = "\n\n".join([PROMPT] * 3), "\n\n".join([PROMPT.replace("opencode", "a helper")] * 3)
+    asked = []
+
+    async def ask(edit, messages):
+        text = messages[1]["content"]
+        asked.append(text)
+        if "opencode" in text or "zzz" in text:
+            return "OK."
+        return text.split("\n", 1)[1].rsplit("\n</prompt>", 1)[0].upper()
+
+    outcome = await engine.apply(system(first), [rewrite], ask, record=False)
+    assert "answered 3 characters for" in outcome.refusal
+    messages = system(second)  # another text (another client, a new date) isn't held back by the first one's
+    outcome = await engine.apply(messages, [rewrite], ask, record=False)
+    assert outcome.refusal is None and messages[0]["content"] == second.upper() and len(asked) == 2
+    outcome = await engine.apply(system(first), [rewrite], ask, record=False)  # the first rests, with its own reason
+    assert "its last answer for this text was too short (3 characters for" in outcome.refusal and len(asked) == 2
+    # too short for a second text within the minute: the model isn't rewriting at all, so every text rests
+    third, fourth = ("\n\n".join([PROMPT.replace("opencode", name)] * 3) for name in ("zzz", "qqq"))
+    outcome = await engine.apply(system(third), [rewrite], ask, record=False)
+    assert "answered 3 characters for" in outcome.refusal and len(asked) == 3
+    outcome = await engine.apply(system(fourth), [rewrite], ask, record=False)
+    assert "in the last minute its answers were too short for several texts" in outcome.refusal and len(asked) == 3
+
+    # a short piece "Only this part" found (a name) may become anything; a short whole prompt may not
+    named = made_edit("rewrite", 4, "name", model="m", instructions="Call it AI.", part="Claude Code")
+
+    async def short(edit, messages):
+        return "AI"
+
+    messages = system("You are Claude Code, a CLI.")
+    await Engine(FakeKeep(named).store()).apply(messages, [named], short, record=False)
+    assert messages[0]["content"] == "You are AI, a CLI." and not named.too_short("Claude Code", "AI")
+    assert rewrite.too_short("x" * 150, "Understood.")  # a 150-character prompt answered "Understood."
+
+    # a call that breaks says so, not "took too long"
+    async def broken(edit, messages):
+        raise RuntimeError("boom")
+
+    outcome = await Engine(FakeKeep(rewrite).store()).apply(system(first), [rewrite], broken, record=False)
+    assert "(its model failed)" in outcome.refusal
+
+
+async def test_a_rewrite_waits_once_for_all_its_texts():
+    named = made_edit("rewrite", 4, "name", model="m", instructions="Call it AI.", part="opencode")
+    slow = dataclasses.replace(named, settings={**named.settings, "timeout_s": 0.3})
+    engine = Engine(FakeKeep(slow).store())
+    asked = []
+
+    async def ask(edit, messages):
+        asked.append(1)
+        await asyncio.sleep(0.6)
+        return "AI"
+
+    messages = system()  # "opencode" twice: one text in two places, asked once and waited for once
+    started = time.monotonic()
+    outcome = await engine.apply(messages, [slow], ask, record=False)
+    assert time.monotonic() - started < 0.55 and len(asked) == 1
+    assert messages[0]["content"] == PROMPT and any("took over" in n for n in outcome.notes)
+    assert any("sent without its rewrite (its model took too long)" in n for n in outcome.notes)
+    await asyncio.sleep(0.5)  # it goes on in the background, and its rewrite fills every place next time
+    messages = system()
+    await engine.apply(messages, [slow], ask, record=False)
+    assert messages[0]["content"] == PROMPT.replace("opencode", "AI") and len(asked) == 1
+
+
+async def test_a_rewrite_made_by_old_instructions_isnt_kept():
+    rewrite = made_edit("rewrite", 3, "tone", model="m", instructions="be formal", wait="off")
+    keep = FakeKeep(rewrite)
+    engine = Engine(keep.store())
+    release = asyncio.Event()
+    asked = []
+
+    async def ask(edit, messages):
+        asked.append(edit.settings["instructions"])
+        await release.wait()
+        return f"{edit.settings['instructions'].upper()} {'x' * 400}"
+
+    long = "\n\n".join([PROMPT] * 3)
+    await engine.apply(system(long), [rewrite], ask, record=False)  # its call starts, in the background
+    changed = dataclasses.replace(rewrite, settings={**rewrite.settings, "instructions": "be casual"})
+    keep.edit = changed  # saved on the Edits page while the call runs
+    engine.forget()
+    await engine.apply(system(long), [changed], ask, record=False)  # a call of its own: it doesn't join the old one
+    await asyncio.sleep(0.05)
+    assert asked == ["be formal", "be casual"]
+    release.set()
+    for _ in range(100):
+        if keep.results:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
+    assert list(keep.results.values()) == [f"BE CASUAL {'x' * 400}"]  # the old instructions' rewrite isn't kept
+
+
+def test_try_it_skips_a_kept_rewrite_too_short_to_use():
+    rewrite = made_edit("rewrite", 3, "tone", model="m", instructions="be formal")
+    long = "\n\n".join([PROMPT] * 3)
+    kept = {(3, edits_mod.text_hash(long)): "Sure!"}  # kept by 0.69, before answers were checked
+    outcome = edits_mod.try_edits(long, [rewrite], lambda i, k: kept.get((i, k)), lambda i: set())
+    assert outcome.changed == [] and any("too short to use" in n for n in outcome.notes)
+    assert any("1 text(s) would go to m" in n for n in outcome.notes)
+
+
+def test_saving_an_edit_forgets_kept_rewrites_only_for_a_new_model_or_instructions(tmp_path):
+    from app.store import Store
+
+    store = Store.open(str(tmp_path), None)
+    settings = clean_settings("rewrite", {"model": "m", "instructions": "be formal"})
+    del settings["shortest"]  # saved by 0.69
+    edit_id = store.create_edit("tone", "rewrite", settings, "t")
+    store.keep_edit_result(edit_id, "h", "KEPT")
+    same = clean_settings("rewrite", {"model": "m", "instructions": "be formal", "wait": "off", "shortest": "0"})
+    store.update_edit(edit_id, "t", name="renamed", settings=same)
+    assert store.edit_result(edit_id, "h") == "KEPT"  # a rename, the share or the waiting keep them
+    store.update_edit(edit_id, "t", settings={**same, "instructions": "be casual"})
+    assert store.edit_result(edit_id, "h") is None
+    # a rewrite asked with the old instructions, done after the change, isn't kept
+    assert store.keep_edit_result(edit_id, "h2", "OLD", "m", "be formal") is False
+    assert store.edit_result(edit_id, "h2") is None
+    assert store.keep_edit_result(edit_id, "h2", "NEW", "m", "be casual") is True
+    assert store.edit_result(edit_id, "h2") == "NEW"
+    assert store.keep_edit_result(999, "h", "GONE") is False  # the edit was deleted
+    # forgetting and saving are one transaction: a save that fails (a name already taken) forgets nothing
+    store.create_edit("other", "text", clean_settings("text", {"find": "a", "replace": "b"}), "t")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.update_edit(edit_id, "t", name="other", settings={**same, "instructions": "be terse"})
+    assert store.edit_result(edit_id, "h2") == "NEW"
+    saved = json.loads(store.query("SELECT settings FROM prompt_edits WHERE id = ?", (edit_id,))[0][0])
+    assert saved["instructions"] == "be casual"  # the failed save changed nothing
+
+
+async def test_a_change_while_a_rewrite_is_being_kept_leaves_it_to_the_database():
+    rewrite = made_edit("rewrite", 3, "tone", model="m", instructions="be formal")
+    long = "\n\n".join([PROMPT] * 3)
+    keep = FakeKeep(rewrite)
+    plain = keep.keep_result
+
+    def keep_then_change(*args):
+        kept = plain(*args)
+        engine.forget()  # the Edits page saved something just as it was kept
+        return kept
+
+    keep.keep_result = keep_then_change
+    engine = Engine(keep.store())
+
+    async def ask(edit, messages):
+        return long.upper()
+
+    messages = system(long)
+    await engine.apply(messages, [rewrite], ask, record=False)
+    assert messages[0]["content"] == long.upper()  # this request gets it
+    assert (3, edits_mod.text_hash(long)) not in engine.results and len(keep.results) == 1  # the database decides
 
 
 def test_make_edits_paragraphs_are_quoted():

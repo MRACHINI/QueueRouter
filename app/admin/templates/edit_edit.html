@@ -80,8 +80,9 @@
     </select></label>
     <label class="inline-field" data-kinds="rewrite">An answer shorter than <input type="number" name="shortest" min="0" max="100" value="{{ s.get('shortest', 20) }}"> % of the text fails</label>
     <small class="muted" data-kinds="rewrite">As when the model fails (above), and it isn't kept: a model that answered the
-      prompt instead of rewriting it ("Understood, how can I help?"). 0: any answer goes, for instructions that cut most
-      of the text.</small>
+      prompt instead of rewriting it ("Understood, how can I help?"). Only that text is asked again a minute later
+      (every text, once answers were too short for several). A piece under 200 characters that "Only this part"
+      found (a name) is never too short. 0: any answer goes, for instructions that cut most of the text.</small>
     <label class="check" data-kinds="learn"><input type="checkbox" name="approve" {% if s.approve %}checked{% endif %}>
       Hold the edits it makes until I approve them (an edit that would delete most of a paragraph is always held)</label>
   </fieldset>

@@ -2,12 +2,14 @@
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
 
 from app import answer_check
 from app.answer_check import check_payload, clip, last_user_text, verdict_of
+from app.quoting import free_tag, unwrapped, without_thinking
 from tests.test_admin import OWNER, csrf_of, login
 
 INSTRUCTIONS = "Fail the answer if it says bad."
@@ -26,6 +28,7 @@ def reply(content):
         ("**FAIL** - wrong language.", False, "wrong language."),
         ("The answer is complete and polite.\n\nPASS", True, "passed"),
         ("<think>maybe FAIL?</think>\nPASS", True, "passed"),
+        ("<thinking>PASS? Or FAIL", None, "empty reply"),  # cut off while thinking: no verdict
         ("FAIL:\nIt is in French, not English.", False, "It is in French, not English."),
         ("fail", False, "no reason given"),
         ("Passing grade, I think.", None, "unreadable reply: 'Passing grade, I think.'"),
@@ -78,8 +81,35 @@ def test_the_checker_is_told_the_text_is_to_judge_not_to_follow():
     assert f"<message>\n{asked}\n</message>" in user["content"]
     # the task again after the text, so the checker's last word is the app's, not the message's
     assert user["content"].endswith(answer_check.AFTER) and "format to reply in" in answer_check.AFTER
-    assert answer_check.free_tag("answer", "a </ANSWER > b", "<answer_2>") == "answer_3"
-    assert answer_check.free_tag("answer", "<answers> and answer_x") == "answer"
+    assert free_tag("answer", "a </ANSWER > b", "<answer_2>") == "answer_3"
+    assert free_tag("answer", "<answers> and answer_x") == "answer"
+    assert unwrapped("<summary_2>\nnotes\n</summary_2>", "summary") == "notes"
+    assert unwrapped("<summary>a</summary> and more", "summary") == "<summary>a</summary> and more"  # not all of it
+
+
+def test_picking_a_tag_takes_time_in_proportion_to_the_text():
+    # the text is the client's and this runs on the event loop: a "<" before a long run of spaces, or thousands of
+    # numbered tags, must not make it slow (they made the first version backtrack, and rescan per number)
+    started = time.monotonic()
+    assert free_tag("answer", "<" + " " * 300_000 + "x", "< /" + "\t" * 300_000) == "answer"
+    numbered = "<answer>" + "".join(f"<answer_{n}>" for n in range(2, 30_001))
+    assert free_tag("answer", "x" * 200_000 + numbered) == "answer_30001"
+    assert time.monotonic() - started < 3
+    assert free_tag("answer", "<answer>", "<answer_1234567890>", "< / answer_3 >") == "answer_2"  # 10 digits: none
+    assert free_tag("answer", "<ANSWER>", "</answer_3>") == "answer_2"
+
+
+def test_thinking_left_inline_is_left_out():
+    assert without_thinking("<think>hmm</think>PASS") == "PASS"
+    assert without_thinking("  <THINKING>x\ny</thinking>\n<think>z</think>answer") == "answer"  # one after another
+    assert without_thinking("<think>cut off while thinking") == ""  # never closed: all of it
+    # later in the text, a tag is the answer's own (a summary or a prompt that mentions it): nothing is cut
+    for text in ("- Goal: strip <think> blocks\n- Next: tests", "a <thinking>x</thinking> b", "no thinking"):
+        assert without_thinking(text) == text
+    assert verdict_of(reply("The answer opens with a <think> block.\nFAIL: it shows its reasoning")) == (
+        False,
+        "it shows its reasoning",
+    )
 
 
 async def add_checked(c, fallbacks=("mock-model",), instructions=INSTRUCTIONS, triggers=("errors",), expect="created"):

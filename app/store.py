@@ -1956,17 +1956,31 @@ class Store:
         return cur.lastrowid
 
     def update_edit(self, edit_id: int, actor: str, **fields: object) -> None:
-        """Changed settings (or kind) forget the kept rewrites: they were made by the old instructions."""
+        """A change to what shapes a rewrite (kind, model, instructions) forgets the kept rewrites: they were made
+        by the old ones. Other settings keep them (the time limit, what happens on failure, the shortest share,
+        which is checked when a kept rewrite is used, and "only this part": rewrites are kept per text).
+        Forgetting and saving are one transaction: a rewrite being kept meanwhile (keep_edit_result) sees either
+        the old settings, and is then forgotten, or the new ones, and isn't kept; a save that fails (a name
+        already taken) forgets nothing."""
+        bad = set(fields) - {"name", "kind", "state", "settings", "notes"}
+        if bad:
+            raise ValueError(f"cannot update {', '.join(sorted(bad))}")
+        settings = fields.get("settings")
         if "settings" in fields:
-            fields["settings"] = json.dumps(fields["settings"], ensure_ascii=False)
+            fields["settings"] = json.dumps(settings, ensure_ascii=False)
         with self.tx() as db:
             row = db.execute("SELECT settings, kind FROM prompt_edits WHERE id = ?", (edit_id,)).fetchone()
             if row is None:
                 raise KeyError(edit_id)
-            changed = any(fields.get(k, row[k]) != row[k] for k in ("settings", "kind"))
-            if changed:
+            old = json.loads(row["settings"] or "{}")
+            new = settings if isinstance(settings, dict) else old
+            shaped = fields.get("kind", row["kind"]) != row["kind"]
+            if shaped or any(new.get(k) != old.get(k) for k in ("model", "instructions")):
                 db.execute("DELETE FROM prompt_edit_results WHERE edit_id = ?", (edit_id,))
-        self._update("prompt_edits", edit_id, {"name", "kind", "state", "settings", "notes"}, fields)
+            if fields:
+                columns = ", ".join(f"{name} = ?" for name in fields)
+                values = [int(v) if isinstance(v, bool) else v for v in fields.values()]
+                db.execute(f"UPDATE prompt_edits SET {columns} WHERE id = ?", (*values, edit_id))  # noqa: S608
         self.audit(actor, "edit.update", str(edit_id), {k: v for k, v in fields.items() if k != "settings"})
 
     def delete_edit(self, edit_id: int, actor: str) -> None:
@@ -2083,14 +2097,24 @@ class Store:
             )
         return self.reveal(rows[0]["result"])
 
-    def keep_edit_result(self, edit_id: int, digest: str, text: str) -> None:
+    def keep_edit_result(
+        self, edit_id: int, digest: str, text: str, model: str | None = None, instructions: str | None = None
+    ) -> bool:
+        """Kept, unless the edit is gone or (given what the rewrite was asked with) its model or instructions
+        changed while it was being made: then it's the old instructions' rewrite (False)."""
         with self.tx() as db:
-            if db.execute("SELECT 1 FROM prompt_edits WHERE id = ?", (edit_id,)).fetchone() is None:
-                return
+            row = db.execute("SELECT settings FROM prompt_edits WHERE id = ?", (edit_id,)).fetchone()
+            if row is None:
+                return False
+            if model is not None or instructions is not None:
+                now = json.loads(row["settings"] or "{}")
+                if (now.get("model"), now.get("instructions")) != (model, instructions):
+                    return False
             db.execute(
                 "INSERT OR REPLACE INTO prompt_edit_results (edit_id, hash, result, used_at) VALUES (?, ?, ?, ?)",
                 (edit_id, digest, self.encrypt(text), time.time()),
             )
+        return True
 
     def edit_result_count(self) -> dict[int, int]:
         rows = self.query("SELECT edit_id, COUNT(*) AS n FROM prompt_edit_results GROUP BY edit_id")
