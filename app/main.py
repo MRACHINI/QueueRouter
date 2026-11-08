@@ -325,6 +325,7 @@ class Check:
     spot: int = 0  # % of the answers decided without the checker that it reads too, in the background
     alias_id: int | None = None
     learn: str = "off"  # its rule maker: answers the checker judged are kept for it unless "off"
+    flip: bool = False  # the checker's verdict is turned around (its PASS fails the answer, its FAIL passes it)
 
     @property
     def whole(self) -> bool:
@@ -793,7 +794,7 @@ def create_app(
             avoid = [answer_rules.rule_key(r.kind, r.find, r.negate) for r in rules]
             avoid += await asyncio.to_thread(store.made_rule_keys, alias.id)
             model = alias.learn_model or alias.check_model or alias.target_model
-            payload = rule_maker_mod.payload(model, alias.check_instructions, rules, samples)
+            payload = rule_maker_mod.payload(model, alias.check_instructions, rules, samples, alias.check_flip)
             body = await internal_completion(client, payload, "low", tag="check", role="rule maker")
             answer = edits_mod.reply_text(body) if body is not None else None
             proposals = rule_maker_mod.parse(answer) if answer else None
@@ -2355,6 +2356,8 @@ def create_app(
                 passed, reason = None, "the checker's request failed"
             else:
                 passed, reason = answer_check.verdict_of(body)
+            if check.flip:  # the alias turns the checker's verdict around: what follows goes by the flipped one
+                passed, reason = answer_check.flipped(passed, reason)
             if passed is not None:  # what the rules watching (and one that asked) are measured by, and kept to learn
                 learn_from(check, shown, not passed, reason, asked, watched)
             seconds = f"{time.monotonic() - started:.1f} s"
@@ -2362,7 +2365,8 @@ def create_app(
                 add_note(adm.rlog, "answer_check", f"{step.model}: not checked ({reason}), passed on")
                 log.warning(json.dumps({"event": "check_failed", "client": adm.client, "reason": reason}))
             elif passed:
-                add_note(adm.rlog, "answer_check", f"{step.model}: passed ({seconds})")
+                said = f": {reason}" if check.flip else ""
+                add_note(adm.rlog, "answer_check", f"{step.model}: passed ({seconds}){said}")
             else:
                 add_note(adm.rlog, "answer_check", f"{step.model}: failed ({seconds}): {reason}")
                 note_discarded(adm, step, held, timed, answered, "failed answer check", f"failed: {reason}")
@@ -2426,6 +2430,8 @@ def create_app(
                 else:
                     spots_running.pop(check.alias_id, None)
             passed, reason = answer_check.verdict_of(body) if body is not None else (None, "")
+            if check.flip:
+                passed, reason = answer_check.flipped(passed, reason)
             if passed is not None:
                 learn_from(check, shown, not passed, reason, rule, watched)
 
@@ -4602,6 +4608,7 @@ def create_app(
                     alias.spot_checks,
                     alias.id,
                     alias.learn_rules if checker else "off",
+                    alias.check_flip,
                 )
         param_changes = []
         strip_usage = False  # usage asked for here, not by the app: its chunk is left out of the app's stream

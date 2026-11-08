@@ -2087,6 +2087,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "check_answers": check_answers,
             "check_model": check_model,
             "check_instructions": check_instructions,
+            "check_flip": form.get("check_flip") == "on",
         }
 
     def alias_from_form(form: dict, existing=None) -> SimpleNamespace:
@@ -2124,6 +2125,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             check_answers=form.get("check_answers") == "on",
             check_model=str(form.get("check_model", "")).strip(),
             check_instructions=str(form.get("check_instructions", "")),
+            check_flip=form.get("check_flip") == "on",
             edits=items("edits"),
             answer_rules=items("answer_rules"),
             check_kinds=tuple(k for k in ANSWER_KINDS if form.get(f"kind_{k}") == "on"),
@@ -2189,6 +2191,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             orch_rounds=6, orch_tasks=8, orch_seconds=300, council_roles="", check_answers=False, check_model="",
             check_instructions="", edits=(), enabled=True, answer_rules=(), check_kinds=DEFAULT_ANSWER_KINDS,
             check_when="undecided", spot_checks=SPOT_DEFAULT, learn_rules="off", learn_model="", learn_pass=False,
+            check_flip=False,
         )  # fmt: skip
         return alias_page(request, session, empty)
 

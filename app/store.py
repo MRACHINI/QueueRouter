@@ -686,6 +686,10 @@ MIGRATIONS: list[str] = [
         rejected TEXT NOT NULL DEFAULT '[]'
     );
     """,
+    # 46: an alias can turn its checker model's verdict around (its PASS fails the answer, its FAIL passes it)
+    """
+    ALTER TABLE aliases ADD COLUMN check_flip INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 HOURLY_USAGE = 40  # the migration that added usage_hourly
 
@@ -896,6 +900,7 @@ class Alias:
     learn_rules: str = "off"  # its rule maker (app/rule_maker.py): off / propose / auto
     learn_model: str = ""  # the rule maker's model; blank = the checker's
     learn_pass: bool = False  # rules that pass answers may turn on by themselves too
+    check_flip: bool = False  # its checker model's verdict is turned around: its PASS fails the answer, FAIL passes
 
     @property
     def shown(self) -> str:
@@ -1894,6 +1899,7 @@ class Store:
                 r["learn_rules"] if r["learn_rules"] in LEARN_MODES else "off",
                 r["learn_model"] or "",
                 bool(r["learn_pass"]),
+                bool(r["check_flip"]),
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1936,6 +1942,7 @@ class Store:
         learn_rules: str = "off",
         learn_model: str = "",
         learn_pass: bool = False,
+        check_flip: bool = False,
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
@@ -1979,9 +1986,9 @@ class Store:
             )
             db.execute(
                 "UPDATE aliases SET answer_rules = ?, check_kinds = ?, check_when = ?, spot_checks = ?, "
-                "learn_rules = ?, learn_model = ?, learn_pass = ? WHERE id = ?",
+                "learn_rules = ?, learn_model = ?, learn_pass = ?, check_flip = ? WHERE id = ?",
                 (json.dumps(list(answer_rules)), json.dumps(list(check_kinds)), check_when, spot_checks,
-                 learn_rules, learn_model, int(learn_pass), cur.lastrowid),
+                 learn_rules, learn_model, int(learn_pass), int(check_flip), cur.lastrowid),
             )  # fmt: skip
         self.audit(
             actor,
@@ -2026,6 +2033,7 @@ class Store:
             "learn_rules",
             "learn_model",
             "learn_pass",
+            "check_flip",
         }
         self._update("aliases", alias_id, allowed, fields)
         if fields.get("learn_rules") == "off":  # its rule maker is off: the answers kept for it go

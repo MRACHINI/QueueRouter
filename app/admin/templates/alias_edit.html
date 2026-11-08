@@ -84,6 +84,12 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
       <small class="muted">The checker sees these, the user's last message and the answer, not the rest of the
       conversation, and answers PASS or FAIL with a reason. A checked answer reaches the app all at once once it's
       checked, not word by word; if the checker fails or takes over two minutes, the answer goes through.</small></label>
+    <label class="check"><input type="checkbox" name="check_flip" {% if a.check_flip %}checked{% endif %}>
+      Flip the checker's verdict: its PASS fails the answer, its FAIL passes it</label>
+    <small class="muted">For a checker you can't word the other way round, e.g. a grader that says PASS when it finds
+      what you want to catch. Only the checker model's verdict is flipped, not rules or the built-in refusal phrases.
+      If the checker gives no verdict (an error, a time-out), the answer still goes through. Rules watching, spot
+      checks and the rule maker go by the flipped verdict. The Requests page says when it was flipped.</small>
     <label>Ask the checker model <select name="check_when">
       {% for w in check_when %}<option value="{{ w }}" {% if a.check_when == w %}selected{% endif %}>{{ check_when_labels[w] }}</option>{% endfor %}
     </select>

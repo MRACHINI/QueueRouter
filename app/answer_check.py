@@ -98,6 +98,17 @@ def check_payload(model: str, instructions: str, body: bytes, answer: str) -> di
     }
 
 
+def flipped(passed: bool | None, reason: str) -> tuple[bool | None, str]:
+    """A verdict turned around, for an alias that flips its checker's: PASS fails the answer and FAIL passes it,
+    the reason saying so. No verdict (None: an error, a time-out) stays none: the answer goes through."""
+    if passed is None:
+        return None, reason
+    if passed:
+        said = "" if reason in ("", "passed") else f" ({reason})"
+        return False, f"flipped: the checker passed it{said}"
+    return True, f"flipped: the checker failed it: {reason}"
+
+
 def verdict_of(body: bytes | None) -> tuple[bool | None, str]:
     """(passed?, reason) from the checker's answer; passed is None when it can't be read. The verdict is looked
     for on the first line, then the last (a model that explains first)."""

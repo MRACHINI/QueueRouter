@@ -2045,6 +2045,24 @@ of two-factor sign-in made a code for the previous 30-second step and used it a 
 step began in between (more likely on a busy runner), the code was two steps old and refused. It now starts afresh
 when fewer than 15 s of a step are left. Same features as 0.75.0.
 
+v0.76.0: an alias can flip its checker model's verdict.
+- Asked for: a checkbox that turns the check's decision around on the request itself: what the checker passes
+  fails, what it fails passes. (Correcting verdicts afterwards, on the Requests page, was the other option; not
+  this.)
+- `aliases.check_flip` (migration 46), "Flip the checker's verdict" in the alias editor, under the instructions.
+  For a checker that can't be worded the other way round (a fixed grader that says PASS when it finds what should
+  be caught); with your own instructions, writing them the other way is the same thing.
+- Only the checker model's verdict is flipped (`answer_check.flipped`, applied right after `verdict_of`): rules
+  have their own actions, and the built-in refusal phrases run as before. No verdict (an error, a time-out, an
+  unreadable reply) stays none: the answer goes through, as without the flip. The checker isn't told: it judges
+  by its instructions as ever.
+- Everything after goes by the flipped verdict: the answer passes or goes to the next model, rules watching (and
+  one that asked) are counted as agreeing or not with it, spot checks too, and the rule maker keeps answers under
+  it. The rule maker's model is told the alias flips (`rule_maker.FLIPPED`), or the instructions would contradict
+  the verdicts it's shown.
+- The Requests page says so: "failed (1.2 s): flipped: the checker passed it (its reason)", "passed (1.2 s):
+  flipped: the checker failed it: its reason"; a failed answer's fallback reason is "check: flipped: …".
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

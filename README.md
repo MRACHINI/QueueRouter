@@ -56,7 +56,8 @@ from a **web admin UI**.
   - a checker model you pick, which reads the answer with your instructions and the user's last message (not
     the rest of the conversation), quoted as text to judge, never as instructions to follow, and replies PASS or
     FAIL with a reason. A checked answer arrives whole once it passes; a checker that fails or takes over two
-    minutes lets the answer through.
+    minutes lets the answer through. An alias can flip the checker's verdict (its PASS fails the answer, its FAIL
+    passes it), for a grader you can't word the other way round.
 
   A failed answer never reaches the app: the same request goes to the alias's next model, and the Requests page
   says why (the discarded answer and the check are rows of their own, so their cost counts). Each alias picks what
