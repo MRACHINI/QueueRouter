@@ -1,5 +1,5 @@
 """Answer rules: an alias's own checks of its answers by text or pattern (first match fails the answer), what its
-check reads (text, tool calls, empty answers), and the refusal field some providers use."""
+check reads (its answer types), and the refusal field some providers use."""
 
 import asyncio
 import json
@@ -7,7 +7,17 @@ import json
 import httpx
 import pytest
 
-from app.answer_rules import START_CHARS, Rule, RuleError, clean_rule, first_match, kinds_of, matches
+from app.answer_rules import (
+    DEFAULT_ANSWER_KINDS,
+    START_CHARS,
+    Rule,
+    RuleError,
+    clean_rule,
+    first_match,
+    kinds_of,
+    legacy_kinds,
+    matches,
+)
 from app.fallback import AnswerReader, answer_of, is_refusal, message_text
 from tests.test_admin import OWNER, csrf_of, login
 from tests.test_answer_check import TOOLS, chat, entries, words
@@ -34,7 +44,7 @@ def test_what_a_rule_matches():
 def test_a_rules_settings_are_checked():
     fields = clean_rule({"name": " Sorry,  I can't ", "kind": "pattern", "find": "^sorry", "scope": "anywhere"})
     assert fields == {"name": "Sorry, I can't", "kind": "pattern", "find": "^sorry", "case": False, "scope": "anywhere",
-                      "action": "fail", "negate": False, "state": "on", "notes": ""}  # fmt: skip
+                      "action": "fail", "negate": False, "state": "on", "notes": "", "tag": None}  # fmt: skip
     raw = {"name": "w", "kind": "any", "find": " sorry \r\n\r\nunable\n", "action": "ask", "negate": "on"}
     words_ = clean_rule(raw)
     assert words_["find"] == "sorry\nunable" and words_["action"] == "ask" and words_["negate"] is True
@@ -43,7 +53,9 @@ def test_a_rules_settings_are_checked():
     for wrong in ({"kind": "pattern", "find": "(unclosed"}, {"kind": "glob"}, {"find": " "}, {"name": ""}):
         with pytest.raises(RuleError):
             clean_rule({"name": "n", "kind": "contains", "find": "x", "scope": "start", **wrong})
-    assert kinds_of(["tools", "text", "bogus"]) == ("text", "tools") and kinds_of([]) == ("text", "empty")
+    assert kinds_of(["tools_only", "text", "bogus"]) == ("text", "tools_only") and kinds_of([]) == DEFAULT_ANSWER_KINDS
+    assert kinds_of(["tools"]) == ("tools_text", "tools_only", "cut")  # 0.74-0.76's kinds stand for their types
+    assert legacy_kinds(["text", "empty"]) == DEFAULT_ANSWER_KINDS and "tools_only" not in DEFAULT_ANSWER_KINDS
 
 
 def test_what_an_answer_is_read_as():
@@ -59,12 +71,12 @@ def test_what_an_answer_is_read_as():
         ]
     }
     answer = answer_of(json.dumps(body).encode())
-    assert answer.kind == "tools" and answer.shown() == 'Let me look.\n[tool call] lookup({"q": "x"})'
+    assert answer.kind == "tools_text" and answer.shown() == 'Let me look.\n[tool call] lookup({"q": "x"})'
     assert message_text(json.dumps(body).encode()) == ("", "tool_calls")  # acting, not refusing
     refused = {"choices": [{"message": {"content": None, "refusal": "I can't assist with that."}}]}
     answer = answer_of(json.dumps(refused).encode())
-    assert answer.kind == "text" and answer.shown() == "I can't assist with that." and is_refusal(answer)
-    assert answer_of(b'{"choices": [{"message": {"content": ""}}]}').kind == "empty"
+    assert answer.kind == "refusal" and answer.shown() == "I can't assist with that." and is_refusal(answer)
+    assert answer_of(b'{"choices": [{"message": {"content": ""}}]}').kind == "nothing"
 
     def line(delta, finish=None):
         return f"data: {json.dumps({'choices': [{'delta': delta, 'finish_reason': finish}]})}\n\n".encode()
@@ -96,11 +108,11 @@ async def new_rule(c, store, name, find, kind="contains", scope="start", **extra
     return next(x.id for x in store.list_rules() if x.name == name)
 
 
-async def save_alias(c, rules=(), kinds=("text", "empty"), fallbacks="mock-model", alias_id=None, **extra):
+async def save_alias(c, rules=(), kinds=DEFAULT_ANSWER_KINDS, fallbacks="mock-model", alias_id=None, **extra):
     csrf = csrf_of((await c.get("/admin/models")).text)
     form = {"csrf": csrf, "name": "smart", "target_model": "strict-model", "fallbacks": fallbacks, "on_errors": "on"}
     form |= {"answer_rules": ",".join(str(i) for i in rules), "kinds": "shown", **{f"kind_{k}": "on" for k in kinds}}
-    form |= extra
+    form |= {"spot_checks": "0", **extra}  # a test that wants spot checks asks: at 5% they'd ask a tagger now and then
     if alias_id is None:
         return await c.post("/admin/aliases", data=form)
     return await c.post(f"/admin/aliases/{alias_id}", data={**form, "enabled": "on"})
@@ -162,7 +174,8 @@ async def test_answers_that_call_tools_are_read_only_when_ticked(make_stack):
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat(tools=TOOLS))
         assert r.json()["choices"][0]["finish_reason"] == "tool_calls" and stack.mock["models"] == ["strict-model"]
         alias_id = next(a.id for a in store.list_aliases() if a.name == "smart")
-        assert "m=saved" in (await save_alias(c, [lookup], ("text", "tools"), alias_id=alias_id)).headers["location"]
+        saved = await save_alias(c, [lookup], ("text", "tools_text"), alias_id=alias_id)
+        assert "m=saved" in saved.headers["location"]
         stack.mock["models"].clear()
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat(tools=TOOLS, stream=True))
         assert r.status_code == 200 and stack.mock["models"] == ["strict-model", "mock-model"]  # read, failed
@@ -179,7 +192,7 @@ async def test_the_editor_checks_rules_and_kinds(make_stack):
         r = await save_alias(c, [sorry], fallbacks="")
         assert "Answer rules need at least one fallback model" in r.text
         r = await save_alias(c, [sorry], kinds=())
-        assert "Tick at least one kind of answer" in r.text
+        assert "Tick at least one answer type" in r.text
         csrf = csrf_of((await c.get("/admin/rules")).text)
         bad = {"csrf": csrf, "name": "Bad", "kind": "pattern", "find": "(unclosed", "scope": "start"}
         assert "The pattern isn&#39;t valid" in (await c.post("/admin/rules", data=bad)).text

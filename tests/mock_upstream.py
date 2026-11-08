@@ -252,20 +252,28 @@ def create_mock(limit: int = 2) -> FastAPI:
                 f"whereas you provided {asked}."
             )
             return JSONResponse({"error": {"message": message, "type": "invalid_request_error"}}, status_code=400)
-        # Answer checks: PASS, or FAIL when the answer contains a word in state["check_fail"]; state["check_reply"]
-        # answers instead, state["check_status"] fails the check's request, state["check_delay"] slows it.
+        # Taggers (app/taggers.py): "TAGS: bad" and a reason when the answer contains a word in state["check_fail"],
+        # else "TAGS: ok"; state["tag_words"] = {word: tag} gives each tag whose word the answer contains instead;
+        # state["check_reply"] answers instead, state["check_status"] fails the tagger's request, state["check_delay"]
+        # slows it. Every tagger's request: state["check_inputs"].
         first = (body.get("messages") or [{}])[0]
-        if str(first.get("content", "")).startswith("You check an AI assistant's answer"):
+        second = (body.get("messages") or [{}, {}])[1:2] or [{}]
+        if str(second[0].get("content", "")).startswith("Here is what you tag"):
             state.setdefault("check_inputs", []).append(body)
             if state.get("check_status"):
-                return JSONResponse({"error": {"message": "checker down"}}, status_code=state["check_status"])
+                return JSONResponse({"error": {"message": "tagger down"}}, status_code=state["check_status"])
             if state.get("check_delay"):
                 await asyncio.sleep(state["check_delay"])
-            asked = str(body["messages"][1]["content"])  # the answer is quoted in answer, or answer_2… (free_tag)
-            quoted = re.search(r"The answer:\n<(answer(?:_\d+)?)>\n(.*)\n</\1>\n\n", asked, re.S)
+            asked = str(second[0]["content"])  # the answer is quoted in answer, or answer_2… (free_tag)
+            quoted = re.search(r"The answer \(.*?\):\n<(answer(?:_\d+)?)>\n(.*?)\n</\1>\n\n", asked, re.S)
             answer = quoted.group(2) if quoted else asked
-            bad = [w for w in state.get("check_fail", []) if w in answer]
-            body["mock_content"] = state.get("check_reply") or (f"FAIL: it says {bad[0]}" if bad else "PASS")
+            if words := state.get("tag_words"):
+                given = [tag for word, tag in words.items() if word in answer]
+                reply = f"TAGS: {', '.join(given) or 'none'}\nREASON: mock"
+            else:
+                bad = [w for w in state.get("check_fail", []) if w in answer]
+                reply = f"TAGS: bad\nREASON: it says {bad[0]}" if bad else "TAGS: ok"
+            body["mock_content"] = state.get("check_reply") or reply
             body["mock_delay"] = 0.01
         # Prompt edits (app/edits.py): a rewrite answers state["rewrite_reply"] (else the text upper-cased; the text is
         # what's inside its tags, and state["rewrite_inputs"] holds it); a "make edits" request answers

@@ -29,6 +29,7 @@ from fastapi.templating import Jinja2Templates
 from .. import __version__, latency, totp
 from .. import cron as cron_mod
 from .. import jobs as jobs_mod
+from .. import taggers as taggers_mod
 from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
 from ..answer_rules import (
@@ -81,10 +82,11 @@ from ..ranking import INDEXES as RANK_INDEXES
 from ..slots import STRATEGIES
 from ..state import MODES
 from ..store import ROLES, Store
+from ..taggers import TaggerError
 from ..thinking import EFFORTS as THINKING_EFFORTS
 from ..upstream import UA_MODES
 from ..websearch import PROVIDERS as SEARCH_PROVIDERS
-from . import edit_routes, periods, rule_routes
+from . import edit_routes, periods, rule_routes, tagger_routes
 from .charts import lines, usage_charts
 from .security import (
     AdminSession,
@@ -110,14 +112,13 @@ ALIAS_ERRORS = {  # what was wrong in the alias editor
     "virtual_context": "Context told to apps: from 1,024 to 100,000,000 tokens, or blank.",
     "council": "Unknown council setting.",
     "council_members": "A council needs 1 to 64 members.",
-    "check": "Checking answers needs instructions and at least one fallback model (a failed answer goes to the "
-    "next model).",
+    "check": "Taggers need at least one fallback model (a failed answer goes to the next model).",
     "answer_rules": f"Answer rules need at least one fallback model (a failed answer goes to the next model), and "
     f"an alias takes up to {RULES_PER_ALIAS} of them.",
-    "check_kinds": "Tick at least one kind of answer for the check to read.",
-    "check_when": "Choose when the checker model is asked.",
+    "check_kinds": "Tick at least one answer type for the check to read.",
+    "check_when": "Choose when the taggers run.",
     "spot_checks": "Spot checks: 0 to 100%.",
-    "learn_rules": "Rules from the model need the checker model on: the rule maker learns from its verdicts.",
+    "learn_rules": "Rules from the model need taggers: the rule maker learns from what they decide.",
     "council_search_max": "Searches per member: 1 to 10.",
     "council_search_results": "Results per search: 1 to 10.",
     "orch_rounds": "Orchestrator rounds: 1 to 30.",
@@ -129,7 +130,7 @@ LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes /
 REQUEST_LIST_COLUMNS = (
     "id, ts, client, priority, model, target_model, upstream, status, outcome, retries, queue_ms, ttft_ms, "
     "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, finish_reason, stopped, "
-    "compaction, council, role, parent, answer_check, via, edits IS NOT NULL AS edited"
+    "compaction, council, role, parent, answer_check, answer_tags, via, edits IS NOT NULL AS edited"
 )
 REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "id",
@@ -157,6 +158,7 @@ REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "parent",
     "fallback",
     "answer_check",
+    "answer_tags",
     "via",
     "edits",
 )
@@ -199,6 +201,7 @@ MESSAGES = {
     "edits": f"Up to {edit_routes.EDITS_PER_OWNER} prompt edits.",
     **edit_routes.MESSAGES,
     **rule_routes.MESSAGES,
+    **tagger_routes.MESSAGES,
 }
 
 MAX_USERNAME = 100
@@ -1563,7 +1566,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         return page(request, "request_trace.html", session, r=main, timeline=timeline, calls=calls, totals=totals)
 
     REQUEST_PAGE, REQUEST_CATCH_UP = 50, 300  # rows fetched at a time / at most after being away
-    REQUEST_FILTERS = ("client", "outcome", "model", "upstream", "tag")
+    REQUEST_FILTERS = ("client", "outcome", "model", "upstream", "tag", "answer_tag")
     FILTER_CHOICES_S = 60  # the choices scan the table, so they're kept this long
     filter_choices: dict = {"at": None, "values": {}}
 
@@ -2025,12 +2028,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             raise AliasLoop(
                 f"These aliases use each other in a loop: {' → '.join(loop)}. An alias can't lead back to itself."
             )
-        check_answers = form.get("check_answers") == "on"
-        check_model = str(form.get("check_model", "")).strip()
-        check_instructions = str(form.get("check_instructions", "")).strip()
-        if len(check_model) > 200 or len(check_instructions) > 4000:
-            raise ValueError("check")
-        if check_answers and not (check_instructions and fallbacks):
+        tag_chain = tagger_routes.chain_from(form, store)  # TaggerError says what's wrong
+        if tag_chain and not fallbacks:
             raise ValueError("check")
         answer_rules = rule_routes.rule_ids(form, store)
         if answer_rules and not fallbacks:
@@ -2039,14 +2038,14 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         check_kinds = tuple(k for k in ANSWER_KINDS if form.get(f"kind_{k}") == "on")
         if "kinds" not in form:
             check_kinds = check_kinds or DEFAULT_ANSWER_KINDS
-        elif (answer_rules or check_answers) and not check_kinds:
+        elif (answer_rules or tag_chain) and not check_kinds:
             raise ValueError("check_kinds")
         check_when = str(form.get("check_when", "undecided"))
         if check_when not in CHECK_WHEN:
             raise ValueError("check_when")
         spot_checks = int_field(form, "spot_checks", 0, 100, SPOT_DEFAULT)
         learn_rules = str(form.get("learn_rules", "off"))
-        if learn_rules not in LEARN_MODES or (learn_rules != "off" and not check_answers):
+        if learn_rules not in LEARN_MODES or (learn_rules != "off" and not tag_chain):
             raise ValueError("learn_rules")
         learn_model = " ".join(str(form.get("learn_model", "")).split())[:200]
         edits = edit_routes.edit_ids(form, store)
@@ -2084,10 +2083,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "council_roles": "\n".join(
                 line.strip() for line in str(form.get("council_roles", "")).splitlines() if line.strip()
             )[:8000],
-            "check_answers": check_answers,
-            "check_model": check_model,
-            "check_instructions": check_instructions,
-            "check_flip": form.get("check_flip") == "on",
+            "tag_chain": tag_chain,
         }
 
     def alias_from_form(form: dict, existing=None) -> SimpleNamespace:
@@ -2122,10 +2118,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             orch_tasks=str(form.get("orch_tasks", "8")),
             orch_seconds=str(form.get("orch_seconds", "300")),
             council_roles=str(form.get("council_roles", "")),
-            check_answers=form.get("check_answers") == "on",
-            check_model=str(form.get("check_model", "")).strip(),
-            check_instructions=str(form.get("check_instructions", "")),
-            check_flip=form.get("check_flip") == "on",
+            tag_chain=(),
             edits=items("edits"),
             answer_rules=items("answer_rules"),
             check_kinds=tuple(k for k in ANSWER_KINDS if form.get(f"kind_{k}") == "on"),
@@ -2138,11 +2131,19 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         )
 
     def alias_page(
-        request: Request, session: AdminSession, alias, error: str | None = None, rules_seen: str | None = None
+        request: Request,
+        session: AdminSession,
+        alias,
+        error: str | None = None,
+        rules_seen: str | None = None,
+        chain: list[dict] | None = None,
     ) -> HTMLResponse:
-        """``rules_seen``: the rules the alias had when its editor was first opened (a form shown again keeps it)."""
+        """``rules_seen``: the rules the alias had when its editor was first opened (a form shown again keeps it);
+        ``chain``: its taggers as the editor sent them (shown again after an error), else as saved."""
         if rules_seen is None:
             rules_seen = ",".join(str(i) for i in alias.answer_rules)
+        if chain is None:
+            chain = taggers_mod.rows_of(alias.tag_chain, {t.id: t for t in store.list_tags()})
         return page(
             request,
             "alias_edit.html",
@@ -2167,10 +2168,12 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             learn_modes=LEARN_MODES,
             learn_labels=LEARN_LABELS,
             search_on=store.get_tunables().get("search_provider", "off") not in ("", "off"),
+            chain=tagger_routes.chain_slots(chain),
+            **tagger_routes.chain_context(store),
         )
 
     def alias_error(exc: Exception) -> str:
-        if isinstance(exc, AliasLoop):
+        if isinstance(exc, AliasLoop | TaggerError):
             return str(exc)
         if str(exc) == "edits":
             return MESSAGES["edits"]
@@ -2188,10 +2191,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             fallback_on=DEFAULT_TRIGGERS, compact="off", compact_model="", virtual_context=None, council="off",
             council_members=[], council_judge="", council_when="planning", council_instructions="",
             council_search=False, council_search_max=3, council_search_results=5, council_fetch=False,
-            orch_rounds=6, orch_tasks=8, orch_seconds=300, council_roles="", check_answers=False, check_model="",
-            check_instructions="", edits=(), enabled=True, answer_rules=(), check_kinds=DEFAULT_ANSWER_KINDS,
-            check_when="undecided", spot_checks=SPOT_DEFAULT, learn_rules="off", learn_model="", learn_pass=False,
-            check_flip=False,
+            orch_rounds=6, orch_tasks=8, orch_seconds=300, council_roles="", tag_chain=(), edits=(), enabled=True,
+            answer_rules=(), check_kinds=DEFAULT_ANSWER_KINDS, check_when="undecided", spot_checks=SPOT_DEFAULT,
+            learn_rules="off", learn_model="", learn_pass=False,
         )  # fmt: skip
         return alias_page(request, session, empty)
 
@@ -2214,7 +2216,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             target_model, upstream_ids = fields.pop("target_model"), fields.pop("upstream_ids")
             store.create_alias(name, target_model, upstream_ids, session.user.username, **fields)
         except (RulesError, ValueError, sqlite3.IntegrityError) as exc:
-            return alias_page(request, session, alias_from_form(form), alias_error(exc))
+            shown = taggers_mod.chain_rows(form)
+            return alias_page(request, session, alias_from_form(form), alias_error(exc), chain=shown)
         ctx.reload()
         return back("/admin/models", "created")
 
@@ -2240,7 +2243,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             store.update_alias(alias_id, session.user.username, enabled=form.get("enabled") == "on", **fields)
         except (RulesError, ValueError, KeyError, sqlite3.IntegrityError) as exc:
             seen = str(form["rules_seen"]) if "rules_seen" in form else None
-            return alias_page(request, session, alias_from_form(form, existing), alias_error(exc), seen)
+            shown = taggers_mod.chain_rows(form)
+            return alias_page(request, session, alias_from_form(form, existing), alias_error(exc), seen, shown)
         ctx.reload()
         return back("/admin/models", "saved")
 
@@ -2256,6 +2260,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     helpers = edit_routes.Helpers(page, require, require_post, back, ctx.reload, ctx.model_choices, ctx.model_label)
     edit_routes.mount_edit_pages(app, store, helpers)
     rule_routes.mount_rule_pages(app, store, helpers)
+    tagger_routes.mount_tagger_pages(app, store, helpers)
 
     # -- playground ----------------------------------------------------------------------
 

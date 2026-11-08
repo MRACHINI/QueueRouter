@@ -1,6 +1,6 @@
-"""What answer rules do when they match (fail, pass, pass keeping the free checks, ask the checker), rules watching,
-the checker asked only for answers a rule sends to it, spot checks, rules turning on and off by themselves, and an
-alias's rule maker proposing rules from the answers its checker judged."""
+"""What answer rules do when they match (fail, pass, pass keeping the free checks, ask the taggers), rules watching,
+the taggers asked only for answers a rule sends to them, spot checks, rules turning on and off by themselves, and an
+alias's rule maker proposing rules from the answers its taggers decided."""
 
 import asyncio
 import json
@@ -22,10 +22,8 @@ from app.answer_rules import (
 )
 from app.store import Store
 from tests.test_admin import OWNER, csrf_of, login
-from tests.test_answer_check import INSTRUCTIONS, chat, entries, words
+from tests.test_answer_check import chat, checked, entries, words
 from tests.test_answer_rules import new_rule, rule, save_alias
-
-CHECKED = {"check_answers": "on", "check_model": "mock-model", "check_instructions": INSTRUCTIONS}
 
 
 def test_any_of_these_and_doesnt():
@@ -71,7 +69,7 @@ def test_a_rule_the_model_made_turns_on_and_back_by_itself():
     assert next_state(passing, True, "auto", True)["state"] == "on"
     assert "state" not in next_state(rule(find="x", state="watch", agreed=99), True, "auto", True)  # made by hand
     asks = rule(find="x", state="on", made_by=7, action="ask", recent="0" * RECENT)
-    assert "state" not in next_state(asks, False, "auto", True)  # asking the checker can't decide wrongly
+    assert "state" not in next_state(asks, False, "auto", True)  # asking the taggers can't decide wrongly
 
 
 def test_when_a_rule_maker_runs():
@@ -109,7 +107,7 @@ def test_what_a_rule_maker_proposes_is_tried_on_the_kept_answers():
     assert found == {
         "Can't help": ("watch", False, 2, 0),
         "No apology": ("watch", False, 0, 2),
-        "Ask": ("on", False, 2, 0),  # asking the checker can't decide wrongly: on at once
+        "Ask": ("on", False, 2, 0),  # asking the taggers can't decide wrongly: on at once
     }
     assert dropped == 1
     made, _ = rule_maker.keep(proposals, SAMPLES, [], "propose")
@@ -143,7 +141,7 @@ def test_a_rule_makers_patterns_are_bounded():
 
 def test_hand_changes_and_the_rule_makers_rules_in_the_store(tmp_path):
     store = Store.open(str(tmp_path), None)
-    alias_id = store.create_alias("smart", "m", (), "t", check_answers=True, learn_rules="auto", learn_model="smart")
+    alias_id = store.create_alias("smart", "m", (), "t", learn_rules="auto", learn_model="smart")
     assert next(a for a in store.list_aliases() if a.id == alias_id).spot_checks == 5  # a new alias: 5%
     fails = clean_rule({"name": "Fails", "kind": "contains", "find": "bad", "state": "watch"})
     asks = clean_rule({"name": "Asks", "kind": "contains", "find": "sorry", "action": "ask"})
@@ -184,7 +182,7 @@ def test_hand_changes_and_the_rule_makers_rules_in_the_store(tmp_path):
 
 def test_kept_answers_and_outcomes_in_the_store(tmp_path):
     store = Store.open(str(tmp_path), None)
-    alias_id = store.create_alias("smart", "m", (), "t", check_answers=True, learn_rules="auto")
+    alias_id = store.create_alias("smart", "m", (), "t", learn_rules="auto")
     store.add_samples([(alias_id, "fail", "refused", "Sorry."), (alias_id, "pass", "", "Fine.")] * 3, keep=2, days=7)
     assert store.sample_counts() == {alias_id: {"fail": 2, "pass": 2}}  # the newest of each, up to keep
     assert store.samples_for(alias_id)[0] == {"verdict": "pass", "reason": "", "answer": "Fine."}
@@ -215,40 +213,41 @@ async def until(found, tries=150):
     raise AssertionError("not in time")
 
 
-async def test_a_pass_rule_skips_the_checker(make_stack):
+async def test_a_pass_rule_skips_the_taggers(make_stack):
     stack = make_stack(bootstrap=OWNER)
     store = stack.app.state.store
     words(stack, ["All ", "fine."])
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         fine = await new_rule(c, store, "No apology", "sorry\ncan't", kind="any", negate="on", action="pass")
-        assert "m=created" in (await save_alias(c, [fine], **CHECKED)).headers["location"]
+        assert "m=created" in (await save_alias(c, [fine], **checked(store))).headers["location"]
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat())
         assert r.json()["choices"][0]["message"]["content"] == "All fine."
-        assert stack.mock["models"] == ["strict-model"]  # the checker wasn't asked
+        assert stack.mock["models"] == ["strict-model"]  # the tagger wasn't asked
         main, _ = await entries(stack)
         assert main["answer_check"] == "strict-model: rule 'No apology' passed it"
 
 
-async def test_the_checker_only_for_answers_a_rule_sends_to_it(make_stack):
+async def test_the_taggers_only_for_answers_a_rule_sends_to_them(make_stack):
     stack = make_stack(bootstrap=OWNER)
     store = stack.app.state.store
     words(stack, ["Sure, ", "here."])
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         suspicious = await new_rule(c, store, "Apology", "sorry\nbad", kind="any", action="ask")
-        await save_alias(c, [suspicious], **CHECKED, check_when="asked")
+        await save_alias(c, [suspicious], **checked(store), check_when="asked")
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat())
         assert r.json()["choices"][0]["message"]["content"] == "Sure, here."
         assert stack.mock["models"] == ["strict-model"]
         main, _ = await entries(stack)
-        assert main["answer_check"] == "strict-model: no rule asked the checker, passed on"
+        assert main["answer_check"] == "strict-model: no rule asked the taggers, passed on"
         words(stack, ["Sorry, ", "bad answer"])
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat())
         assert r.json()["choices"][0]["message"]["content"] == "good answer"
         assert stack.mock["models"][1:] == ["strict-model", "mock-model", "mock-model"]  # asked, failed, next model
         main, _ = await entries(stack, 2)
-        assert main["answer_check"].startswith("strict-model: rule 'Apology' asked the checker; strict-model: failed")
+        asked = "strict-model: rule 'Apology' asked the taggers; strict-model: checker tagged bad"
+        assert main["answer_check"].startswith(asked)
 
 
 async def test_a_pass_rule_keeping_the_free_checks(make_stack):
@@ -258,7 +257,7 @@ async def test_a_pass_rule_keeping_the_free_checks(make_stack):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         clean = await new_rule(c, store, "Not bad", "bad", negate="on", action="pass_free")
-        await save_alias(c, [clean], **CHECKED, on_refused="on")
+        await save_alias(c, [clean], **checked(store), on_refused="on")
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat())
         assert r.json()["choices"][0]["message"]["content"] == "good answer"  # the built-in phrases still caught it
         assert stack.mock["models"] == ["strict-model", "mock-model"]  # and the checker wasn't asked
@@ -273,12 +272,12 @@ async def test_spot_checks_measure_a_rule(make_stack):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         bad = await new_rule(c, store, "Says bad", "bad")
-        await save_alias(c, [bad], **CHECKED, spot_checks="100")
+        await save_alias(c, [bad], **checked(store), spot_checks="100")
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat())
-        assert r.json()["choices"][0]["message"]["content"] == "good answer"  # the rule failed it: no checker wait
+        assert r.json()["choices"][0]["message"]["content"] == "good answer"  # the rule failed it: no tagger wait
         rule_now = await until(lambda: next((x for x in store.list_rules() if x.id == bad and x.agreed), None))
-        assert rule_now.agreed == 1 and rule_now.recent == "1" and rule_now.hits == 1  # the checker agreed
-        assert any(e.get("role") == "spot check" for e in stack.app.state.stats.recent)
+        assert rule_now.agreed == 1 and rule_now.recent == "1" and rule_now.hits == 1  # the tagger agreed
+        assert any(e.get("role") == "spot check: checker" for e in stack.app.state.stats.recent)
 
 
 async def test_a_rule_maker_proposes_rules_that_then_watch(make_stack):
@@ -289,12 +288,12 @@ async def test_a_rule_maker_proposes_rules_that_then_watch(make_stack):
     stack.mock["rule_maker_reply"] = json.dumps(reply)
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
-        await save_alias(c, [], **CHECKED, learn_rules="auto")
+        await save_alias(c, [], **checked(store), learn_rules="auto")
         alias_id = next(a.id for a in store.list_aliases() if a.name == "smart")
         csrf = csrf_of((await c.get("/admin/rules")).text)
         r = await c.post("/admin/rules/propose", data={"csrf": csrf, "alias_id": str(alias_id)})
         assert "didn&#39;t start: it starts after the alias&#39;s next checked answer" in r.text
-        for _ in range(2):  # the checker fails both: kept for the rule maker
+        for _ in range(2):  # the tagger fails both: kept for the rule maker
             r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat())
             assert r.json()["choices"][0]["message"]["content"] == "good answer"
         await until(lambda: store.sample_counts().get(alias_id, {}).get("fail") == 2)
@@ -304,10 +303,10 @@ async def test_a_rule_maker_proposes_rules_that_then_watch(make_stack):
         assert made.made_by == alias_id and made.state == "watch" and made.sample_fails == 2
         assert made.why == "it says bad"
         assert next(a for a in store.list_aliases() if a.id == alias_id).answer_rules == (made.id,)
-        assert "<failed>\nReason: it says bad" in stack.mock["rule_maker_inputs"][0]
+        assert "<failed>\nReason: checker tagged bad: it says bad" in stack.mock["rule_maker_inputs"][0]
         page = (await c.get("/admin/rules")).text
         assert "made for smart" in page and "added 1: Bad" in page
-        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat())  # watching: the checker decides
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat())  # watching: the tagger decides
         assert r.json()["choices"][0]["message"]["content"] == "good answer"
         watched = await until(lambda: next((x for x in store.list_rules() if x.id == made.id and x.agreed), None))
         assert watched.agreed == 1 and watched.state == "watch" and watched.hits == 0  # it decided nothing yet
@@ -319,14 +318,14 @@ async def test_the_editor_keeps_rules_made_while_it_was_open(make_stack):
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         mine = await new_rule(c, store, "Mine", "mine")
-        await save_alias(c, [mine], **CHECKED, learn_rules="propose")
+        await save_alias(c, [mine], **checked(store), learn_rules="propose")
         alias_id = next(a.id for a in store.list_aliases() if a.name == "smart")
         opened = (await c.get(f"/admin/aliases/{alias_id}")).text
         assert f'name="rules_seen" value="{mine}"' in opened
         made = clean_rule({"name": "Made", "kind": "contains", "find": "bad", "state": "watch"})
         store.add_made_rules(alias_id, [made])  # its rule maker, while the editor is open
         made_id = next(r.id for r in store.list_rules() if r.name == "Made")
-        form = {**CHECKED, "learn_rules": "propose", "rules_seen": str(mine)}
+        form = {**checked(store), "learn_rules": "propose", "rules_seen": str(mine)}
         r = await save_alias(c, [], alias_id=alias_id, **form)  # "Mine" taken off in the editor
         assert "m=saved" in r.headers["location"]
         assert next(a for a in store.list_aliases() if a.id == alias_id).answer_rules == (made_id,)
@@ -334,9 +333,10 @@ async def test_the_editor_keeps_rules_made_while_it_was_open(make_stack):
 
 async def test_the_editor_checks_the_rule_maker(make_stack):
     stack = make_stack(bootstrap=OWNER)
+    store = stack.app.state.store
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
-        r = await save_alias(c, [], learn_rules="auto")  # no checker model
-        assert "Rules from the model need the checker model on" in r.text
-        r = await save_alias(c, [], **CHECKED, spot_checks="150")
+        r = await save_alias(c, [], learn_rules="auto")  # no taggers
+        assert "Rules from the model need taggers" in r.text
+        r = await save_alias(c, [], **checked(store), spot_checks="150")
         assert "Spot checks: 0 to 100%." in r.text

@@ -42,27 +42,34 @@ from a **web admin UI**.
   - *answer rules* (Rules page): exact text (contains, any of a list of words, starts with) or a pattern, or
     "doesn't", made once and attached in order to aliases; looking at the start of the answer (only that much is
     held back before it streams on) or anywhere in it. The first rule that matches decides: fail the answer, pass
-    it (nothing else runs), pass it but run the free checks, or ask the checker model, which an alias can ask
-    only for answers a rule sends to it. A rule can watch first: it decides nothing, and the Rules page shows how
-    often the checker agreed with it. They cost nothing. **Try it** shows which rule decides a pasted answer;
-  - an alias's *rule maker* (opt-in): a model reads the answers the checker judged (kept encrypted for a week)
+    it (nothing else runs), pass it but run the free checks, or ask the alias's taggers, which an alias can run
+    only for answers a rule sends to them; a rule can also give the answer a tag, for nothing. A rule can watch
+    first: it decides nothing, and the Rules page shows how often the taggers agreed with it. They cost nothing.
+    **Try it** shows which rule decides a pasted answer;
+  - an alias's *rule maker* (opt-in): a model reads the answers the taggers decided (kept encrypted for a week)
     and proposes rules; one that would have decided a kept answer wrongly is dropped, the rest start watching,
-    and either you turn them on or they turn on by themselves once the checker has agreed with them 20 times
+    and either you turn them on or they turn on by themselves once the taggers have agreed with them 20 times
     (rules that pass answers only if you allow it), and go back to watching if they start disagreeing (one you
     delete isn't proposed again; a slow pattern is dropped). Spot
-    checks send some answers a rule decided to the checker too, in the background, to keep measuring;
+    checks send some answers a rule decided to the taggers too, in the background, to keep measuring;
   - the built-in refusal phrases (the "refused" trigger), which also catch a refusal a provider puts in a field
     of its own;
-  - a checker model you pick, which reads the answer with your instructions and the user's last message (not
-    the rest of the conversation), quoted as text to judge, never as instructions to follow, and replies PASS or
-    FAIL with a reason. A checked answer arrives whole once it passes; a checker that fails or takes over two
-    minutes lets the answer through. An alias can flip the checker's verdict (its PASS fails the answer, its FAIL
-    passes it), for a grader you can't word the other way round.
+  - *taggers* (Taggers page), run in order: each is a model of its own with its own instructions and prompt, that
+    gives the answer tags from a list you make (`tech`, `medical`, `doing-work`… exactly one, or any number) and
+    reads the answer types you tick and what you choose of the request (the user's last message, the
+    conversation's last messages, the system prompt, or nothing but the answer), all quoted as text to tag, never
+    as instructions. After each one the alias decides on the tags so far (any of, all of, none of): pass the
+    answer, fail it, go on to the next tagger or jump to a later one; with nothing deciding, the answer passes. A
+    tagger that gives no tags (an error, a time-out) has its own choice. **Try it** asks a tagger for real on a
+    pasted message and answer and shows what it was sent and replied. A checked answer arrives whole once it
+    passes.
 
   A failed answer never reaches the app: the same request goes to the alias's next model, and the Requests page
-  says why (the discarded answer and the check are rows of their own, so their cost counts). Each alias picks what
-  its check reads: text answers, answers that call tools (read with their calls, as `[tool call]
-  name(arguments)`), empty answers. The last model's answer isn't checked.
+  says why and which tags each answer got, and can show only the requests with a tag (the discarded answer and each
+  tagger are rows of their own, so their cost counts). Each alias picks the answer types its check reads: text, tool
+  calls with text, tool calls only (read with their calls, as `[tool call] name(arguments)`), a provider's refusal,
+  cut off, stopped by a filter, thinking only, nothing at all, audio or images. The last model's answer isn't
+  checked.
 - **Prompt edits** (Edits page): changes to the system prompt of requests before they reach the model, made
   once and attached in order to aliases, client groups and clients (an alias's run first, then the group's, then
   the client's). They touch the app's system and developer messages only. Kinds: *text* (find and replace, or

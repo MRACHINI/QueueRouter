@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{% if new %}New tag{% else %}Tag {{ t.name }}{% endif %}{% endblock %}
+{% block content %}
+<p class="small"><a href="/admin/taggers">← Taggers</a></p>
+<h1>{% if new %}New tag{% else %}Tag <code>{{ t.name }}</code>{% endif %}</h1>
+
+<form method="post" action="{% if new %}/admin/tags{% else %}/admin/tags/{{ t.id }}{% endif %}" class="alias-editor">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <fieldset class="card">
+    <legend>Tag</legend>
+    <label>Name <input name="name" value="{{ t.name }}" required maxlength="32" pattern="[a-z0-9][a-z0-9_\-]{0,31}" placeholder="e.g. medical" autocomplete="off">
+      <small class="muted">Lower-case letters, digits, - and _. Taggers reply with it, and an alias's decisions name it.
+      Renamed, requests already logged keep the old name.</small></label>
+    <label>What it means <input name="meaning" value="{{ t.meaning }}" maxlength="300" placeholder="e.g. the answer is about health or medicine">
+      <small class="muted">What a tagger is told about it: say when it applies. A tagger's own instructions can say
+      more.</small></label>
+  </fieldset>
+  <div class="row">
+    <button type="submit">{% if new %}Add tag{% else %}Save{% endif %}</button>
+    <a href="/admin/taggers">Cancel</a>
+  </div>
+</form>
+
+{% if not new %}
+<form method="post" action="/admin/tags/{{ t.id }}/delete" class="row" data-confirm="Delete tag {{ t.name }}? Taggers stop giving it, and aliases' decisions on it go.">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" class="danger">Delete tag</button>
+</form>
+{% endif %}
+{% endblock %}

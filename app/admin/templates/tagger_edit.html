@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}{% if new %}New tagger{% else %}Tagger {{ t.name }}{% endif %}{% endblock %}
+{% from "picker.html" import picker %}
+{% block content %}
+<p class="small"><a href="/admin/taggers">← Taggers</a></p>
+<h1>{% if new %}New tagger{% else %}Tagger {{ t.name }}{% endif %}</h1>
+<script type="application/json" id="model-choices">{{ choices | tojson }}</script>
+
+<form method="post" action="{% if new %}/admin/taggers{% else %}/admin/taggers/{{ t.id }}{% endif %}" class="alias-editor">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <fieldset class="card">
+    <legend>Tagger</legend>
+    <label>Name <input name="name" value="{{ t.name }}" required maxlength="64" placeholder="e.g. Topic" autocomplete="off">
+      <small class="muted">The Requests page says which tagger gave which tags by this name.</small></label>
+    <label>Model {{ picker("model", t.model, "single", "blank = the alias's target model") }}
+      <small class="muted">Prefer a small, fast model, ideally on another provider (it uses a slot). Each tagger an
+      answer goes through is one more request, and the app waits for it.</small></label>
+    <label>Instructions <textarea name="instructions" rows="5" maxlength="4000" placeholder="e.g. Tag tech if the answer is about technology, medical if it's about health. Tag doing-work if the tool calls only carry out the user's instructions, discussion if the answer also talks with the user.">{{ t.instructions }}</textarea>
+      <small class="muted">When each tag applies. The tagger is also told what each tag means (Taggers page).</small></label>
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>Tags it gives</legend>
+    {% if tags %}
+    <div class="row wrap">{% for g in tags %}
+      <label class="check"><input type="checkbox" name="tags" value="{{ g.id }}" {% if g.id in t.tags %}checked{% endif %}> <code>{{ g.name }}</code>{% if g.meaning %} <span class="small muted">{{ g.meaning }}</span>{% endif %}</label>
+    {% endfor %}</div>
+    {% else %}<p class="muted">No tags yet: <a href="/admin/tags/new">add one</a> first.</p>{% endif %}
+    <label>It gives <select name="pick">
+      {% for p in picks %}<option value="{{ p }}" {% if t.pick == p %}selected{% endif %}>{{ pick_labels[p] }}</option>{% endfor %}
+    </select>
+      <small class="muted">Exactly one: for tags that exclude each other (a topic, or ok / bad). Any number: it may give
+      several, or none. Tags it gives that aren't ticked here are ignored (the Requests page lists them).</small></label>
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>What it reads</legend>
+    <fieldset class="plain"><legend class="small muted">Answers of these types (an answer of another type skips it)</legend>
+      <div class="row wrap">{% for k in answer_kinds %}
+        <label class="check"><input type="checkbox" name="reads" value="{{ k }}" {% if k in t.reads %}checked{% endif %}> {{ answer_kind_labels[k] }}</label>
+      {% endfor %}</div>
+      <small class="muted">The alias's answer check reads only the types it ticks; this narrows that for this tagger.
+      Tool calls are shown to it as <code>[tool call] name(arguments)</code>.</small></fieldset>
+    <fieldset class="plain"><legend class="small muted">And from the request</legend>
+      <label class="check"><input type="checkbox" name="message" {% if t.message %}checked{% endif %}> the user's last message</label>
+      <label class="inline-field">the conversation's last <input type="number" name="turns" min="0" max="{{ turns_max }}" value="{{ t.turns }}"> messages before the answer (0: none)</label>
+      <label class="check"><input type="checkbox" name="system" {% if t.system %}checked{% endif %}> the request's system prompt</label>
+      <small class="muted">Nothing ticked: it sees only the answer, so nothing the user asked (such as "don't answer
+      in Chinese") can sway it. Messages are shown as <code>[user]</code>, <code>[assistant]</code>,
+      <code>[tool output]</code> lines, each cut to 2,000 characters; the system prompt to 12,000.</small></fieldset>
+  </fieldset>
+
+  <fieldset class="card">
+    <legend>Prompt</legend>
+    <label>Its prompt <textarea name="prompt" rows="6" maxlength="8000" placeholder="{{ default_prompt }}">{{ t.prompt }}</textarea>
+      <small class="muted">Blank: the default (shown greyed). <code>{instructions}</code> and <code>{tags}</code> are
+      filled in; one it leaves out is added at the end. After it, the tagger always gets the request's parts and the
+      answer, quoted as text to tag (never instructions), and how to reply: <code>TAGS: a, b</code>, which is how its
+      reply is read.</small></label>
+    <label class="check"><input type="checkbox" name="reason" {% if t.reason %}checked{% endif %}> Ask it for a reason too (one line, shown on the Requests page)</label>
+    <label>Notes <input name="notes" value="{{ t.notes }}" maxlength="300" placeholder="optional"></label>
+    {% if not new %}<p class="small muted">{% if users %}Used by {{ users | join(", ") }}.{% else %}Not used yet: add it to an alias's taggers (alias editor, Answer check).{% endif %}</p>{% endif %}
+  </fieldset>
+  <div class="row">
+    <button type="submit">{% if new %}Add tagger{% else %}Save{% endif %}</button>
+    <a href="/admin/taggers">Cancel</a>
+  </div>
+</form>
+
+{% if not new %}
+<section class="card" id="try">
+  <h2>Try it</h2>
+  <p class="small muted">The tagger as saved, on a message and an answer you paste: it's asked for real (one request,
+  as the client you pick, shown on the Requests page), and you see what it was sent, what it replied and the tags read
+  from that.</p>
+  <form method="post" action="/admin/taggers/{{ t.id }}/try#try" class="alias-editor">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>As client <select name="try_client">
+      {% for c in clients %}<option value="{{ c.name }}" {% if tried and tried.client == c.name %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+    </select>{% if not clients %}<small class="muted">No enabled client: add one to try.</small>{% endif %}</label>
+    <label>Model <input name="try_model" value="{{ tried.model if tried else t.model }}" placeholder="the model to ask (needed when the tagger's is blank)" autocomplete="off"></label>
+    {% if t.system %}<label>System prompt <textarea name="try_system" rows="3">{{ tried.system if tried else "" }}</textarea></label>{% endif %}
+    <label>User's message <textarea name="try_message" rows="3" placeholder="e.g. My knee hurts when I run. What should I do?">{{ tried.message if tried else "" }}</textarea></label>
+    <label>Answer <textarea name="try_answer" rows="5" placeholder="e.g. Rest it for a few days and ice it; see a doctor if it doesn't get better.">{{ tried.answer if tried else "" }}</textarea></label>
+    <label>Its type <select name="try_kind">
+      {% for k in answer_kinds %}<option value="{{ k }}" {% if (tried.kind if tried else "text") == k %}selected{% endif %}>{{ answer_kind_labels[k] }}</option>{% endfor %}
+    </select></label>
+    <div class="row"><button type="submit" class="secondary" {% if not clients %}disabled{% endif %}>Try</button></div>
+  </form>
+  {% if tried %}
+  {% if tried.problem %}<p class="notice err">{{ tried.problem }}</p>{% endif %}
+  {% if tried.tags is defined %}
+  <p class="notice {% if tried.tags is none %}err{% else %}ok{% endif %}">{% if tried.tags is none %}No tags could be read ({{ tried.unreadable }}): the alias would do what it does when this tagger gives no tags.{% elif tried.tags %}Tagged <strong>{{ tried.tags | join(", ") }}</strong>{% if tried.reason %}: {{ tried.reason }}{% endif %}.{% else %}Tagged nothing{% if tried.reason %}: {{ tried.reason }}{% endif %}.{% endif %}
+  {% if tried.ignored %}Not its tags, ignored: {{ tried.ignored | join(", ") }}.{% endif %}</p>
+  <details open><summary class="small">Its reply</summary><pre class="wrap-any small">{{ tried.reply }}</pre></details>
+  {% endif %}
+  {% if tried.sent %}
+  <details><summary class="small">What it was sent</summary>
+    {% for m in tried.sent %}<p class="small muted">{{ m.role }}</p><pre class="wrap-any small">{{ m.content }}</pre>{% endfor %}
+  </details>
+  {% endif %}
+  {% endif %}
+</section>
+
+<form method="post" action="/admin/taggers/{{ t.id }}/delete" class="row" data-confirm="Delete tagger {{ t.name }}? It's taken out of the aliases that run it.">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" class="danger">Delete tagger</button>
+</form>
+{% endif %}
+{% endblock %}

@@ -810,7 +810,8 @@ function liveRequests(root) {
     const marks = [];
     if (r.council) marks.push("council");
     if (r.compaction) marks.push("compacted");
-    if (r.answer_check) marks.push(r.answer_check.includes("failed") ? "check failed" : "checked");
+    if (r.answer_check) marks.push(/→ failed|' failed it|^failed/.test(r.answer_check) ? "check failed" : "checked");
+    for (const tag of (r.answer_tags || "").split(",")) if (tag) marks.push(`#${tag}`);
     if (r.via) marks.push(`via ${r.via}`);
     if (r.edited) marks.push("edited");
     if (r.role) marks.push(r.role);
@@ -868,6 +869,7 @@ function liveRequests(root) {
       for (const note of edited.notes || []) line("Prompt edits", note);
     }
     if (d.answer_check) line("Answer check", d.answer_check);
+    if (d.answer_tags) line("Answer tags", d.answer_tags.split(",").join(", "));
     if (d.role) line("Made by QueueRouter", d.role);
     if (d.parent) {
       const link = el("a", "mono", d.parent);
@@ -953,6 +955,7 @@ function liveRequests(root) {
   // -- queued and running ----------------------------------------------------------------------------------------
   const matches = (r) =>
     !want("outcome") &&
+    !want("answer_tag") && // a running request's answers aren't tagged yet
     (!want("client") || r.client === want("client")) &&
     (!want("model") || r.requested_model === want("model") || r.target_model === want("model")) &&
     (!want("upstream") || r.upstream === want("upstream")) &&

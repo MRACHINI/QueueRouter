@@ -24,6 +24,7 @@ from datetime import date, timedelta
 from cryptography.fernet import Fernet, InvalidToken
 
 from .answer_rules import (
+    ANSWER_KINDS,
     CHECK_WHEN,
     DEFAULT_ANSWER_KINDS,
     LEARN_MODES,
@@ -32,12 +33,15 @@ from .answer_rules import (
     SPOT_DEFAULT,
     Rule,
     kinds_of,
+    legacy_kinds,
     next_state,
     rule_key,
 )
 from .config import PRIORITIES, SECRET_TUNABLES, TUNABLES, ClientPolicy, Settings, parse_access_keys
 from .edits import Edit
 from .names import EVERY
+from .taggers import PICKS, Line, Tag, Tagger, chain_json, chain_of, without
+from .taggers import Step as TagStep
 
 log = logging.getLogger("queuerouter")
 
@@ -690,7 +694,46 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE aliases ADD COLUMN check_flip INTEGER NOT NULL DEFAULT 0;
     """,
+    # 47: tags and taggers (app/taggers.py): an alias's chain of taggers replaces its checker model (each alias's
+    # checker becomes a tagger of its own: _convert_checkers), a rule can give a tag, and a request keeps the tags its
+    # answers got
+    """
+    CREATE TABLE answer_tags (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        meaning TEXT NOT NULL DEFAULT '',
+        given INTEGER NOT NULL DEFAULT 0,
+        last_given REAL,
+        created_at REAL NOT NULL
+    );
+    CREATE UNIQUE INDEX answer_tags_name ON answer_tags (name);
+    CREATE TABLE taggers (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        model TEXT NOT NULL DEFAULT '',
+        instructions TEXT NOT NULL DEFAULT '',
+        prompt TEXT NOT NULL DEFAULT '',
+        tags TEXT NOT NULL DEFAULT '[]',
+        pick TEXT NOT NULL DEFAULT 'any',
+        reads TEXT NOT NULL DEFAULT '[]',
+        sees_message INTEGER NOT NULL DEFAULT 1,
+        sees_turns INTEGER NOT NULL DEFAULT 0,
+        sees_system INTEGER NOT NULL DEFAULT 0,
+        asks_reason INTEGER NOT NULL DEFAULT 1,
+        notes TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL
+    );
+    CREATE UNIQUE INDEX taggers_name ON taggers (name);
+    ALTER TABLE aliases ADD COLUMN tag_chain TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE answer_rules ADD COLUMN tag_id INTEGER;
+    ALTER TABLE requests ADD COLUMN answer_tags TEXT;
+    """,
 ]
+CHECKERS_CONVERTED = "checkers_converted"  # meta: each alias's checker model became a tagger (_convert_checkers)
+CHECKER_TAGS = (  # what a converted checker gives: exactly one of these
+    ("ok", "the answer is acceptable under the instructions"),
+    ("bad", "the answer isn't acceptable under the instructions"),
+)
 HOURLY_USAGE = 40  # the migration that added usage_hourly
 
 JOB_DONE = ("succeeded", "failed", "cancelled", "expired")
@@ -752,6 +795,7 @@ REQUEST_COLUMNS = (
     "answer_check",
     "via",
     "edits",
+    "answer_tags",
 )
 
 
@@ -888,19 +932,21 @@ class Alias:
     orch_tasks: int = 8  # ...member tasks...
     orch_seconds: int = 300  # ...and time
     council_roles: str = ""  # "member = role: instructions" per line (app/council.py parse_roles)
-    check_answers: bool = False  # a checker model reads plain-text answers first (app/answer_check.py)
-    check_model: str = ""  # blank = the target model
-    check_instructions: str = ""
     edits: tuple[int, ...] = ()  # prompt edits, in order (app/edits.py)
     label: str = ""  # display name (opencode, the Models page); blank = the name. Apps always send the name
     answer_rules: tuple[int, ...] = ()  # its answer rules, in order (app/answer_rules.py)
-    check_kinds: tuple[str, ...] = DEFAULT_ANSWER_KINDS  # what its answer check reads
-    check_when: str = "undecided"  # its checker model: for every answer no rule decided, or only those "asked"
-    spot_checks: int = SPOT_DEFAULT  # % of answers decided without the checker that it reads too, in the background
+    check_kinds: tuple[str, ...] = DEFAULT_ANSWER_KINDS  # the answer types its answer check reads
+    check_when: str = "undecided"  # its taggers: for every answer no rule decided, or only those "asked"
+    spot_checks: int = SPOT_DEFAULT  # % of answers decided without the taggers that they read too, in the background
     learn_rules: str = "off"  # its rule maker (app/rule_maker.py): off / propose / auto
-    learn_model: str = ""  # the rule maker's model; blank = the checker's
+    learn_model: str = ""  # the rule maker's model; blank = its first tagger's
     learn_pass: bool = False  # rules that pass answers may turn on by themselves too
-    check_flip: bool = False  # its checker model's verdict is turned around: its PASS fails the answer, FAIL passes
+    tag_chain: tuple[TagStep, ...] = ()  # its taggers, in order, and what it does with their tags (app/taggers.py)
+
+    @property
+    def checks(self) -> bool:
+        """It has taggers."""
+        return bool(self.tag_chain)
 
     @property
     def shown(self) -> str:
@@ -1090,6 +1136,7 @@ class Store:
         if current > len(MIGRATIONS):
             raise RuntimeError(f"database schema v{current} is newer than this QueueRouter (v{len(MIGRATIONS)})")
         if current == len(MIGRATIONS):
+            self._convert_checkers()  # a start after a conversion that failed half-way tries again
             return
         if current > 0 and os.path.exists(self.path):
             backup_dir = os.path.join(os.path.dirname(self.path), "backups")
@@ -1105,6 +1152,62 @@ class Store:
             log.info(json.dumps({"event": "db_migrated", "version": version}))
         if current < HOURLY_USAGE:
             self._start_hourly_usage()
+        self._convert_checkers()
+
+    def _convert_checkers(self) -> None:
+        """Once (meta CHECKERS_CONVERTED): each alias's checker model (0.39-0.76) becomes a tagger of its own, with its
+        model and instructions, giving exactly one of the tags "ok" and "bad" (made if there are none), and the alias's
+        chain fails an answer tagged "bad" ("ok", when the alias flipped its checker's verdict); what each alias's
+        check read becomes the answer types those kinds held. One transaction."""
+        if self.get_meta(CHECKERS_CONVERTED):
+            return
+        now = time.time()
+        with self.tx() as db:
+            aliases = db.execute("SELECT * FROM aliases").fetchall()
+            checkers = [a for a in aliases if a["check_answers"] and (a["check_instructions"] or "").strip()]
+            checking = {a["id"] for a in checkers}
+            tags: dict[str, int] = {}
+            for name, meaning in CHECKER_TAGS if checkers else ():
+                row = db.execute("SELECT id FROM answer_tags WHERE name = ?", (name,)).fetchone()
+                if row is None:
+                    cur = db.execute(
+                        "INSERT INTO answer_tags (name, meaning, created_at) VALUES (?, ?, ?)", (name, meaning, now)
+                    )
+                    tags[name] = cur.lastrowid
+                else:
+                    tags[name] = row["id"]
+            taken = {r["name"] for r in db.execute("SELECT name FROM taggers").fetchall()}
+            for alias in aliases:
+                raw = json.loads(alias["check_kinds"] or "[]")
+                newer = any(k in ANSWER_KINDS and k != "text" for k in raw)  # written by 0.77 already
+                kinds = kinds_of(raw) if newer else legacy_kinds(raw)
+                chain = alias["tag_chain"] or "[]"
+                if alias["id"] in checking:
+                    name, n = f"{alias['name']} checker"[:60], 2
+                    while name in taken:
+                        name, n = f"{alias['name'][:52]} checker {n}", n + 1
+                    taken.add(name)
+                    cur = db.execute(
+                        "INSERT INTO taggers (name, model, instructions, tags, pick, reads, created_at) "
+                        "VALUES (?, ?, ?, ?, 'one', ?, ?)",
+                        (
+                            name,
+                            alias["check_model"] or "",
+                            alias["check_instructions"].strip(),
+                            json.dumps([tags["ok"], tags["bad"]]),
+                            json.dumps(list(ANSWER_KINDS)),
+                            now,
+                        ),
+                    )
+                    failing = tags["ok"] if alias["check_flip"] else tags["bad"]
+                    chain = chain_json([TagStep(cur.lastrowid, (Line("any", (failing,), "fail"),))])
+                db.execute(
+                    "UPDATE aliases SET check_kinds = ?, tag_chain = ? WHERE id = ?",
+                    (json.dumps(list(kinds)), chain, alias["id"]),
+                )
+            db.execute(_UPSERT.format(table="meta"), (CHECKERS_CONVERTED, str(now)))
+        if checkers:
+            log.info(json.dumps({"event": "checkers_converted", "aliases": [a["name"] for a in checkers]}))
 
     def _start_hourly_usage(self) -> None:
         """Hourly totals filled from the request log hold all usage only for the days whose totals match the daily
@@ -1605,9 +1708,10 @@ class Store:
             if value := filters.get(column):
                 clauses.append(f"{column} = ?")
                 params.append(value)
-        if tag := filters.get("tag"):
-            clauses.append("(',' || tags || ',') LIKE ?")
-            params.append(f"%,{tag},%")
+        for column, key in (("tags", "tag"), ("answer_tags", "answer_tag")):
+            if tag := filters.get(key):
+                clauses.append(f"(',' || {column} || ',') LIKE ?")
+                params.append(f"%,{tag},%")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"SELECT {columns} FROM requests {where} ORDER BY ts DESC, id DESC LIMIT ?"  # noqa: S608
         return self.read(sql, (*params, limit))
@@ -1650,10 +1754,12 @@ class Store:
             ]  # noqa: S608
             for column in ("client", "outcome", "model", "upstream")
         }
-        tags: set[str] = set()
-        for (text,) in self.read("SELECT DISTINCT tags FROM requests WHERE tags IS NOT NULL AND tags != '' LIMIT 500"):
-            tags.update(text.split(","))
-        values["tag"] = sorted(tags)
+        for column, key in (("tags", "tag"), ("answer_tags", "answer_tag")):
+            tags: set[str] = set()
+            sql = f"SELECT DISTINCT {column} FROM requests WHERE {column} IS NOT NULL AND {column} != '' LIMIT 500"  # noqa: S608
+            for (text,) in self.read(sql):
+                tags.update(t for t in text.split(",") if t)
+            values[key] = sorted(tags)
         return values
 
     def usage_month(self, month: str) -> list[sqlite3.Row]:
@@ -1887,19 +1993,16 @@ class Store:
                 r["orch_tasks"] or 8,
                 r["orch_seconds"] or 300,
                 r["council_roles"] or "",
-                bool(r["check_answers"]),
-                r["check_model"] or "",
-                r["check_instructions"] or "",
-                tuple(i for i in json.loads(r["edits"] or "[]") if isinstance(i, int)),
-                r["label"] or "",
-                tuple(i for i in json.loads(r["answer_rules"] or "[]") if isinstance(i, int)),
-                kinds_of(json.loads(r["check_kinds"] or "[]")),
-                r["check_when"] if r["check_when"] in CHECK_WHEN else "undecided",
-                r["spot_checks"] if r["spot_checks"] is not None else SPOT_DEFAULT,
-                r["learn_rules"] if r["learn_rules"] in LEARN_MODES else "off",
-                r["learn_model"] or "",
-                bool(r["learn_pass"]),
-                bool(r["check_flip"]),
+                edits=tuple(i for i in json.loads(r["edits"] or "[]") if isinstance(i, int)),
+                label=r["label"] or "",
+                answer_rules=tuple(i for i in json.loads(r["answer_rules"] or "[]") if isinstance(i, int)),
+                check_kinds=kinds_of(json.loads(r["check_kinds"] or "[]")),
+                check_when=r["check_when"] if r["check_when"] in CHECK_WHEN else "undecided",
+                spot_checks=r["spot_checks"] if r["spot_checks"] is not None else SPOT_DEFAULT,
+                learn_rules=r["learn_rules"] if r["learn_rules"] in LEARN_MODES else "off",
+                learn_model=r["learn_model"] or "",
+                learn_pass=bool(r["learn_pass"]),
+                tag_chain=chain_of(r["tag_chain"]),
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1930,9 +2033,6 @@ class Store:
         orch_tasks: int = 8,
         orch_seconds: int = 300,
         council_roles: str = "",
-        check_answers: bool = False,
-        check_model: str = "",
-        check_instructions: str = "",
         edits: tuple[int, ...] = (),
         label: str = "",
         answer_rules: tuple[int, ...] = (),
@@ -1942,16 +2042,15 @@ class Store:
         learn_rules: str = "off",
         learn_model: str = "",
         learn_pass: bool = False,
-        check_flip: bool = False,
+        tag_chain: tuple[TagStep, ...] = (),
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
                 "INSERT INTO aliases (name, target_model, upstream_ids, notes, params, fallbacks, fallback_on, "
                 "compact, compact_model, virtual_context, council, council_members, council_judge, council_when, "
                 "council_instructions, council_search, council_search_max, council_search_results, council_fetch, "
-                "orch_rounds, orch_tasks, orch_seconds, council_roles, check_answers, check_model, "
-                "check_instructions, edits, label, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "orch_rounds, orch_tasks, orch_seconds, council_roles, edits, label, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     target_model,
@@ -1976,9 +2075,6 @@ class Store:
                     orch_tasks,
                     orch_seconds,
                     council_roles,
-                    int(check_answers),
-                    check_model,
-                    check_instructions,
                     json.dumps(list(edits)),
                     label,
                     time.time(),
@@ -1986,9 +2082,9 @@ class Store:
             )
             db.execute(
                 "UPDATE aliases SET answer_rules = ?, check_kinds = ?, check_when = ?, spot_checks = ?, "
-                "learn_rules = ?, learn_model = ?, learn_pass = ?, check_flip = ? WHERE id = ?",
+                "learn_rules = ?, learn_model = ?, learn_pass = ?, tag_chain = ? WHERE id = ?",
                 (json.dumps(list(answer_rules)), json.dumps(list(check_kinds)), check_when, spot_checks,
-                 learn_rules, learn_model, int(learn_pass), int(check_flip), cur.lastrowid),
+                 learn_rules, learn_model, int(learn_pass), chain_json(tag_chain), cur.lastrowid),
             )  # fmt: skip
         self.audit(
             actor,
@@ -2003,6 +2099,8 @@ class Store:
         for name in lists:
             if name in fields:
                 fields[name] = json.dumps(list(fields[name]))
+        if "tag_chain" in fields:
+            fields["tag_chain"] = chain_json(fields["tag_chain"])
         allowed = {"target_model", "upstream_ids", "enabled", "notes", "params", "fallbacks", "fallback_on"}
         allowed |= {
             "compact",
@@ -2021,9 +2119,6 @@ class Store:
             "orch_tasks",
             "orch_seconds",
             "council_roles",
-            "check_answers",
-            "check_model",
-            "check_instructions",
             "edits",
             "label",
             "answer_rules",
@@ -2033,7 +2128,7 @@ class Store:
             "learn_rules",
             "learn_model",
             "learn_pass",
-            "check_flip",
+            "tag_chain",
         }
         self._update("aliases", alias_id, allowed, fields)
         if fields.get("learn_rules") == "off":  # its rule maker is off: the answers kept for it go
@@ -2044,11 +2139,12 @@ class Store:
 
     def rename_alias(self, alias_id: int, name: str, actor: str, own_settings: bool = True) -> None:
         """The alias's name (the ID apps send) becomes ``name``, and what QueueRouter keeps that names it follows:
-        other aliases (model, fallbacks, council members and judge, roles, summary and checker models), the model
-        lists of clients and groups, prompt edits' models, schedules and queued jobs, and (``own_settings``: the
-        old name isn't also a provider's model, whose settings these would be) its score, thinking levels, price
-        and limits set on the Models page. One transaction; IntegrityError when another alias has the name. The
-        request log keeps the name each request asked for; usage counts the real models, so it has nothing."""
+        other aliases (model, fallbacks, council members and judge, roles, summary and rule maker models), taggers'
+        models, the model lists of clients and groups, prompt edits' models, schedules and queued jobs, and
+        (``own_settings``: the old name isn't also a provider's model, whose settings these would be) its score,
+        thinking levels, price and limits set on the Models page. One transaction; IntegrityError when another alias
+        has the name. The request log keeps the name each request asked for; usage counts the real models, so it has
+        nothing."""
         with self.tx() as db:
             row = db.execute("SELECT name FROM aliases WHERE id = ?", (alias_id,)).fetchone()
             if row is None:
@@ -2072,19 +2168,19 @@ class Store:
                 roles = "\n".join(role(line) for line in (a["council_roles"] or "").splitlines())
                 db.execute(
                     "UPDATE aliases SET target_model = ?, fallbacks = ?, council_members = ?, council_judge = ?, "
-                    "compact_model = ?, check_model = ?, learn_model = ?, council_roles = ? WHERE id = ?",
+                    "compact_model = ?, learn_model = ?, council_roles = ? WHERE id = ?",
                     (
                         one(a["target_model"]),
                         many(a["fallbacks"]),
                         many(a["council_members"]),
                         one(a["council_judge"] or ""),
                         one(a["compact_model"] or ""),
-                        one(a["check_model"] or ""),
                         one(a["learn_model"] or ""),
                         roles,
                         a["id"],
                     ),
                 )
+            db.execute("UPDATE taggers SET model = ? WHERE model = ?", (name, old))
             for table in ("clients", "client_groups"):
                 for owner in db.execute(f"SELECT id, policy FROM {table}").fetchall():  # noqa: S608
                     policy = ClientPolicy.from_json(owner["policy"])
@@ -2154,11 +2250,12 @@ class Store:
                 r["recent"],
                 bool(r["awaiting"]),
                 r["note"],
+                r["tag_id"] if r["action"] == "tag" else None,
             )
             for r in self.query("SELECT * FROM answer_rules ORDER BY name COLLATE NOCASE")
         ]
 
-    _RULE_FIELDS = ("name", "kind", "find", "match_case", "scope", "action", "negate", "state", "notes")
+    _RULE_FIELDS = ("name", "kind", "find", "match_case", "scope", "action", "negate", "state", "notes", "tag_id")
 
     @staticmethod
     def _rule_row(rule: dict) -> tuple:
@@ -2173,23 +2270,26 @@ class Store:
             int(bool(rule.get("negate"))),
             rule.get("state", "on"),
             rule.get("notes", ""),
+            rule.get("tag") if rule.get("action") == "tag" else None,
         )
 
     def create_rule(self, actor: str, **rule: object) -> int:
         """``rule``: answer_rules.clean_rule's fields. IntegrityError: the name is taken."""
         with self.tx() as db:
             cur = db.execute(
-                f"INSERT INTO answer_rules ({', '.join(self._RULE_FIELDS)}, created_at) VALUES ({'?, ' * 9}?)",  # noqa: S608
+                f"INSERT INTO answer_rules ({', '.join(self._RULE_FIELDS)}, created_at) "  # noqa: S608
+                f"VALUES ({'?, ' * len(self._RULE_FIELDS)}?)",
                 (*self._rule_row(rule), time.time()),
             )
         self.audit(actor, "rule.create", str(rule["name"]))
         return cur.lastrowid
 
-    _MATCHING = ("kind", "find", "match_case", "scope", "action", "negate")  # what a rule does: its counts go with it
+    # what a rule does: its counts go with it
+    _MATCHING = ("kind", "find", "match_case", "scope", "action", "negate", "tag_id")
 
     def update_rule(self, rule_id: int, actor: str, **rule: object) -> None:
         """A change by hand: a rule the model made that you turn on is no longer waiting for you. A change to what
-        it looks for or does starts its counts with the checker afresh (they were the old rule's); a change of
+        it looks for or does starts its counts with the taggers afresh (they were the old rule's); a change of
         state starts its recent outcomes afresh (or old disagreements would turn it back at once)."""
         sets = ", ".join(f"{name} = ?" for name in self._RULE_FIELDS)
         row = self._rule_row(rule)
@@ -2323,7 +2423,7 @@ class Store:
                 taken.add(name)
                 cur = db.execute(
                     f"INSERT INTO answer_rules ({', '.join(self._RULE_FIELDS)}, made_by, why, sample_fails, "  # noqa: S608
-                    f"sample_passes, awaiting, created_at) VALUES ({'?, ' * 14}?)",
+                    f"sample_passes, awaiting, created_at) VALUES ({'?, ' * (len(self._RULE_FIELDS) + 5)}?)",
                     (*self._rule_row({**rule, "name": name}), alias_id, rule.get("why", "")[:300],
                      rule.get("sample_fails", 0), rule.get("sample_passes", 0), int(bool(rule.get("awaiting"))),
                      time.time()),
@@ -2417,6 +2517,157 @@ class Store:
                 "DO UPDATE SET last_run = excluded.last_run, note = excluded.note, new_fails = 0, new_passes = 0",
                 (alias_id, time.time(), note[:500]),
             )
+
+    # -- tags and taggers (app/taggers.py) ----------------------------------------------------------
+
+    def list_tags(self) -> list[Tag]:
+        return [
+            Tag(r["id"], r["name"], r["meaning"], r["given"], r["last_given"], r["created_at"])
+            for r in self.query("SELECT * FROM answer_tags ORDER BY name")
+        ]
+
+    def create_tag(self, actor: str, name: str, meaning: str = "") -> int:
+        """IntegrityError: the name is taken."""
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT INTO answer_tags (name, meaning, created_at) VALUES (?, ?, ?)", (name, meaning, time.time())
+            )
+        self.audit(actor, "tag.create", name)
+        return cur.lastrowid
+
+    def update_tag(self, tag_id: int, actor: str, name: str, meaning: str = "") -> None:
+        """IntegrityError: the name is taken; KeyError: no such tag. Requests already logged keep the old name."""
+        with self.tx() as db:
+            cur = db.execute("UPDATE answer_tags SET name = ?, meaning = ? WHERE id = ?", (name, meaning, tag_id))
+            if cur.rowcount == 0:
+                raise KeyError(tag_id)
+        self.audit(actor, "tag.update", str(tag_id), {"name": name})
+
+    def delete_tag(self, tag_id: int, actor: str) -> None:
+        """The tag, from the taggers that give it and from every alias's decisions (one left with no tags goes).
+        ValueError("tag_in_use"): a rule gives it (change the rule first); KeyError: no such tag."""
+        with self.tx() as db:
+            row = db.execute("SELECT name FROM answer_tags WHERE id = ?", (tag_id,)).fetchone()
+            if row is None:
+                raise KeyError(tag_id)
+            if db.execute("SELECT 1 FROM answer_rules WHERE action = 'tag' AND tag_id = ?", (tag_id,)).fetchone():
+                raise ValueError("tag_in_use")
+            db.execute("DELETE FROM answer_tags WHERE id = ?", (tag_id,))
+            for t in db.execute("SELECT id, tags FROM taggers").fetchall():
+                ids = json.loads(t["tags"] or "[]")
+                if tag_id in ids:
+                    kept = json.dumps([i for i in ids if i != tag_id])
+                    db.execute("UPDATE taggers SET tags = ? WHERE id = ?", (kept, t["id"]))
+            for a in db.execute("SELECT id, tag_chain FROM aliases").fetchall():
+                chain = chain_of(a["tag_chain"])
+                if (kept := without(chain, tag=tag_id)) != chain:
+                    db.execute("UPDATE aliases SET tag_chain = ? WHERE id = ?", (chain_json(kept), a["id"]))
+        self.audit(actor, "tag.delete", row["name"])
+
+    def add_tag_hits(self, hits: dict[int, tuple[int, float]]) -> None:
+        """Tag id -> (answers it was given to, when last)."""
+        if not hits:
+            return
+        with self.tx() as db:
+            db.executemany(
+                "UPDATE answer_tags SET given = given + ?, last_given = MAX(COALESCE(last_given, 0), ?) WHERE id = ?",
+                [(n, at, i) for i, (n, at) in hits.items()],
+            )
+
+    def list_taggers(self) -> list[Tagger]:
+        return [
+            Tagger(
+                r["id"],
+                r["name"],
+                r["model"] or "",
+                r["instructions"] or "",
+                r["prompt"] or "",
+                tuple(i for i in json.loads(r["tags"] or "[]") if isinstance(i, int)),
+                r["pick"] if r["pick"] in PICKS else "any",
+                kinds_of(json.loads(r["reads"] or "[]"), ANSWER_KINDS),
+                bool(r["sees_message"]),
+                r["sees_turns"] or 0,
+                bool(r["sees_system"]),
+                bool(r["asks_reason"]),
+                r["notes"] or "",
+                r["created_at"],
+            )
+            for r in self.query("SELECT * FROM taggers ORDER BY name COLLATE NOCASE")
+        ]
+
+    _TAGGER_FIELDS = (
+        "name",
+        "model",
+        "instructions",
+        "prompt",
+        "tags",
+        "pick",
+        "reads",
+        "sees_message",
+        "sees_turns",
+        "sees_system",
+        "asks_reason",
+        "notes",
+    )
+
+    @staticmethod
+    def _tagger_row(t: dict) -> tuple:
+        """``t`` (taggers.clean_tagger) as the columns in ``_TAGGER_FIELDS``."""
+        return (
+            t["name"],
+            t["model"],
+            t["instructions"],
+            t["prompt"],
+            json.dumps(list(t["tags"])),
+            t["pick"],
+            json.dumps(list(t["reads"])),
+            int(t["message"]),
+            t["turns"],
+            int(t["system"]),
+            int(t["reason"]),
+            t.get("notes", ""),
+        )
+
+    def create_tagger(self, actor: str, **tagger: object) -> int:
+        """``tagger``: taggers.clean_tagger's fields. IntegrityError: the name is taken."""
+        with self.tx() as db:
+            cur = db.execute(
+                f"INSERT INTO taggers ({', '.join(self._TAGGER_FIELDS)}, created_at) "  # noqa: S608
+                f"VALUES ({'?, ' * len(self._TAGGER_FIELDS)}?)",
+                (*self._tagger_row(tagger), time.time()),
+            )
+        self.audit(actor, "tagger.create", str(tagger["name"]))
+        return cur.lastrowid
+
+    def update_tagger(self, tagger_id: int, actor: str, **tagger: object) -> None:
+        """IntegrityError: the name is taken; KeyError: no such tagger."""
+        sets = ", ".join(f"{name} = ?" for name in self._TAGGER_FIELDS)
+        with self.tx() as db:
+            cur = db.execute(f"UPDATE taggers SET {sets} WHERE id = ?", (*self._tagger_row(tagger), tagger_id))  # noqa: S608
+            if cur.rowcount == 0:
+                raise KeyError(tagger_id)
+        self.audit(actor, "tagger.update", str(tagger_id), {"name": tagger["name"]})
+
+    def delete_tagger(self, tagger_id: int, actor: str) -> None:
+        """The tagger, and its step in every alias's chain (a jump to it goes on to the next tagger instead)."""
+        with self.tx() as db:
+            row = db.execute("SELECT name FROM taggers WHERE id = ?", (tagger_id,)).fetchone()
+            if row is None:
+                raise KeyError(tagger_id)
+            db.execute("DELETE FROM taggers WHERE id = ?", (tagger_id,))
+            for a in db.execute("SELECT id, tag_chain FROM aliases").fetchall():
+                chain = chain_of(a["tag_chain"])
+                if (kept := without(chain, tagger=tagger_id)) != chain:
+                    db.execute("UPDATE aliases SET tag_chain = ? WHERE id = ?", (chain_json(kept), a["id"]))
+        self.audit(actor, "tagger.delete", row["name"])
+
+    def tagger_users(self) -> dict[int, list[str]]:
+        """Tagger id -> the aliases that run it."""
+        used: dict[int, list[str]] = {}
+        for alias in self.list_aliases():
+            for step in alias.tag_chain:
+                used.setdefault(step.tagger, []).append(alias.name)
+        return used
 
     # -- prompt edits (app/edits.py) -----------------------------------------------------------
 

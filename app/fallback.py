@@ -8,9 +8,9 @@ An alias can list backup models. The request moves to the next one when (per ali
                 reply that opens with a refusal ("I can't help with ..."). For streams the first
                 ~200 characters are held back to check, then released (or the model is switched).
 A refusal some providers put in a field of its own (``refusal``) counts too. The request itself is resent unchanged;
-nothing is rephrased. An alias that checks answers, with rules (app/answer_rules.py) or a checker model
-(app/answer_check.py), holds back the answer instead (``hold_answer``: whole, or its start when that's all its rules
-read), and moves on when a rule or its checker fails it.
+nothing is rephrased. An alias that checks answers, with rules (app/answer_rules.py) or taggers
+(app/taggers.py), holds back the answer instead (``hold_answer``: whole, or its start when that's all its rules
+read), and moves on when a rule or its taggers fail it.
 An alias's model and fallbacks may be other aliases: the request is forwarded to that alias (app/main.py, ``Hop``)
 and served as one for it, its whole way; the editor refuses loops (``loop_of``).
 """
@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+
+from .quoting import without_thinking
 
 TRIGGERS = ("unavailable", "errors", "context", "refused")
 DEFAULT_TRIGGERS = ("unavailable", "errors", "context")  # "refused" adds a short delay: opt-in
@@ -100,6 +102,8 @@ class Answer:
     refusal: str = ""
     calls: list = field(default_factory=list)
     finish: str | None = None
+    thought: bool = False  # it gave reasoning (in a field of its own)
+    media: bool = False  # it gave audio or images
 
     @property
     def acting(self) -> bool:
@@ -107,10 +111,23 @@ class Answer:
 
     @property
     def kind(self) -> str:
-        """ "tools" (it calls tools), "text" (it says something, a refusal too) or "empty"."""
+        """Its type (answer_rules.ANSWER_KINDS), the first that fits: stopped by the provider's filter, cut off at the
+        token limit, a refusal in the provider's own field, audio or images, tool calls with text or only, text,
+        thinking only (also reasoning left inline in the text), or nothing at all."""
+        if self.finish == "content_filter":
+            return "filtered"
+        if self.finish == "length":
+            return "cut"
+        if self.refusal.strip():
+            return "refusal"
+        if self.media:
+            return "media"
+        said = without_thinking(self.text).strip()
         if self.calls:
-            return "tools"
-        return "text" if self.text.strip() or self.refusal.strip() else "empty"
+            return "tools_text" if said else "tools_only"
+        if said:
+            return "text"
+        return "thinking" if self.thought or self.text.strip() else "nothing"
 
     def shown(self) -> str:
         """The answer as a check reads it: its text, its refusal, and each call as ``[tool call] name(arguments)``."""
@@ -145,12 +162,34 @@ def answer_of(body: bytes) -> Answer:
     ]
     if isinstance(old := message.get("function_call"), dict):
         calls.append([str(old.get("name") or ""), str(old.get("arguments") or "")])
+    content = message.get("content")
     return Answer(
         text if isinstance(text, str) else "",
         refusal if isinstance(refusal, str) else "",
         calls,
         choice.get("finish_reason"),
+        thought=_thought(message),
+        media=_media(message) or (isinstance(content, list) and any(_media_part(p) for p in content)),
     )
+
+
+_REASONING = ("reasoning_content", "reasoning", "thinking")
+
+
+def _thought(part: dict) -> bool:
+    """Reasoning in a field of its own (a message, or a stream's delta)."""
+    return any(isinstance(part.get(k), str) and part[k].strip() for k in _REASONING) or bool(
+        part.get("reasoning_details")
+    )
+
+
+def _media(part: dict) -> bool:
+    """Audio or images (OpenAI's ``audio``; ``images``, as some providers send them)."""
+    return isinstance(part.get("audio"), dict) or bool(isinstance(part.get("images"), list) and part["images"])
+
+
+def _media_part(part: object) -> bool:
+    return isinstance(part, dict) and part.get("type") in ("image_url", "image", "output_image", "audio", "input_audio")
 
 
 def message_text(body: bytes) -> tuple[str, str | None]:
@@ -170,6 +209,8 @@ class AnswerReader:
         self._calls: dict = {}  # index -> [name, arguments]
         self.finish: str | None = None
         self.size = 0  # characters of text, refusal and calls so far
+        self.thought = False  # reasoning came (in a field of its own)
+        self.media = False  # audio or images came
 
     def feed(self, chunk: bytes) -> None:
         self._pending += chunk
@@ -193,6 +234,8 @@ class AnswerReader:
             if isinstance(delta.get("refusal"), str):
                 self._refusal.append(delta["refusal"])
                 self.size += len(delta["refusal"])
+            self.thought = self.thought or _thought(delta)
+            self.media = self.media or _media(delta)
             calls = [(c.get("index", i), c.get("function")) for i, c in enumerate(delta.get("tool_calls") or [])]
             if isinstance(delta.get("function_call"), dict):
                 calls.append(("function_call", delta["function_call"]))
@@ -212,7 +255,7 @@ class AnswerReader:
     @property
     def answer(self) -> Answer:
         calls = [list(c) for c in self._calls.values()]
-        return Answer("".join(self._text), "".join(self._refusal), calls, self.finish)
+        return Answer("".join(self._text), "".join(self._refusal), calls, self.finish, self.thought, self.media)
 
 
 class Pump:

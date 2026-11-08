@@ -9,7 +9,7 @@ import httpx
 
 from app.fallback import loop_of
 from tests.test_admin import OWNER, csrf_of, login
-from tests.test_answer_check import INSTRUCTIONS, words
+from tests.test_answer_check import checked, words
 from tests.test_council import ASK
 from tests.test_council import setup as council_alias
 from tests.test_fallback import chat
@@ -55,20 +55,20 @@ async def test_a_forwarded_alias_checks_its_own_answers(make_stack):
     words(stack, ["bad ", "answer"])
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
-        checked = {"check_answers": "on", "check_model": "mock-model", "check_instructions": INSTRUCTIONS}
-        await save_alias(c, "checked", "strict-model", ["mock-model"], **checked)
+        fields = checked(stack.app.state.store)
+        await save_alias(c, "checked", "strict-model", ["mock-model"], **fields)
         await save_alias(c, "outer", "checked")
         await set_group(c, stack, "All models", models="outer")  # the key may use outer: checked comes with it
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("outer"))
         assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "good answer"
-        # checked's model, its checker (failed it), then its fallback
+        # checked's model, its tagger (failed it), then its fallback
         assert stack.mock["models"] == ["strict-model", "mock-model", "mock-model"]
         refused = await c.post("/v1/chat/completions", headers=stack.headers, json=chat("checked"))
         assert refused.status_code == 403  # asked for itself, it still isn't the key's
     rows = await finished(stack, 4)
     main = next(r for r in rows if r["model"] == "outer" and not r["role"])
     assert main["via"] == "outer → checked" and main["target_model"] == "mock-model"
-    assert main["answer_check"].startswith("strict-model: failed")
+    assert main["answer_check"].startswith("strict-model: checker tagged bad")
 
 
 async def test_a_fallback_alias_takes_over_a_stream(make_stack):

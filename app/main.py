@@ -49,6 +49,7 @@ from . import cron as cron_mod
 from . import edits as edits_mod
 from . import jobs as jobs_mod
 from . import rule_maker as rule_maker_mod
+from . import taggers as taggers_mod
 from . import thinking as thinking_mod
 from . import tools as tools_mod
 from .admin import AdminContext, mount_admin
@@ -214,7 +215,8 @@ class RequestLog:
             "finish_reason": None,
             "stopped": None,  # cancelled: how far it had got ("in queue", "mid-answer"...)
             "fallback": None,  # why it moved on to the alias's next model ("a -> b (reason)"; several: "; ")
-            "answer_check": None,  # what the alias's answer check said, per model checked (app/answer_check.py)
+            "answer_check": None,  # what the alias's answer check said, per model checked (app/taggers.py)
+            "answer_tags": None,  # the tags its answers got, "a,b" (its rules' and taggers')
             "via": None,  # forwarded from alias to alias: the way it came ("a → b"; the app asked for a)
             "edits": None,  # what its prompt edits did, as JSON (app/edits.py Outcome.summary)
             "tags": None,
@@ -277,6 +279,12 @@ def add_note(rlog: RequestLog, field: str, note: str) -> None:
     rlog.fields[field] = f"{current}; {note}" if current else note
 
 
+def add_tags(rlog: RequestLog, names: Iterable[str]) -> None:
+    """Tags an answer got, after those the request's answers already got (each once)."""
+    have = [t for t in (rlog.fields.get("answer_tags") or "").split(",") if t]
+    rlog.fields["answer_tags"] = ",".join(dict.fromkeys([*have, *names])) or None
+
+
 @dataclass
 class Admission:
     """Everything needed to queue and send one request."""
@@ -313,24 +321,27 @@ class Admission:
 
 @dataclass(frozen=True)
 class Check:
-    """An alias's answer check: its rules (app/answer_rules.py), then its checker model if it has one (who checks, how,
-    and as which client: the check is made as that client), and which answers it reads."""
+    """An alias's answer check: its rules (app/answer_rules.py), then its taggers if it has any (app/taggers.py),
+    as which client (the taggers' requests are made as that client), and which answer types it reads."""
 
-    model: str | None  # None: rules only
-    instructions: str
     client: ClientKey
     rules: tuple[answer_rules.Rule, ...] = ()  # on and watching, in order
     kinds: tuple[str, ...] = answer_rules.DEFAULT_ANSWER_KINDS
-    when: str = "undecided"  # the checker reads every answer no rule decided, or only those a rule sends to it
-    spot: int = 0  # % of the answers decided without the checker that it reads too, in the background
+    chain: tuple[taggers_mod.Link, ...] = ()  # its taggers, in order (none: rules only)
+    tags: Mapping[int, taggers_mod.Tag] = dataclasses.field(default_factory=dict)  # every tag, by id
+    when: str = "undecided"  # the taggers read every answer no rule decided, or only those a rule sends to them
+    spot: int = 0  # % of the answers decided without the taggers that they read too, in the background
     alias_id: int | None = None
-    learn: str = "off"  # its rule maker: answers the checker judged are kept for it unless "off"
-    flip: bool = False  # the checker's verdict is turned around (its PASS fails the answer, its FAIL passes it)
+    learn: str = "off"  # its rule maker: answers the taggers decided are kept for it unless "off"
 
     @property
     def whole(self) -> bool:
-        """It reads whole answers (a checker, or a rule that looks anywhere); else only their start."""
-        return self.model is not None or any(rule.whole for rule in self.rules)
+        """It reads whole answers (taggers, or a rule that looks anywhere); else only their start."""
+        return bool(self.chain) or any(rule.whole for rule in self.rules)
+
+    @property
+    def taggers(self) -> dict[int, taggers_mod.Tagger]:
+        return {link.tagger.id: link.tagger for link in self.chain}
 
 
 @dataclass(frozen=True)
@@ -566,6 +577,7 @@ def create_app(
         )
     )
     rule_hits: dict[int, tuple[int, float]] = {}  # answer rule id -> (answers it decided, when last), till written
+    tag_hits: dict[int, tuple[int, float]] = {}  # tag id -> (answers it was given to, when last), till written
     rule_outcomes: list[tuple[int, bool]] = []  # (rule id, the checker agreed?), till written (app/answer_rules.py)
     answer_samples: list[tuple[int, str, str, str]] = []  # checked answers kept for rule makers, till written
     learning_clients: dict[int, ClientKey] = {}  # alias id -> the client its rule maker asks as (its last checked)
@@ -740,6 +752,13 @@ def create_app(
                 await asyncio.to_thread(store.add_rule_hits, taken)
             except Exception as exc:
                 log.error(json.dumps({"event": "rule_hits_write_failed", "error": repr(exc)[:200]}))
+        if tag_hits:  # how often each tag was given (Taggers page)
+            taken = dict(tag_hits)
+            tag_hits.clear()
+            try:
+                await asyncio.to_thread(store.add_tag_hits, taken)
+            except Exception as exc:
+                log.error(json.dumps({"event": "tag_hits_write_failed", "error": repr(exc)[:200]}))
         if rule_outcomes:  # the checker agreeing with rules, or not: some turn on or go back to watching by themselves
             outcomes = rule_outcomes[:]
             rule_outcomes.clear()
@@ -793,8 +812,10 @@ def create_app(
             rules = [snapshot.rules[i] for i in alias.answer_rules if i in snapshot.rules]
             avoid = [answer_rules.rule_key(r.kind, r.find, r.negate) for r in rules]
             avoid += await asyncio.to_thread(store.made_rule_keys, alias.id)
-            model = alias.learn_model or alias.check_model or alias.target_model
-            payload = rule_maker_mod.payload(model, alias.check_instructions, rules, samples, alias.check_flip)
+            first = snapshot.taggers.get(alias.tag_chain[0].tagger) if alias.tag_chain else None
+            model = alias.learn_model or (first.model if first else "") or alias.target_model
+            how = taggers_mod.describe(alias.tag_chain, snapshot.taggers, snapshot.tags)
+            payload = rule_maker_mod.payload(model, how, rules, samples)
             body = await internal_completion(client, payload, "low", tag="check", role="rule maker")
             answer = edits_mod.reply_text(body) if body is not None else None
             proposals = rule_maker_mod.parse(answer) if answer else None
@@ -2234,13 +2255,12 @@ def create_app(
     async def check_answer(
         adm: Admission, step: Step, got: Got, events: AsyncIterator, triggers: frozenset[str]
     ) -> AsyncIterator[Checking | tuple[Got | None, str]]:
-        """An alias's answer check: its rules (app/answer_rules.py), the built-in refusal phrases, then its checker
-        model (app/answer_check.py). The answer is held back while it comes, whole, or only its start when that's
-        all its rules read (the rest then streams on). Yields ``Checking`` while waiting, then (the ``Got`` to pass
-        on, "") or (None, why it failed: the next model's turn). An answer of a kind it doesn't read (one that calls
-        tools, unless ticked), or that still runs when the key's time is up, is passed on at once, unchecked. Once
-        all of it is read, ``events`` (the attempt) is closed so its slot is free meanwhile, for the checker's
-        request too."""
+        """An alias's answer check: its rules (app/answer_rules.py), the built-in refusal phrases, then its taggers
+        (app/taggers.py). The answer is held back while it comes, whole, or only its start when that's all its rules
+        read (the rest then streams on). Yields ``Checking`` while waiting, then (the ``Got`` to pass on, "") or
+        (None, why it failed: the next model's turn). An answer of a type it doesn't read (one that calls tools,
+        unless ticked), or that still runs when the key's time is up, is passed on at once, unchecked. Once all of it
+        is read, ``events`` (the attempt) is closed so its slot is free meanwhile, for the taggers' requests too."""
         check = adm.check
         stream = bool(adm.rlog.fields["stream"])
         timed = UsageSniffer() if stream else None  # the answer's real times, as it comes (the app sees it later)
@@ -2252,7 +2272,7 @@ def create_app(
                 keepalive_s(),
                 adm.deadline,
                 (lambda chunk: timed.feed(chunk, time.monotonic())) if timed else None,
-                tools="tools" in check.kinds,
+                tools=any(k in check.kinds for k in answer_rules.TOOL_KINDS),
                 start=None if check.whole else answer_rules.START_CHARS,
             )
             async with contextlib.aclosing(reads) as items:
@@ -2270,7 +2290,8 @@ def create_app(
         replay = held.replay
         replay.sniffer = timed
         answer = held.answer
-        if answer.kind not in check.kinds:  # e.g. it calls tools, not ticked: passed on as it comes
+        kind = answer.kind
+        if kind not in check.kinds:  # e.g. it calls tools, not ticked: passed on as it comes
             yield Got(replay, got.target), ""
             return
         if check.whole and not held.whole:
@@ -2284,59 +2305,145 @@ def create_app(
             shown = answer.shown()
             decision = answer_rules.decide(check.rules, shown)
             rule, watched = decision.rule, decision.watched
-            if rule is not None:
-                count, _ = rule_hits.get(rule.id, (0, 0.0))
-                rule_hits[rule.id] = (count + 1, time.time())  # for the Rules page
+            for r in ([rule] if rule is not None else []) + decision.tagged:
+                count, _ = rule_hits.get(r.id, (0, 0.0))
+                rule_hits[r.id] = (count + 1, time.time())  # for the Rules page
+            given = list(dict.fromkeys(r.tag for r in decision.tagged if r.tag in check.tags))
+            got_tags(adm.rlog, check, given)
             if rule is not None and rule.action == "fail":
                 add_note(adm.rlog, "answer_check", f"{step.model}: rule '{rule.name}' failed it")
-                spot_check(adm, check, step, shown, rule, watched)
-                note_discarded(adm, step, held, timed, answered, "failed answer rule", f"rule: {rule.name}")
+                spot_check(adm, check, step, shown, kind, given, rule, watched)
+                note_discarded(
+                    adm, step, held, timed, answered, "failed answer rule", f"rule: {rule.name}", names_of(check, given)
+                )
                 await replay.aclose()
                 yield None, f"rule: {rule.name}"
                 return
             if rule is not None and rule.action == "pass":  # nothing else runs
                 add_note(adm.rlog, "answer_check", f"{step.model}: rule '{rule.name}' passed it")
-                spot_check(adm, check, step, shown, rule, watched)
+                spot_check(adm, check, step, shown, kind, given, rule, watched)
                 yield Got(replay, got.target), ""
                 return
             if "refused" in triggers and is_refusal(answer):
-                note_discarded(adm, step, held, timed, answered, "refused")
+                note_discarded(adm, step, held, timed, answered, "refused", None, names_of(check, given))
                 await replay.aclose()
                 yield None, "refused"
                 return
-            if rule is not None and rule.action == "pass_free":  # the free checks ran: not the checker model
+            if rule is not None and rule.action == "pass_free":  # the free checks ran: not the taggers
                 add_note(adm.rlog, "answer_check", f"{step.model}: rule '{rule.name}' passed it (free checks ran)")
-                spot_check(adm, check, step, shown, rule, watched)
+                spot_check(adm, check, step, shown, kind, given, rule, watched)
                 yield Got(replay, got.target), ""
                 return
             asked = rule if rule is not None and rule.action == "ask" else None
-            if check.model is None or (check.when == "asked" and asked is None):
-                if check.model is not None:  # it reads only answers a rule sends to it
-                    add_note(adm.rlog, "answer_check", f"{step.model}: no rule asked the checker, passed on")
-                    spot_check(adm, check, step, shown, None, watched)
+            if not check.chain or (check.when == "asked" and asked is None):
+                if check.chain:  # they read only answers a rule sends to them
+                    add_note(adm.rlog, "answer_check", f"{step.model}: no rule asked the taggers, passed on")
+                    spot_check(adm, check, step, shown, kind, given, None, watched)
                 yield Got(replay, got.target), ""
                 return
             if asked is not None:
-                add_note(adm.rlog, "answer_check", f"{step.model}: rule '{asked.name}' asked the checker")
-            limit = answer_check.TIMEOUT_S
-            if adm.deadline is not None:
-                limit = min(limit, adm.deadline - answered)
-            if limit < 1:
-                add_note(adm.rlog, "answer_check", f"{step.model}: not checked (no time left)")
-                yield Got(replay, got.target), ""
-                return
+                add_note(adm.rlog, "answer_check", f"{step.model}: rule '{asked.name}' asked the taggers")
             adm.rlog.fields["stage"] = "checking"
-            yield Checking(f"checking the answer of {step.model}")
-            payload = answer_check.check_payload(check.model, check.instructions, step.body, shown)
+            result = taggers_mod.Tagged("pass", given)
+            tagging = run_taggers(
+                check,
+                step.body,
+                shown,
+                kind,
+                given,
+                LANE_NAMES[adm.lane],
+                adm.headers,
+                adm.request_id,
+                adm.deadline,
+                adm.rlog,
+                step.model,
+            )
+            async with contextlib.aclosing(tagging) as items:
+                async for item in items:
+                    if isinstance(item, Checking):
+                        yield item
+                    else:
+                        result = item
+            if result.judged and result.asked:  # what rules watching (and one that asked) are measured by, and learned
+                learn_from(check, shown, result.outcome == "fail", result.reason, asked, watched)
+            if result.outcome == "fail":
+                failed = f"failed: {result.reason}"
+                note_discarded(
+                    adm, step, held, timed, answered, "failed answer check", failed, names_of(check, result.given)
+                )
+                await replay.aclose()
+                yield None, f"check: {result.reason}"
+                return
+        except BaseException:
+            await replay.aclose()
+            raise
+        finally:
+            adm.rlog.fields["stage"] = None
+        yield Got(replay, got.target), ""
+
+    def names_of(check: Check, ids: Iterable[int]) -> list[str]:
+        return taggers_mod.names(ids, check.tags)
+
+    def got_tags(rlog: RequestLog | None, check: Check, ids: list[int]) -> None:
+        """Tags an answer got: on its request (Requests page), and counted (Taggers page)."""
+        if rlog is None or not ids:
+            return
+        add_tags(rlog, names_of(check, ids))
+        now = time.time()
+        for tag in ids:
+            count, _ = tag_hits.get(tag, (0, 0.0))
+            tag_hits[tag] = (count + 1, now)
+
+    async def run_taggers(
+        check: Check,
+        body: bytes,
+        shown: str,
+        kind: str,
+        given: list[int],
+        lane: str,
+        origin: Mapping[str, str] | None,
+        parent: str,
+        deadline: float | None,
+        rlog: RequestLog | None,
+        label: str,
+    ) -> AsyncIterator[Checking | taggers_mod.Tagged]:
+        """An alias's taggers on an answer, in its chain's order, each deciding with the tags so far (``given``: its
+        rules' first): yields ``Checking`` while one runs, then the ``Tagged``. With ``rlog`` it's the answer's own
+        check: what each tagger said goes on the Requests page (``label``: the model that answered) and the tags on
+        the request; without, a spot check (nothing is noted, their requests are "spot check" calls)."""
+
+        def note(text: str) -> None:
+            if rlog is not None:
+                add_note(rlog, "answer_check", f"{label}: {text}")
+
+        tags, given = check.tags, list(given)
+        place = {link.tagger.id: n for n, link in enumerate(check.chain)}
+        index, asked, judged = 0, 0, True
+        while index < len(check.chain):
+            link = check.chain[index]
+            tagger = link.tagger
+            if kind not in tagger.reads:
+                index += 1
+                continue
+            limit = taggers_mod.TIMEOUT_S
+            if deadline is not None:
+                limit = min(limit, deadline - time.monotonic())
+            if limit < 1:
+                note("not checked (no time left), passed on")
+                yield taggers_mod.Tagged("pass", given, "no time left", False, asked)
+                return
+            if rlog is not None:
+                yield Checking(f"checking the answer of {label}: {tagger.name}")
+            payload = taggers_mod.payload(link.model, tagger, tags, body, shown, kind)
             task = asyncio.ensure_future(
                 internal_completion(
                     check.client,
                     payload,
-                    LANE_NAMES[adm.lane],
+                    lane,
                     tag="check",
-                    origin=adm.headers,
-                    role="answer check",
-                    parent=adm.request_id,
+                    origin=origin,
+                    role=f"{'tagger' if rlog is not None else 'spot check'}: {tagger.name}"[:80],
+                    parent=parent,
                 )
             )
             started = time.monotonic()
@@ -2350,40 +2457,49 @@ def create_app(
                     task.cancel()  # its own request ends too (its slot freed), as a cancelled one
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await task
-            if task.cancelled():
-                passed, reason = None, f"the checker took over {round(limit)} s"
-            elif (body := task.result()) is None:
-                passed, reason = None, "the checker's request failed"
-            else:
-                passed, reason = answer_check.verdict_of(body)
-            if check.flip:  # the alias turns the checker's verdict around: what follows goes by the flipped one
-                passed, reason = answer_check.flipped(passed, reason)
-            if passed is not None:  # what the rules watching (and one that asked) are measured by, and kept to learn
-                learn_from(check, shown, not passed, reason, asked, watched)
+            asked += 1
             seconds = f"{time.monotonic() - started:.1f} s"
-            if passed is None:
-                add_note(adm.rlog, "answer_check", f"{step.model}: not checked ({reason}), passed on")
-                log.warning(json.dumps({"event": "check_failed", "client": adm.client, "reason": reason}))
-            elif passed:
-                said = f": {reason}" if check.flip else ""
-                add_note(adm.rlog, "answer_check", f"{step.model}: passed ({seconds}){said}")
+            if task.cancelled():
+                reply = taggers_mod.Reply(None, problem=f"it took over {round(limit)} s")
+            elif (replied := task.result()) is None:
+                reply = taggers_mod.Reply(None, problem="its request failed")
             else:
-                add_note(adm.rlog, "answer_check", f"{step.model}: failed ({seconds}): {reason}")
-                note_discarded(adm, step, held, timed, answered, "failed answer check", f"failed: {reason}")
-                await replay.aclose()
-                yield None, f"check: {reason}"
+                reply = taggers_mod.reply_of(replied, tagger, tags)
+            if reply.tags is None:
+                judged = False
+                do, to, line = link.step.no_reply, None, None
+                why = f"{tagger.name} gave no tags ({reply.problem})"
+                said = f"{why} ({seconds})"
+                if rlog is not None:
+                    log.warning(json.dumps({"event": "tagger_failed", "tagger": tagger.name, "reason": reply.problem}))
+            else:
+                fresh = [t for t in reply.tags if t not in given]
+                given += fresh
+                got_tags(rlog, check, fresh)
+                do, to, line = taggers_mod.move(link.step, given)
+                named = ", ".join(taggers_mod.names(reply.tags, tags)) or "nothing"
+                reason = f": {reply.reason}" if reply.reason else ""
+                why = f"{tagger.name} {taggers_mod.line_words(line, tags)}" if line else f"{tagger.name} tagged {named}"
+                why += reason
+                ignored = f" (not its tags: {', '.join(reply.ignored)})" if reply.ignored else ""
+                said = f"{tagger.name} tagged {named} ({seconds}){reason}{ignored}"
+            if do == "goto" and place.get(to, -1) > index:
+                index, then = place[to], f"on to {check.chain[place[to]].tagger.name}"
+            else:
+                index += 1
+                then = {"pass": "passed", "fail": "failed"}.get(do, "next")
+            note(f"{said} → {then}")
+            if do in ("pass", "fail"):
+                yield taggers_mod.Tagged(do, given, why, judged, asked)
                 return
-        except BaseException:
-            await replay.aclose()
-            raise
-        finally:
-            adm.rlog.fields["stage"] = None
-        yield Got(replay, got.target), ""
+        kind_label = answer_rules.ANSWER_KIND_LABELS.get(kind, kind)
+        note("passed (no tagger failed it)" if asked else f"no tagger reads {kind_label}, passed on")
+        yield taggers_mod.Tagged("pass", given, "", judged, asked)
 
     def learn_from(
         check: Check, shown: str, failed: bool, reason: str, rule: answer_rules.Rule | None, watched: list
     ) -> None:
-        """The checker's verdict on an answer: whether it agreed with ``rule`` (the one that decided it, or asked)
+        """The taggers' decision on an answer: whether it agreed with ``rule`` (the one that decided it, or asked)
         and with each rule ``watched`` (they decide nothing yet), counted for the Rules page and for rules turning on
         or off by themselves; and, when the alias's rule maker is on, the answer kept for it (app/rule_maker.py)."""
         for r in (*watched, *([rule] if rule is not None else [])):
@@ -2394,46 +2510,43 @@ def create_app(
             learning_clients[check.alias_id] = check.client
 
     def spot_check(
-        adm: Admission, check: Check, step: Step, shown: str, rule: answer_rules.Rule | None, watched: list
+        adm: Admission,
+        check: Check,
+        step: Step,
+        shown: str,
+        kind: str,
+        given: list[int],
+        rule: answer_rules.Rule | None,
+        watched: list,
     ) -> None:
-        """Some of the answers decided without the checker model (``check.spot`` %) go to it too, in the background,
-        as low priority: how often the rule that decided agrees with it shows on the Rules page, and a rule the
-        model made that starts disagreeing goes back to watching by itself. The answer itself is already on its way
-        (or failed): the spot check changes nothing for it. At most SPOTS_AT_ONCE run at once per alias (more are
-        skipped), each for at most the checker's time limit."""
-        if check.model is None or check.spot <= 0 or random.random() * 100 >= check.spot:  # noqa: S311
+        """Some of the answers decided without the taggers (``check.spot`` %) go to them too, in the background, as
+        low priority: how often the rule that decided agrees with what they decide shows on the Rules page, and a
+        rule the model made that starts disagreeing goes back to watching by itself. The answer itself is already on
+        its way (or failed): the spot check changes nothing for it. At most SPOTS_AT_ONCE run at once per alias (more
+        are skipped), each tagger for at most its time limit."""
+        if not check.chain or check.spot <= 0 or random.random() * 100 >= check.spot:  # noqa: S311
             return
         if spots_running.get(check.alias_id, 0) >= SPOTS_AT_ONCE:
             return
-        payload = answer_check.check_payload(check.model, check.instructions, step.body, shown)
         spots_running[check.alias_id] = spots_running.get(check.alias_id, 0) + 1
 
         async def run() -> None:
+            result = None
             try:
-                body = await asyncio.wait_for(
-                    internal_completion(
-                        check.client,
-                        payload,
-                        "low",
-                        tag="check",
-                        origin=adm.headers,
-                        role="spot check",
-                        parent=adm.request_id,
-                    ),
-                    answer_check.TIMEOUT_S,
+                tagging = run_taggers(
+                    check, step.body, shown, kind, given, "low", adm.headers, adm.request_id, None, None, ""
                 )
-            except TimeoutError:
-                return
+                async with contextlib.aclosing(tagging) as items:
+                    async for item in items:
+                        if isinstance(item, taggers_mod.Tagged):
+                            result = item
             finally:
                 if (left := spots_running.get(check.alias_id, 1) - 1) > 0:
                     spots_running[check.alias_id] = left
                 else:
                     spots_running.pop(check.alias_id, None)
-            passed, reason = answer_check.verdict_of(body) if body is not None else (None, "")
-            if check.flip:
-                passed, reason = answer_check.flipped(passed, reason)
-            if passed is not None:
-                learn_from(check, shown, not passed, reason, rule, watched)
+            if result is not None and result.judged and result.asked:
+                learn_from(check, shown, result.outcome == "fail", result.reason, rule, watched)
 
         in_background(run())
 
@@ -2458,10 +2571,11 @@ def create_app(
         answered: float,
         role: str,
         check: str | None = None,
+        tags: list[str] | None = None,
     ) -> None:
         """An answer the app never got (it failed the check, or refused): a row of its own under the request on
-        the Requests page, so what it cost counts (usage, the client's limits and quotas, its run's budget).
-        ``answered``: when all of it had come (monotonic)."""
+        the Requests page, so what it cost counts (usage, the client's limits and quotas, its run's budget), with the
+        tags it got. ``answered``: when all of it had come (monotonic)."""
         main = adm.rlog
         if timed is not None:
             tokens = timed.prompt_tokens, timed.completion_tokens, timed.cached_tokens, timed.cache_write_tokens
@@ -2481,6 +2595,7 @@ def create_app(
             role=role,
             parent=main.fields["id"],
             answer_check=check,
+            answer_tags=",".join(tags or ()) or None,
         )
         granted = _granted_at(main)
         row.finish(
@@ -2932,6 +3047,17 @@ def create_app(
         if isinstance(response, StreamingResponse) or response.status_code != 200:
             return None
         return bytes(response.body)
+
+    async def try_tagger(client_name: str, payload: dict) -> tuple[bytes | None, str]:
+        """The Taggers page's Try it: a tagger's request, as an enabled client (a row of its own on the Requests
+        page); (its reply's body, "") or (None, why not)."""
+        client = next((c for c in snapshot.clients.values() if c.name == client_name), None)
+        if client is None:
+            return None, f"there's no enabled client named {client_name}"
+        body = await internal_completion(client, payload, "normal", tag="check", role="tagger: try it")
+        return body, "" if body is not None else "its request failed (the Requests page says why)"
+
+    app.state.try_tagger = try_tagger
 
     def chosen_edits(alias, client: ClientKey, done: frozenset[int]) -> list[edits_mod.Edit]:
         """The prompt edits a request gets, in order: its alias's, then its group's and its client's own (the
@@ -4592,23 +4718,25 @@ def create_app(
         more = len(entries) > 1 or hop is not None  # something to move on to
         check = None  # the alias's answer check: chat completions from apps (not QueueRouter's own requests)
         if alias and more and not internal and path == "chat/completions" and isinstance(payload, dict):
-            checker = alias.check_answers and alias.check_instructions.strip()
-            # rules on, and those watching when there is a checker whose verdicts they are measured by
-            live = ("on", "watch") if checker else ("on",)
+            chain = tuple(
+                taggers_mod.Link(step, tagger, tagger.model or alias.target_model)
+                for step in alias.tag_chain
+                if (tagger := snapshot.taggers.get(step.tagger)) is not None
+            )
+            # rules on, and those watching when there are taggers whose decisions they are measured by
+            live = ("on", "watch") if chain else ("on",)
             rules = tuple(r for i in alias.answer_rules if (r := snapshot.rules.get(i)) is not None and r.state in live)
-            if rules or checker:
-                model = (alias.check_model or alias.target_model) if checker else None
+            if rules or chain:
                 check = Check(
-                    model,
-                    alias.check_instructions,
                     client,
                     rules,
                     alias.check_kinds,
+                    chain,
+                    snapshot.tags,
                     alias.check_when,
                     alias.spot_checks,
                     alias.id,
-                    alias.learn_rules if checker else "off",
-                    alias.check_flip,
+                    alias.learn_rules if chain else "off",
                 )
         param_changes = []
         strip_usage = False  # usage asked for here, not by the app: its chunk is left out of the app's stream

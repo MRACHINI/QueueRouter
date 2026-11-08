@@ -7,6 +7,7 @@ import sqlite3
 import httpx
 import pytest
 
+from app import taggers
 from app.config import ClientPolicy
 from app.store import Store
 from tests.test_admin import OWNER, csrf_of, login
@@ -37,7 +38,10 @@ def test_renaming_an_alias_takes_what_names_it_along(tmp_path):
         council_roles="plain = skeptic: doubt it\nmock-model = fan\nplainly = other",
         compact="summarise",
         compact_model="plain",
-        check_model="plain",
+    )
+    tag = store.create_tag("t", "ok")
+    tagger = store.create_tagger(
+        "t", **taggers.clean_tagger({"name": "g", "model": "plain", "tags": [tag], "reads": ["text"]}, [tag])
     )
     group = store.create_group("g", "t", ClientPolicy(allowed_models=("plain", "mock-model")))
     edit = store.create_edit("tone", "rewrite", {"model": "plain", "instructions": "x"}, "t")
@@ -57,7 +61,8 @@ def test_renaming_an_alias_takes_what_names_it_along(tmp_path):
     assert outer.target_model == "simple" and outer.fallbacks == ("simple", "other")
     assert outer.council_members == ("simple", "mock-model") and outer.council_judge == "simple"
     assert outer.council_roles == "simple = skeptic: doubt it\nmock-model = fan\nplainly = other"
-    assert outer.compact_model == "simple" and outer.check_model == "simple"
+    assert outer.compact_model == "simple"
+    assert next(t for t in store.list_taggers() if t.id == tagger).model == "simple"  # a tagger's model too
     assert next(g for g in store.list_groups() if g.id == group).policy.allowed_models == ("simple", "mock-model")
     edits = {e.id: e for e in store.list_edits()}
     assert edits[edit].settings["model"] == "simple"

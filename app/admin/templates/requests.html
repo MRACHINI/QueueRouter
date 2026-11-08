@@ -6,7 +6,7 @@
   <h1>Requests</h1>
   <form method="get" action="/admin/requests" class="row wrap" id="request-filters">
     <span class="live-status" id="requests-status" role="status"></span>
-    {% for key, label in (("client", "clients"), ("outcome", "outcomes"), ("model", "models"), ("upstream", "upstreams"), ("tag", "tags")) %}
+    {% for key, label in (("client", "clients"), ("outcome", "outcomes"), ("model", "models"), ("upstream", "upstreams"), ("tag", "tags"), ("answer_tag", "answer tags")) %}
     <select name="{{ key }}" aria-label="{{ key }}">
       <option value="">all {{ label }}</option>
       {% if filters[key] %}<option value="{{ filters[key] }}" selected>{{ filters[key] | model_label if key == "model" else filters[key] }}</option>{% endif %}

@@ -15,6 +15,7 @@ from .config import Bootstrap, ClientKey, Settings, with_group
 from .edits import Edit
 from .names import ModelNames
 from .store import Alias, Pool, Store, Upstream
+from .taggers import Tag, Tagger
 
 log = logging.getLogger("queuerouter")
 
@@ -55,6 +56,8 @@ class Snapshot:
     inactive_clients: dict[str, tuple[str, str]] = field(default_factory=dict)
     edits: dict[int, Edit] = field(default_factory=dict)  # prompt edits by id (app/edits.py), with what models made
     rules: dict[int, Rule] = field(default_factory=dict)  # answer rules by id (app/answer_rules.py)
+    taggers: dict[int, Tagger] = field(default_factory=dict)  # by id (app/taggers.py)
+    tags: dict[int, Tag] = field(default_factory=dict)  # by id
 
     @property
     def configured(self) -> bool:
@@ -101,6 +104,8 @@ def load_snapshot(store: Store) -> Snapshot:
         inactive_clients=inactive,
         edits={e.id: e for e in store.list_edits()},
         rules={r.id: r for r in store.list_rules()},
+        taggers={t.id: t for t in store.list_taggers()},
+        tags={t.id: t for t in store.list_tags()},
     )
 
 

@@ -58,59 +58,91 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
   <fieldset class="card">
     <legend>Answer check</legend>
     <p class="small muted">An answer from any of this alias's models but the last is checked before the app gets it, in
-    this order: the rules below, the built-in refusal phrases (with the "refused" trigger above), then the checker
-    model if it's on. The first that fails it sends the same request to the next fallback model (needs one), and the
-    Requests page says why. The last model's answer isn't checked: nothing is left to fall back to.</p>
+    this order: the rules below, the built-in refusal phrases (with the "refused" trigger above), then its taggers. The
+    first that fails it sends the same request to the next fallback model (needs one), and the Requests page says why.
+    The last model's answer isn't checked: nothing is left to fall back to.</p>
     <label>Rules, in order {{ picker("answer_rules", a.answer_rules, "multi", "Add an answer rule…", True, "rule-choices", True) }}
       <input type="hidden" name="rules_seen" value="{{ rules_seen }}">
       <small class="muted">Exact text, words or a pattern (made on the <a href="/admin/rules">Rules</a> page): the first
-      one on that matches decides: it fails or passes the answer, or asks the checker model. They cost nothing and take
-      no time. Rules watching decide nothing (they need the checker model on). When they all look at the start of the
-      answer and the checker model is off, only that start is held back before the answer streams on.</small></label>
-    <fieldset class="plain"><legend class="small muted">What it reads</legend>
+      one on that matches decides: it fails or passes the answer, or asks the taggers; a rule that tags gives its tag and
+      decides nothing. They cost nothing and take no time. Rules watching decide nothing (they need taggers). When they
+      all look at the start of the answer and there are no taggers, only that start is held back before the answer
+      streams on.</small></label>
+    <fieldset class="plain"><legend class="small muted">Check these answers</legend>
       <input type="hidden" name="kinds" value="shown">
       <div class="row wrap">{% for k in answer_kinds %}
         <label class="check"><input type="checkbox" name="kind_{{ k }}" {% if k in a.check_kinds %}checked{% endif %}> {{ answer_kind_labels[k] }}</label>
       {% endfor %}</div>
-      <small class="muted">An answer of a kind that isn't ticked passes on as it comes. An answer that calls tools is read
+      <small class="muted">An answer of a type that isn't ticked passes on as it comes. An answer that calls tools is read
       with its calls, as <code>[tool call] name(arguments)</code>; in an agent most steps are such answers, so each
-      would wait for the check (and for a checker model, pay for one more request). A refusal some providers put in a
-      field of its own counts as the answer's text.</small></fieldset>
-    <label class="check"><input type="checkbox" name="check_answers" {% if a.check_answers %}checked{% endif %}>
-      A checker model reads the answer too</label>
-    <label>Checker model {{ picker("check_model", a.check_model, "single", "blank = the target model") }}
-      <small class="muted">Prefer a small, fast model, ideally on another provider (it uses a slot).</small></label>
-    <label>Instructions <textarea name="check_instructions" rows="4" maxlength="4000" placeholder="e.g. Fail the answer if it refuses, lectures, or doesn't do what was asked. Fail it if it isn't in the user's language.">{{ a.check_instructions }}</textarea>
-      <small class="muted">The checker sees these, the user's last message and the answer, not the rest of the
-      conversation, and answers PASS or FAIL with a reason. A checked answer reaches the app all at once once it's
-      checked, not word by word; if the checker fails or takes over two minutes, the answer goes through.</small></label>
-    <label class="check"><input type="checkbox" name="check_flip" {% if a.check_flip %}checked{% endif %}>
-      Flip the checker's verdict: its PASS fails the answer, its FAIL passes it</label>
-    <small class="muted">For a checker you can't word the other way round, e.g. a grader that says PASS when it finds
-      what you want to catch. Only the checker model's verdict is flipped, not rules or the built-in refusal phrases.
-      If the checker gives no verdict (an error, a time-out), the answer still goes through. Rules watching, spot
-      checks and the rule maker go by the flipped verdict. The Requests page says when it was flipped.</small>
-    <label>Ask the checker model <select name="check_when">
+      would wait for the check (and for each tagger, pay for one more request). Cut off: it hit the token limit,
+      whatever it holds.</small></fieldset>
+
+    <fieldset class="plain" id="chain"><legend class="small muted">Taggers, in order</legend>
+      <small class="muted">Each tagger (made on the <a href="/admin/taggers">Taggers</a> page) gives the answer tags; then
+      this alias's decisions after it are tried in order, on the tags so far (its rules' and every tagger's before it
+      too): the first that holds decides. With none holding, "otherwise". When the last one has gone on, the answer
+      passes. A tagger that doesn't read the answer's type is skipped. Tags:
+      {% for n in tag_names %}<code>{{ n }}</code>{% if not loop.last %}, {% endif %}{% else %}none yet{% endfor %}.
+      A checked answer reaches the app all at once once it's checked, not word by word.</small>
+      <input type="hidden" name="chain_slots" value="{{ chain | length }}">
+      {% for s in chain %}{% set n = loop.index0 %}
+      <div class="card chain-step">
+        <div class="row wrap">
+          <label class="inline-field">Step <input type="number" name="s{{ n }}_order" min="1" max="99" value="{{ s.order }}" style="width:4em"></label>
+          <label class="inline-field">Tagger <select name="s{{ n }}_tagger">
+            <option value="">{% if s.tagger %}— take it out —{% else %}— add a tagger —{% endif %}</option>
+            {% for g in taggers %}<option value="{{ g.id }}" {% if s.tagger == g.id | string %}selected{% endif %}>{{ g.name }}</option>{% endfor %}
+          </select></label>
+        </div>
+        <input type="hidden" name="s{{ n }}_lines" value="{{ s.lines | length }}">
+        {% for ln in s.lines %}{% set m = loop.index0 %}
+        <div class="row wrap">
+          <select name="s{{ n }}_l{{ m }}_when" aria-label="when">
+            {% for w in whens %}<option value="{{ w }}" {% if ln.when == w %}selected{% endif %}>{{ when_labels[w] }}</option>{% endfor %}
+          </select>
+          <input name="s{{ n }}_l{{ m }}_tags" value="{{ ln.tags }}" placeholder="tags, e.g. medical, tech" aria-label="tags" autocomplete="off">
+          <span class="muted">→</span>
+          <select name="s{{ n }}_l{{ m }}_do" aria-label="then">
+            {% for d in ("next", "pass", "fail") %}<option value="{{ d }}" {% if ln.do == d %}selected{% endif %}>{{ do_labels[d] }}</option>{% endfor %}
+            {% for g in taggers %}<option value="goto:{{ g.id }}" {% if ln.do == "goto:" ~ g.id %}selected{% endif %}>jump to {{ g.name }}</option>{% endfor %}
+          </select>
+        </div>
+        {% endfor %}
+        <div class="row wrap">
+          <label class="inline-field">Otherwise <select name="s{{ n }}_otherwise">
+            {% for d in ends %}<option value="{{ d }}" {% if s.otherwise == d %}selected{% endif %}>{{ do_labels[d] }}</option>{% endfor %}
+          </select></label>
+          <label class="inline-field">If it gives no tags (an error, a time-out, an unreadable reply) <select name="s{{ n }}_no_reply">
+            {% for d in ends %}<option value="{{ d }}" {% if s.no_reply == d %}selected{% endif %}>{{ do_labels[d] }}</option>{% endfor %}
+          </select></label>
+        </div>
+      </div>
+      {% endfor %}
+      <small class="muted">Empty decisions are left out; save to get more. A jump goes to a tagger later in the chain.
+      Up to {{ steps_max }} taggers.</small>
+    </fieldset>
+    <label>Run the taggers <select name="check_when">
       {% for w in check_when %}<option value="{{ w }}" {% if a.check_when == w %}selected{% endif %}>{{ check_when_labels[w] }}</option>{% endfor %}
     </select>
-      <small class="muted">Only for answers a rule sends to it: an answer no rule decided passes without it. Pair it with
-      rules that ask the checker, e.g. "Any of these: sorry / unable / cannot". It saves the checker's requests, not the
-      wait: with a checker model on, an answer is still held back until it has all come.</small></label>
-    <label class="inline-field">Spot checks <input type="number" name="spot_checks" min="0" max="100" value="{{ a.spot_checks }}"> % of the answers decided without the checker</label>
-    <small class="muted">These go to the checker model too, in the background and at low priority: they change nothing for
-      the answer, but show how often each rule agrees with the checker (Rules page), and a rule the model made that starts
-      disagreeing goes back to watching by itself. At most 4 run at once (more are skipped). 0: none.</small>
+      <small class="muted">Only for answers a rule sends to them: an answer no rule decided passes without them. Pair it
+      with rules that ask the taggers, e.g. "Any of these: sorry / unable / cannot". It saves the taggers' requests, not
+      the wait: with taggers, an answer is still held back until it has all come.</small></label>
+    <label class="inline-field">Spot checks <input type="number" name="spot_checks" min="0" max="100" value="{{ a.spot_checks }}"> % of the answers decided without the taggers</label>
+    <small class="muted">These go to the taggers too, in the background and at low priority: they change nothing for
+      the answer, but show how often each rule agrees with what they decide (Rules page), and a rule the model made that
+      starts disagreeing goes back to watching by itself. At most 4 run at once (more are skipped). 0: none.</small>
     <label>Rules from the model <select name="learn_rules">
       {% for m in learn_modes %}<option value="{{ m }}" {% if a.learn_rules == m %}selected{% endif %}>{{ learn_labels[m] }}</option>{% endfor %}
     </select>
-      <small class="muted">Its rule maker reads the answers the checker model judged (kept encrypted, up to 200 of each
-      verdict, for 7 days) and proposes rules; one that would have decided a kept answer wrongly, or whose pattern is
+      <small class="muted">Its rule maker reads the answers the taggers decided (kept encrypted, up to 200 passed and 200
+      failed, for 7 days) and proposes rules; one that would have decided a kept answer wrongly, or whose pattern is
       slow, is dropped, and the rest are added at the end of this alias's rules (ahead of the rules it made that ask the
-      checker), watching. Then either you turn them on (Rules page), or they turn on by themselves once the checker has
+      taggers), watching. Then either you turn them on (Rules page), or they turn on by themselves once the taggers have
       agreed with them 20 times (at most once not), and go back to watching if they start disagreeing. A rule that asks
-      the checker is on at once (it can't decide wrongly). A rule of its own you delete isn't proposed again. Needs the
-      checker model on; turning it off forgets the kept answers.</small></label>
-    <label>Rule maker model {{ picker("learn_model", a.learn_model, "single", "blank = the checker model") }}</label>
+      the taggers is on at once (it can't decide wrongly). A rule of its own you delete isn't proposed again. Needs
+      taggers; turning it off forgets the kept answers.</small></label>
+    <label>Rule maker model {{ picker("learn_model", a.learn_model, "single", "blank = the first tagger's model") }}</label>
     <label class="check"><input type="checkbox" name="learn_pass" {% if a.learn_pass %}checked{% endif %}>
       Rules that pass answers may turn on by themselves too (a wrong one lets a bad answer through unnoticed)</label>
   </fieldset>

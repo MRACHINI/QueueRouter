@@ -5,22 +5,28 @@ aliases. For an alias's answer its rules are tried in order and the first one th
 
   fail       the answer fails: the same request goes to the alias's next model
   pass       the answer passes: the app gets it, nothing else runs
-  pass_free  the answer passes the checker model (which isn't asked), but the free checks still run (the built-in
+  pass_free  the answer passes without the taggers (they aren't asked), but the free checks still run (the built-in
              refusal phrases, with the alias's "refused" trigger)
-  ask        the checker model decides (also when the alias asks it only for answers a rule sends to it)
+  ask        the alias's taggers decide (also when the alias runs them only for answers a rule sends to them)
 
-With no rule deciding, the built-in refusal phrases run, then the checker model if the alias has one (for every such
-answer, or only for those a rule sends to it). The last model's answer isn't checked: nothing is left to fall back to.
+A rule that tags (``tag``) decides nothing: every one that's on and matches gives its tag to the answer, for the
+alias's taggers' decisions (app/taggers.py) and the Requests page.
 
-A rule is on, watching (it decides nothing: what it would have done is compared with the checker's verdict, to see
+With no rule deciding, the built-in refusal phrases run, then the alias's taggers if it has any (for every such answer,
+or only for those a rule sends to them). The last model's answer isn't checked: nothing is left to fall back to.
+
+A rule is on, watching (it decides nothing: what it would have done is compared with the taggers' decision, to see
 whether it can be trusted) or off. A rule the model made starts watching, and the alias decides what happens next: you
-approve it, or it turns on by itself once it has agreed with the checker often enough (``next_state``). A rule the
-model made that is on and starts disagreeing with the checker (spot checks: some answers a rule decided go to the
-checker too) goes back to watching by itself.
+approve it, or it turns on by itself once it has agreed with the taggers often enough (``next_state``). A rule the
+model made that is on and starts disagreeing with them (spot checks: some answers a rule decided go to the taggers
+too) goes back to watching by itself.
 
 A rule looks at the start of the answer (its first START_CHARS characters) or anywhere in it. It reads the answer's
 text and the separate ``refusal`` field some providers use; when the alias checks answers that call tools, also each
 call, as ``[tool call] name(arguments)``. "Doesn't" turns a rule around: it matches when the text isn't there.
+
+An answer is of one type (``ANSWER_KINDS``; fallback.Answer.kind decides which), and an alias checks only the types it
+ticks: an answer of another type passes on as it comes.
 """
 
 from __future__ import annotations
@@ -35,34 +41,58 @@ KINDS = ("contains", "any", "starts", "pattern")
 KIND_LABELS = {"contains": "Contains", "any": "Any of these", "starts": "Starts with", "pattern": "Pattern"}
 SCOPES = ("start", "anywhere")
 SCOPE_LABELS = {"start": "at the start", "anywhere": "anywhere"}
-ACTIONS = ("fail", "pass", "pass_free", "ask")
+ACTIONS = ("fail", "pass", "pass_free", "ask", "tag")
 ACTION_LABELS = {
     "fail": "Fail it (the next model answers)",
     "pass": "Pass it (nothing else runs)",
     "pass_free": "Pass it, but run the free checks",
-    "ask": "Ask the checker model",
+    "ask": "Ask the taggers",
+    "tag": "Give it a tag (decides nothing)",
 }
-ACTION_SHORT = {"fail": "fails", "pass": "passes", "pass_free": "passes (free checks run)", "ask": "asks the checker"}
+ACTION_SHORT = {
+    "fail": "fails",
+    "pass": "passes",
+    "pass_free": "passes (free checks run)",
+    "ask": "asks the taggers",
+    "tag": "tags",
+}
 ACTION_WOULD = {
     "fail": "failed it",
     "pass": "passed it",
     "pass_free": "passed it (free checks run)",
-    "ask": "asked the checker",
+    "ask": "asked the taggers",
+    "tag": "tagged it",
 }
+DECIDING = ("fail", "pass", "pass_free", "ask")  # what a rule the rule maker makes may do
 STATES = ("on", "watch", "off")
 STATE_LABELS = {"on": "on", "watch": "watching", "off": "off"}
-# what an alias's answer check reads: answers with text (or a refusal), answers that call tools, empty ones
-ANSWER_KINDS = ("text", "tools", "empty")
+# An answer's type (fallback.Answer.kind, which tries them in another order: a cut-off answer is "cut" whatever it
+# holds). An alias's answer check, and each of its taggers, read the types ticked.
+ANSWER_KINDS = ("text", "tools_text", "tools_only", "refusal", "cut", "filtered", "thinking", "nothing", "media")
 ANSWER_KIND_LABELS = {
-    "text": "text answers",
-    "tools": "answers that call tools",
-    "empty": "empty answers (nothing but thinking, or stopped by a filter)",
+    "text": "text",
+    "tools_text": "tool calls with text",
+    "tools_only": "tool calls only",
+    "refusal": "a refusal (the provider's own refusal field)",
+    "cut": "cut off (it hit the token limit)",
+    "filtered": "stopped by the provider's filter",
+    "thinking": "thinking only (it said nothing)",
+    "nothing": "nothing at all",
+    "media": "audio or images",
 }
-DEFAULT_ANSWER_KINDS = ("text", "empty")  # as before: an answer that calls tools is passed on as it comes
-CHECK_WHEN = ("undecided", "asked")  # when an alias asks its checker model
+TOOL_KINDS = ("tools_text", "tools_only")
+# as before: an answer that calls tools is passed on as it comes
+DEFAULT_ANSWER_KINDS = tuple(k for k in ANSWER_KINDS if k not in TOOL_KINDS)
+# what the three kinds of 0.74-0.76 became (an answer cut off or filtered was text, or tools, or empty, by what it held)
+LEGACY_KINDS = {
+    "text": ("text", "refusal", "cut", "filtered"),
+    "tools": ("tools_text", "tools_only", "cut"),
+    "empty": ("thinking", "nothing", "filtered", "media"),
+}
+CHECK_WHEN = ("undecided", "asked")  # when an alias runs its taggers
 CHECK_WHEN_LABELS = {
     "undecided": "for every answer no rule decided",
-    "asked": "only for answers a rule sends to it",
+    "asked": "only for answers a rule sends to them",
 }
 LEARN_MODES = ("off", "propose", "auto")  # what an alias's rule maker does with the rules it makes
 LEARN_LABELS = {
@@ -112,10 +142,16 @@ class Rule:
     recent: str = ""  # its last RECENT outcomes, "1" agreed, "0" not
     awaiting: bool = False  # made by the model, waiting for you to turn it on
     note: str = ""  # why its state last changed by itself
+    tag: int | None = None  # the tag it gives (action "tag"; app/taggers.py)
 
     @property
     def enabled(self) -> bool:
         return self.state == "on"
+
+    @property
+    def tags(self) -> bool:
+        """It gives a tag: it decides nothing."""
+        return self.action == "tag"
 
     @property
     def whole(self) -> bool:
@@ -138,11 +174,12 @@ class Rule:
 
 @dataclass
 class Decision:
-    """What an alias's rules made of an answer: the first rule on that matched (``rule``; None: none did) and the
-    rules watching that matched it."""
+    """What an alias's rules made of an answer: the first rule on that matched (``rule``; None: none did), the
+    rules watching that matched it, and the rules that tag that matched it (each gives its tag)."""
 
     rule: Rule | None = None
     watched: list[Rule] = field(default_factory=list)
+    tagged: list[Rule] = field(default_factory=list)
 
     @property
     def action(self) -> str | None:
@@ -163,8 +200,9 @@ def _flag(raw: dict, key: str) -> bool:
     return value is True or value == "on"
 
 
-def clean_rule(raw: dict) -> dict:
-    """A rule's fields from its editor (strings and "on") or the rule maker, checked; RuleError says what's wrong."""
+def clean_rule(raw: dict, tag_ids: Iterable[int] | None = None) -> dict:
+    """A rule's fields from its editor (strings and "on") or the rule maker, checked; RuleError says what's wrong.
+    A rule that tags gives one of ``tag_ids`` (the tags there are), and is on or off."""
     name = " ".join(str(raw.get("name") or "").split())
     if not name or len(name) > NAME_MAX:
         raise RuleError(f"Give the rule a name (up to {NAME_MAX} characters).")
@@ -194,6 +232,16 @@ def clean_rule(raw: dict) -> dict:
     state = str(raw.get("state") or "on")
     if state not in STATES:
         raise RuleError("Choose whether the rule is on, watching or off.")
+    tag = None
+    if action == "tag":
+        try:
+            tag = int(str(raw.get("tag") or ""))
+        except ValueError:
+            tag = None
+        if tag is None or (tag_ids is not None and tag not in set(tag_ids)):
+            raise RuleError("Choose the tag the rule gives (tags are made on the Taggers page).")
+        if state == "watch":
+            raise RuleError("A rule that tags is on or off: it decides nothing, so there's nothing to watch.")
     notes = str(raw.get("notes") or "")[:NOTES_MAX]
     return {
         "name": name,
@@ -205,6 +253,7 @@ def clean_rule(raw: dict) -> dict:
         "negate": _flag(raw, "negate"),
         "state": state,
         "notes": notes,
+        "tag": tag,
     }
 
 
@@ -240,10 +289,17 @@ def rule_key(kind: str, find: str, negate: bool) -> list:
 
 
 def decide(rules: Iterable[Rule], answer: str) -> Decision:
-    """The first rule on that matches ``answer`` decides; every rule watching that matches is noted."""
+    """The first rule on that matches ``answer`` decides; every rule watching that matches is noted, and every rule
+    on that tags and matches gives its tag (wherever it is in the order)."""
     decision = Decision()
     for rule in rules:
-        if rule.state == "off" or (rule.state == "on" and decision.rule is not None):
+        if rule.state == "off":
+            continue
+        if rule.tags:
+            if rule.state == "on" and rule.tag is not None and matches(rule, answer):
+                decision.tagged.append(rule)
+            continue
+        if rule.state == "on" and decision.rule is not None:
             continue
         if not matches(rule, answer):
             continue
@@ -255,13 +311,13 @@ def decide(rules: Iterable[Rule], answer: str) -> Decision:
 
 
 def first_match(rules: Iterable[Rule], answer: str) -> Rule | None:
-    """The first of ``rules`` (in order, those on) that matches ``answer``."""
-    return next((r for r in rules if r.enabled and matches(r, answer)), None)
+    """The first of ``rules`` (in order, those on, not those that tag) that matches ``answer``."""
+    return next((r for r in rules if r.enabled and not r.tags and matches(r, answer)), None)
 
 
 def agrees(action: str, failed: bool) -> bool:
-    """Whether the checker's verdict agrees with what a rule did (or would have done): a fail rule with a failed
-    answer, a pass rule with a passed one, and a rule that asks the checker with a failed one (it was right to ask)."""
+    """Whether the taggers' decision agrees with what a rule did (or would have done): a fail rule with a failed
+    answer, a pass rule with a passed one, and a rule that asks the taggers with a failed one (it was right to ask)."""
     return failed if action in ("fail", "ask") else not failed
 
 
@@ -289,8 +345,19 @@ def next_state(rule: Rule, agreed: bool, learn: str, learn_pass: bool) -> dict:
     return fields
 
 
-def kinds_of(raw: Iterable[str] | None) -> tuple[str, ...]:
-    """What an alias's check reads, in a fixed order; unknown kinds are left out, and none at all means the
-    default."""
-    picked = {k for k in raw or () if k in ANSWER_KINDS}
+def kinds_of(raw: Iterable[str] | None, default: tuple[str, ...] = DEFAULT_ANSWER_KINDS) -> tuple[str, ...]:
+    """What an alias's check (or a tagger) reads, in a fixed order; unknown types are left out, and none at all means
+    ``default``. The kinds "tools" and "empty" of 0.74-0.76 stand for the types they became."""
+    picked: set[str] = set()
+    for k in raw or ():
+        if k in ANSWER_KINDS:
+            picked.add(k)
+        elif k in ("tools", "empty"):
+            picked.update(LEGACY_KINDS[k])
+    return tuple(k for k in ANSWER_KINDS if k in picked) or default
+
+
+def legacy_kinds(raw: Iterable[str] | None) -> tuple[str, ...]:
+    """The types the kinds an alias's check read before 0.77 ("text", "tools", "empty") became."""
+    picked = {t for k in raw or () for t in LEGACY_KINDS.get(k, ())}
     return tuple(k for k in ANSWER_KINDS if k in picked) or DEFAULT_ANSWER_KINDS

@@ -2063,6 +2063,49 @@ v0.76.0: an alias can flip its checker model's verdict.
 - The Requests page says so: "failed (1.2 s): flipped: the checker passed it (its reason)", "passed (1.2 s):
   flipped: the checker failed it: its reason"; a failed answer's fallback reason is "check: flipped: …".
 
+v0.77.0: taggers replace the checker model, and an answer has one of nine types.
+- Asked for: control over what a checker is told and what it reads of the request (a checker that read "don't
+  answer in Chinese" in the user's last message failed answers its instructions never mentioned), several checkers
+  in turn, each with its own model, that can end the check (pass, or fail) or go on; then, instead of PASS/FAIL,
+  tags picked from a list, the alias deciding by them. Also: more answer types than text / tools / empty.
+- `app/taggers.py`. A tag (`answer_tags`: a name, what it means, how often given) and a tagger (`taggers`: model,
+  blank = the alias's target model; instructions; its prompt, blank = `DEFAULT_PROMPT`, `{instructions}` and
+  `{tags}` filled in or added at its end; the tags it gives, exactly one or any number; the answer types it reads;
+  what it sees: the user's last message, the conversation's last 0-20 messages as `[user]` / `[assistant]` /
+  `[tool call]` / `[tool output]` lines, the system prompt; whether it's asked for a reason) are made on the Taggers
+  page and shared by aliases. The request's parts and the answer are quoted in free tags as text to tag (`INTRO`),
+  and the request ends with the reply format (`TAGS: a, b`, `REASON: …`), which isn't editable: it's how the reply
+  is read (`reply_of`: a TAGS line, or a reply of nothing but tag names; only the tagger's own tags count, others
+  are listed as ignored; "exactly one": the first).
+- An alias's chain (`aliases.tag_chain`, migration 47): steps, each a tagger and the alias's decisions after it:
+  lines (tagged any of / all of / none of some tags → pass, fail, go on, jump to a later tagger), tried in order on
+  the tags so far (the rules' tags, then every tagger's before), the first that holds deciding; else "otherwise"; a
+  tagger that gives no tags (its request failed, a time-out at `TIMEOUT_S`, an unreadable reply) has its own
+  choice (default: go on). A tagger that doesn't read the answer's type is skipped. Nothing deciding: it passes.
+  The alias editor shows each step with two empty decisions (save for more) and an empty step to add a tagger.
+- Rules: a new action, "tag" (`answer_rules.tag_id`): every rule on that matches gives its tag and decides nothing
+  (a rule that tags is on or off, never watching); "ask" asks the taggers. The rule maker never makes tag rules,
+  and reads the alias's chain in words (`describe`) instead of a checker's instructions.
+- What a decision is learned from: the chain's outcome, when every tagger asked gave tags (`Tagged.judged`): rules
+  watching, spot checks (the whole chain, in the background, as "spot check: <tagger>" calls) and the rule maker's
+  kept answers. Flip is gone: a decision on the other tag does it.
+- Each alias's checker became a tagger of its own (`Store._convert_checkers`, once, guarded by meta
+  `checkers_converted`, so a start after a failure tries again): "<alias> checker", its model and instructions,
+  exactly one of the tags "ok" / "bad" (made then), reading every type; the alias fails an answer tagged bad (ok,
+  if it flipped its checker's verdict). The old `check_*` columns stay, unread.
+- Answer types (`fallback.Answer.kind`, the first that fits): stopped by a filter, cut off at the token limit, a
+  refusal in the provider's field, audio or images, tool calls with text, tool calls only, text, thinking only
+  (reasoning in its own field, or left inline), nothing at all. The kinds of 0.74-0.76 became the types they held
+  (`LEGACY_KINDS`: text → text, refusal, cut, filtered; tools → both tool types, cut; empty → thinking, nothing,
+  filtered, media), so what each alias checked stays the same.
+- Requests: `requests.answer_tags` (every tag the request's answers got; a discarded answer's row has its own),
+  shown as #tag badges and in the details, and a filter "answer tags" (`?answer_tag=`). Notes, per tagger: "Topic
+  tagged medical (1.2 s): reason → failed" (→ next, → on to X), then "passed (no tagger failed it)"; a failed
+  answer's fallback reason is "check: Topic tagged medical: reason". The Taggers page counts how often each tag was
+  given (`add_tag_hits`, written with the usage).
+- Try it, on a tagger's page: asks its model for real as an enabled client you pick (a "tagger: try it" row on
+  the Requests page), and shows what it was sent, its reply and the tags read from it.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

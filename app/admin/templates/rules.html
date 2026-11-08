@@ -4,10 +4,11 @@
 <h1>Answer rules</h1>
 <p class="muted small">Checks of an alias's answers by text, a list of words or a pattern. Attach rules in order to an
 alias (alias editor, Answer check): the first rule that's on and matches decides: fail the answer (the next model
-answers), pass it, pass it but run the free checks, or ask the checker model. With none deciding, the built-in refusal
-phrases run, then the checker model. A rule watching decides nothing: when the checker reads an answer it matched,
-whether the checker agreed is counted. An alias's rule maker can propose rules from the answers its checker judged.
-Rules cost nothing; the last model's answer isn't checked.</p>
+answers), pass it, pass it but run the free checks, or ask the alias's taggers. A rule that tags gives the answer a
+tag (Taggers page) and decides nothing. With none deciding, the built-in refusal phrases run, then the taggers. A rule
+watching decides nothing: when the taggers read an answer it matched, whether what they decided agreed is counted. An
+alias's rule maker can propose rules from the answers its taggers decided. Rules cost nothing; the last model's answer
+isn't checked.</p>
 {% if note %}<p class="notice err" role="alert">{{ note }}</p>{% endif %}
 
 <p><a class="button" href="/admin/rules/new">Add rule</a></p>
@@ -27,13 +28,13 @@ Rules cost nothing; the last model's answer isn't checked.</p>
       {% if r.notes %}<div class="small muted">{{ r.notes }}</div>{% endif %}</td>
     <td data-label="Looks for" class="small wrap-any">{{ r.summary() }}
       {% if r.made_by is not none and (r.sample_fails or r.sample_passes) %}<div class="muted">kept answers: {{ r.sample_fails }} failed, {{ r.sample_passes }} passed matched</div>{% endif %}</td>
-    <td data-label="Then" class="small">{{ action_short[r.action] }}</td>
+    <td data-label="Then" class="small">{{ action_short[r.action] }}{% if r.tags %} <code>{{ tag_names.get(r.tag, "?") }}</code>{% endif %}</td>
     <td data-label="Agreed" class="small">{% if r.agreed or r.disagreed %}{{ r.agreed }} of {{ r.agreed + r.disagreed }}{% if r.recent %} <span class="muted">(last {{ r.recent | length }}: {{ r.recent.count("1") }})</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
     <td data-label="Used by" class="small">{% if users.get(r.id) %}{{ users[r.id] | join(", ") }}{% else %}<span class="muted">nothing yet</span>{% endif %}</td>
     <td data-label="Decided" class="num">{{ "{:,}".format(r.hits) }}{% if r.last_hit %}<div class="small muted"><time data-ts="{{ r.last_hit }}">{{ r.last_hit | int }}</time></div>{% endif %}
       {% if r.state == "on" and users.get(r.id) and (r.last_hit or r.created_at) < quiet_before %} <span class="badge" title="It hasn't decided an answer for 30 days">quiet</span>{% endif %}</td>
     <td data-label=""><div class="row wrap">
-      {% for s in states if s != r.state %}
+      {% for s in states if s != r.state and not (r.tags and s == "watch") %}
       <form method="post" action="/admin/rules/{{ r.id }}/state"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="state" value="{{ s }}">
         <button type="submit" class="secondary">{% if s == "on" %}{% if r.awaiting %}Approve{% else %}Turn on{% endif %}{% elif s == "watch" %}Watch{% else %}Off{% endif %}</button></form>
       {% endfor %}</div></td>
@@ -42,8 +43,8 @@ Rules cost nothing; the last model's answer isn't checked.</p>
   </tbody>
 </table>
 </div>
-<p class="small muted">Agreed: of the answers the checker read that the rule matched (watching, or in a spot check),
-how many times the checker agreed with what it did or would have done. Decided: answers it decided while on. A rule
+<p class="small muted">Agreed: of the answers the taggers read that the rule matched (watching, or in a spot check),
+how many times what they decided agreed with what it did or would have done. Decided: answers it decided while on. A rule
 the model made turns on by itself once proven (when its alias lets it), and goes back to watching by itself if it
 starts disagreeing.</p>
 {% else %}
@@ -59,7 +60,7 @@ starts disagreeing.</p>
       <div class="small muted">{{ m.fails }} failed and {{ m.passes }} passed answers kept;
         {% if m.state.last_run %}last ran <time data-ts="{{ m.state.last_run }}">{{ m.state.last_run | int }}</time>: {{ m.state.note }}{% else %}it hasn't run yet{% endif %}.
         {% if m.running %}<strong>At work now.</strong>{% endif %}
-        {% if not m.checker %}Its checker model is off, so nothing new is kept.{% endif %}</div></div>
+        {% if not m.checker %}It has no taggers, so nothing new is kept.{% endif %}</div></div>
     <div class="row wrap">
       <form method="post" action="/admin/rules/propose"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="alias_id" value="{{ m.alias.id }}">
         <button type="submit" class="secondary" {% if m.running %}disabled{% endif %}>Propose rules now</button></form>
@@ -88,10 +89,11 @@ starts disagreeing.</p>
   </form>
   {% if tried %}
   {% set d = tried.decides %}
-  <p class="notice {% if d and d.action == 'fail' %}err{% else %}ok{% endif %}">{% if d %}Decided by <strong>{{ d.name }}</strong>: it {{ action_short[d.action] }}.{% else %}No rule decides: the built-in refusal phrases and the checker model come next (if the alias has them).{% endif %}</p>
+  <p class="notice {% if d and d.action == 'fail' %}err{% else %}ok{% endif %}">{% if d %}Decided by <strong>{{ d.name }}</strong>: it {{ action_short[d.action] }}.{% else %}No rule decides: the built-in refusal phrases and the taggers come next (if the alias has them).{% endif %}
+  {% if tried.tagged %}Tags it gets: {% for r in tried.tagged %}<code>{{ tag_names.get(r.tag, "?") }}</code> (from {{ r.name }}){% if not loop.last %}, {% endif %}{% endfor %}.{% endif %}</p>
   {% if tried.rows %}
   <ul class="small">
-    {% for row in tried.rows %}<li>{{ row.rule.name }}: {% if row.rule.state == "off" %}<span class="muted">off</span>{% elif row.match %}<strong>matches</strong>{% if row.rule.state == "watch" %} (watching: it would have {{ action_would[row.rule.action] }}){% endif %}{% else %}<span class="muted">no match</span>{% endif %}</li>{% endfor %}
+    {% for row in tried.rows %}<li>{{ row.rule.name }}: {% if row.rule.state == "off" %}<span class="muted">off</span>{% elif row.match %}<strong>matches</strong>{% if row.rule.tags %} (it gives the tag <code>{{ tag_names.get(row.rule.tag, "?") }}</code>){% elif row.rule.state == "watch" %} (watching: it would have {{ action_would[row.rule.action] }}){% endif %}{% else %}<span class="muted">no match</span>{% endif %}</li>{% endfor %}
   </ul>
   {% endif %}
   {% endif %}

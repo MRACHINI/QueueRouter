@@ -39,11 +39,13 @@ MESSAGES = {
 
 def rule_choices(store: Store) -> list[dict]:
     """The rules, for the picker in the alias editor."""
+    tags = {t.id: t for t in store.list_tags()}
     return [
         {
             "id": str(r.id),
             "label": r.name,
             "note": f"{KIND_LABELS.get(r.kind, r.kind)}, {ACTION_SHORT.get(r.action, r.action)}"
+            + (f" {tags[r.tag].name}" if r.tags and r.tag in tags else "")
             + ("" if r.state == "on" else f" · {STATE_LABELS.get(r.state, r.state)}"),
         }
         for r in store.list_rules()
@@ -92,8 +94,12 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
             error=error,
             users=store.rule_users().get(rule.id, []) if rule.id is not None else [],
             made_for=aliases.get(rule.made_by) if getattr(rule, "made_by", None) is not None else None,
+            tags=store.list_tags(),
             **labels(),
         )
+
+    def cleaned(form: dict) -> dict:
+        return rules_mod.clean_rule(form, [t.id for t in store.list_tags()])
 
     def draft(form: dict, rule_id: int | None = None) -> SimpleNamespace:
         """What was submitted, to show the editor again after an error (nothing is saved)."""
@@ -110,6 +116,7 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
             notes=str(form.get("notes", "")),
             made_by=None,
             why="",
+            tag=int(form["tag"]) if str(form.get("tag", "")).isdecimal() else None,
         )
 
     def listing(request: Request, session, tried: dict | None = None, note: str | None = None):
@@ -126,7 +133,7 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
                 "passes": counts.get(a.id, {}).get("pass", 0),
                 "state": learning.get(a.id, {}),
                 "running": a.id in running,
-                "checker": a.check_answers,
+                "checker": a.checks,
             }
             for a in aliases
             if a.learn_rules != "off"
@@ -143,6 +150,7 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
             quiet_before=time.time() - STALE_S,
             tried=tried,
             note=note,
+            tag_names={t.id: t.name for t in store.list_tags()},
             **labels(),
         )
 
@@ -163,7 +171,13 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
         order = [every[i] for i in alias.answer_rules if i in every] if alias else list(every.values())
         decision = rules_mod.decide(order, answer)
         rows = [{"rule": r, "match": r.state != "off" and rules_mod.matches(r, answer)} for r in order]
-        tried = {"answer": answer, "alias": alias_name, "rows": rows, "decides": decision.rule}
+        tried = {
+            "answer": answer,
+            "alias": alias_name,
+            "rows": rows,
+            "decides": decision.rule,
+            "tagged": decision.tagged,
+        }
         return listing(request, session, tried)
 
     @app.post("/admin/rules/propose")
@@ -196,7 +210,7 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
     async def rules_create(request: Request):
         session, form = await require_post(request, "admin")
         try:
-            store.create_rule(session.user.username, **rules_mod.clean_rule(form))
+            store.create_rule(session.user.username, **cleaned(form))
         except RuleError as exc:
             return editor(request, session, draft(form), str(exc))
         except sqlite3.IntegrityError:
@@ -218,7 +232,7 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
         if find(rule_id) is None:
             return back("/admin/rules", error="invalid")
         try:
-            store.update_rule(rule_id, session.user.username, **rules_mod.clean_rule(form))
+            store.update_rule(rule_id, session.user.username, **cleaned(form))
         except RuleError as exc:
             return editor(request, session, draft(form, rule_id), str(exc))
         except sqlite3.IntegrityError:
@@ -231,7 +245,8 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
         """On (turning on a rule the model made is approving it), watching or off."""
         session, form = await require_post(request, "admin")
         state = str(form.get("state", ""))
-        if state not in STATES:
+        rule = find(rule_id)
+        if state not in STATES or (rule is not None and rule.tags and state == "watch"):  # a rule that tags: on or off
             return back("/admin/rules", error="invalid")
         try:
             store.set_rule_state(rule_id, session.user.username, state)
