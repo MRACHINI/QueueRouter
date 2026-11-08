@@ -2106,6 +2106,14 @@ v0.77.0: taggers replace the checker model, and an answer has one of nine types.
 - Try it, on a tagger's page: asks its model for real as an enabled client you pick (a "tagger: try it" row on
   the Requests page), and shows what it was sent, its reply and the tags read from it.
 
+v0.77.1: no 0.77.0 image was published: CI's test run for the tag failed (the same commit passed on main). The
+failover and circuit-breaker tests broke an upstream by pointing it at a closed port, which made its model list
+fail too; an upstream whose list can't be fetched gets no requests for a model another one lists, so whether the
+broken one got the test's requests (and its breaker opened) hung on whether its list's fetch in the background
+failed first, more likely on a busy runner. They now break it with HTTP 503s on chat while it still lists its
+models. Also, the answer-rule tests' alias editor helper turns spot checks off unless a test asks for them (at 5%
+they called a tagger now and then). Same features as 0.77.0.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

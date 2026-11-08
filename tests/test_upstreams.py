@@ -36,12 +36,12 @@ async def spread(c, name="spread"):
     return name
 
 
-async def break_upstream(c, upstream_id):
-    """Point an upstream at a closed port."""
-    csrf = csrf_of((await c.get("/admin/upstreams")).text)
-    form = {"csrf": csrf, "base_url": "http://127.0.0.1:9/v1", "enabled": "on", "weight": "1"}
-    r = await c.post(f"/admin/upstreams/{upstream_id}", data=form)
-    assert "m=saved" in r.headers["location"]
+def break_upstream(state):
+    """Make an upstream's mock fail every chat request (HTTP 503) while it still lists its models. Pointing the
+    upstream at a closed port instead made its model list fail too, and an upstream whose list can't be fetched gets
+    no requests for a model another one lists: whether it got any then hung on which came first, the list's fetch in
+    the background or the test's requests."""
+    state["chat_status"] = 503
 
 
 async def add_listless_upstream(c, make_mock, name="claude"):
@@ -117,7 +117,7 @@ async def test_failover_and_circuit_breaker(make_stack, make_mock):
         await add_upstream(c, "backup", good_url)
         model = await spread(c)
         original = stack.app.state.store.list_upstreams()[0]
-        await break_upstream(c, original.id)
+        break_upstream(stack.mock)
 
         api = f"{stack.url}/v1/chat/completions"
         for i in range(4):
@@ -125,7 +125,7 @@ async def test_failover_and_circuit_breaker(make_stack, make_mock):
             assert r.status_code == 200, r.text
         stats = (await c.get("/admin/api/stats")).json()
         broken = next(u for u in stats["upstreams"] if u["id"] == original.id)
-        assert broken["state"] == "open" and "ConnectError" in broken["last_error"]
+        assert broken["state"] == "open" and broken["last_error"] == "HTTP 503"
         assert stats["outcomes"]["done"] == 4
         assert "open" in (await c.get("/admin/upstreams")).text
     assert good["served"] == 4
@@ -138,8 +138,7 @@ async def test_streaming_failover(make_stack, make_mock):
         await login(c, stack.url)
         await add_upstream(c, "backup", good_url)
         model = await spread(c)
-        original = stack.app.state.store.list_upstreams()[0]
-        await break_upstream(c, original.id)
+        break_upstream(stack.mock)
         csrf = csrf_of((await c.get("/admin/settings")).text)
         await c.post("/admin/settings", data={"csrf": csrf, "lb_strategy": "ordered", "max_retries": "3"})
         stream = chat("s", stream=True, model=model)
