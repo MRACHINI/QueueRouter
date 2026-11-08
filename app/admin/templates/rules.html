@@ -2,43 +2,81 @@
 {% block title %}Answer rules{% endblock %}
 {% block content %}
 <h1>Answer rules</h1>
-<p class="muted small">Checks of an alias's answers by exact text or a pattern, for refusals or anything else you don't
-want to pass on. Make a rule here, then attach rules in order to aliases (alias editor, Answer check). An alias tries
-its rules first, then the built-in refusal phrases (its "refused" trigger), then its checker model if it has one: the
-first rule that matches fails the answer, and the same request goes to the alias's next model. Rules cost nothing and
-take no time; the last model's answer isn't checked (nothing is left to fall back to).</p>
+<p class="muted small">Checks of an alias's answers by text, a list of words or a pattern. Attach rules in order to an
+alias (alias editor, Answer check): the first rule that's on and matches decides: fail the answer (the next model
+answers), pass it, pass it but run the free checks, or ask the checker model. With none deciding, the built-in refusal
+phrases run, then the checker model. A rule watching decides nothing: when the checker reads an answer it matched,
+whether the checker agreed is counted. An alias's rule maker can propose rules from the answers its checker judged.
+Rules cost nothing; the last model's answer isn't checked.</p>
+{% if note %}<p class="notice err" role="alert">{{ note }}</p>{% endif %}
 
 <p><a class="button" href="/admin/rules/new">Add rule</a></p>
 
 {% if rules %}
 <div class="table-wrap">
 <table class="cards">
-  <thead><tr><th>Name</th><th>Looks for</th><th>Used by</th><th class="num">Failed</th><th>Last</th></tr></thead>
+  <thead><tr><th>Name</th><th>Looks for</th><th>Then</th><th>Agreed</th><th>Used by</th><th class="num">Decided</th><th></th></tr></thead>
   <tbody>
   {% for r in rules %}
   <tr>
-    <td data-label="Name"><a href="/admin/rules/{{ r.id }}">{{ r.name }}</a>{% if not r.enabled %} <span class="badge">off</span>{% endif %}
+    <td data-label="Name"><a href="/admin/rules/{{ r.id }}">{{ r.name }}</a>
+      {% if r.state != "on" %}<span class="badge">{{ state_labels[r.state] }}</span>{% endif %}
+      {% if r.awaiting %}<span class="badge high" title="The rule maker made it: it's waiting for you to turn it on">to approve</span>{% endif %}
+      {% if r.made_by is not none %}<div class="small muted">made for {{ made_for.get(r.made_by, "a deleted alias") }}{% if r.why %}: {{ r.why }}{% endif %}</div>{% endif %}
+      {% if r.note %}<div class="small muted">{{ r.note }}</div>{% endif %}
       {% if r.notes %}<div class="small muted">{{ r.notes }}</div>{% endif %}</td>
-    <td data-label="Looks for" class="small wrap-any">{{ r.summary() }}</td>
+    <td data-label="Looks for" class="small wrap-any">{{ r.summary() }}
+      {% if r.made_by is not none and (r.sample_fails or r.sample_passes) %}<div class="muted">kept answers: {{ r.sample_fails }} failed, {{ r.sample_passes }} passed matched</div>{% endif %}</td>
+    <td data-label="Then" class="small">{{ action_short[r.action] }}</td>
+    <td data-label="Agreed" class="small">{% if r.agreed or r.disagreed %}{{ r.agreed }} of {{ r.agreed + r.disagreed }}{% if r.recent %} <span class="muted">(last {{ r.recent | length }}: {{ r.recent.count("1") }})</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
     <td data-label="Used by" class="small">{% if users.get(r.id) %}{{ users[r.id] | join(", ") }}{% else %}<span class="muted">nothing yet</span>{% endif %}</td>
-    <td data-label="Failed" class="num">{{ "{:,}".format(r.hits) }}</td>
-    <td data-label="Last" class="small">{% if r.last_hit %}<time data-ts="{{ r.last_hit }}">{{ r.last_hit | int }}</time>{% else %}<span class="muted">—</span>{% endif %}
-      {% if r.enabled and users.get(r.id) and (r.last_hit or r.created_at) < quiet_before %} <span class="badge" title="It hasn't failed an answer for 30 days">quiet</span>{% endif %}</td>
+    <td data-label="Decided" class="num">{{ "{:,}".format(r.hits) }}{% if r.last_hit %}<div class="small muted"><time data-ts="{{ r.last_hit }}">{{ r.last_hit | int }}</time></div>{% endif %}
+      {% if r.state == "on" and users.get(r.id) and (r.last_hit or r.created_at) < quiet_before %} <span class="badge" title="It hasn't decided an answer for 30 days">quiet</span>{% endif %}</td>
+    <td data-label=""><div class="row wrap">
+      {% for s in states if s != r.state %}
+      <form method="post" action="/admin/rules/{{ r.id }}/state"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="state" value="{{ s }}">
+        <button type="submit" class="secondary">{% if s == "on" %}{% if r.awaiting %}Approve{% else %}Turn on{% endif %}{% elif s == "watch" %}Watch{% else %}Off{% endif %}</button></form>
+      {% endfor %}</div></td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
-<p class="small muted">Failed: how many answers it failed (the request then went to the alias's next model).</p>
+<p class="small muted">Agreed: of the answers the checker read that the rule matched (watching, or in a spot check),
+how many times the checker agreed with what it did or would have done. Decided: answers it decided while on. A rule
+the model made turns on by itself once proven (when its alias lets it), and goes back to watching by itself if it
+starts disagreeing.</p>
 {% else %}
 <p class="muted">No rules yet.</p>
 {% endif %}
 
+{% if makers %}
+<section class="card">
+  <h2>Rule makers</h2>
+  {% for m in makers %}
+  <div class="row between wrap">
+    <div><strong>{{ m.alias.name }}</strong> <span class="small muted">({{ m.mode }})</span>
+      <div class="small muted">{{ m.fails }} failed and {{ m.passes }} passed answers kept;
+        {% if m.state.last_run %}last ran <time data-ts="{{ m.state.last_run }}">{{ m.state.last_run | int }}</time>: {{ m.state.note }}{% else %}it hasn't run yet{% endif %}.
+        {% if m.running %}<strong>At work now.</strong>{% endif %}
+        {% if not m.checker %}Its checker model is off, so nothing new is kept.{% endif %}</div></div>
+    <div class="row wrap">
+      <form method="post" action="/admin/rules/propose"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="alias_id" value="{{ m.alias.id }}">
+        <button type="submit" class="secondary" {% if m.running %}disabled{% endif %}>Propose rules now</button></form>
+      <form method="post" action="/admin/rules/samples/{{ m.alias.id }}/forget" data-confirm="Forget the answers kept for {{ m.alias.name }}?"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="secondary">Forget kept answers</button></form>
+    </div>
+  </div>
+  {% endfor %}
+  <p class="small muted">It runs by itself after 10 new failed answers (or 50 passed), and once it has run, a day after
+  a new failed one. Kept answers are encrypted, at most 200 of each verdict per alias, for 7 days.</p>
+</section>
+{% endif %}
+
 <section class="card" id="try">
   <h2>Try it</h2>
-  <p class="small muted">Paste an answer: see which rules match it, and the first, which fails it. As an alias tries
-  them (its rules, in its order), or all of them. The answer is read as a check reads it: a rule at the start sees its
-  first {{ start_chars }} characters.</p>
+  <p class="small muted">Paste an answer: see which rules match it and which one decides, as an alias tries them (its
+  rules, in its order) or all of them. A rule at the start sees the first {{ start_chars }} characters.</p>
   <form method="post" action="/admin/rules/try#try" class="alias-editor">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <label>Answer <textarea name="answer" rows="5" placeholder="e.g. I'm sorry, but I can't help with that.">{{ tried.answer if tried else "" }}</textarea></label>
@@ -49,10 +87,11 @@ take no time; the last model's answer isn't checked (nothing is left to fall bac
     <div class="row"><button type="submit" class="secondary">Try</button></div>
   </form>
   {% if tried %}
-  <p class="notice {% if tried.first %}err{% else %}ok{% endif %}">{% if tried.first %}Fails the answer: <strong>{{ tried.first }}</strong>.{% else %}No rule matches: the answer would go on (to the built-in phrases and the checker, if the alias has them).{% endif %}</p>
+  {% set d = tried.decides %}
+  <p class="notice {% if d and d.action == 'fail' %}err{% else %}ok{% endif %}">{% if d %}Decided by <strong>{{ d.name }}</strong>: it {{ action_short[d.action] }}.{% else %}No rule decides: the built-in refusal phrases and the checker model come next (if the alias has them).{% endif %}</p>
   {% if tried.rows %}
   <ul class="small">
-    {% for row in tried.rows %}<li>{{ row.rule.name }}: {% if not row.rule.enabled %}<span class="muted">off</span>{% elif row.match %}<strong>matches</strong>{% else %}<span class="muted">no match</span>{% endif %}</li>{% endfor %}
+    {% for row in tried.rows %}<li>{{ row.rule.name }}: {% if row.rule.state == "off" %}<span class="muted">off</span>{% elif row.match %}<strong>matches</strong>{% if row.rule.state == "watch" %} (watching: it would have {{ action_would[row.rule.action] }}){% endif %}{% else %}<span class="muted">no match</span>{% endif %}</li>{% endfor %}
   </ul>
   {% endif %}
   {% endif %}

@@ -291,6 +291,12 @@ def create_mock(limit: int = 2) -> FastAPI:
                 replies = state.get("learn_replies") or ['{"edits": [], "keep": []}']
                 body["mock_content"] = replies[min(len(asked) - 1, len(replies) - 1)]
             body["mock_delay"] = 0.01
+        # An alias's rule maker (app/rule_maker.py): answers state["rule_maker_reply"] (else no rules); what it was
+        # shown: state["rule_maker_inputs"].
+        if first_text.startswith("You write rules that check"):
+            state.setdefault("rule_maker_inputs", []).append(body["messages"][1]["content"])
+            body["mock_content"] = state.get("rule_maker_reply") or '{"rules": []}'
+            body["mock_delay"] = 0.01
         # Per-model answers: state["model_words"][model] = the pieces it streams (or answers in one go).
         words_of = (state.get("model_words") or {}).get(body.get("model"))
         if words_of and not body.get("mock_content"):

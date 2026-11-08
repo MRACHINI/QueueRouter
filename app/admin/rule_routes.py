@@ -1,4 +1,5 @@
-"""The Rules page: answer rules (app/answer_rules.py), their editor, and trying them on a pasted answer."""
+"""The Rules page: answer rules (app/answer_rules.py), their editor, each alias's rule maker (app/rule_maker.py), and
+trying the rules on a pasted answer."""
 
 from __future__ import annotations
 
@@ -9,18 +10,42 @@ from types import SimpleNamespace
 from fastapi import FastAPI, Request
 
 from .. import answer_rules as rules_mod
-from ..answer_rules import KIND_LABELS, KINDS, RULES_PER_ALIAS, SCOPE_LABELS, SCOPES, RuleError
+from ..answer_rules import (
+    ACTION_LABELS,
+    ACTION_SHORT,
+    ACTION_WOULD,
+    ACTIONS,
+    KIND_LABELS,
+    KINDS,
+    LEARN_LABELS,
+    RULES_PER_ALIAS,
+    SCOPE_LABELS,
+    SCOPES,
+    STATE_LABELS,
+    STATES,
+    RuleError,
+)
 from ..store import Store
 from .edit_routes import Helpers
 
 TRY_MAX = 100_000  # characters of an answer to try the rules on
-STALE_S = 30 * 86_400  # a rule in use that hasn't failed an answer for this long is marked "quiet"
+STALE_S = 30 * 86_400  # a rule in use that hasn't decided an answer for this long is marked "quiet"
+
+MESSAGES = {
+    "proposing": "Its rule maker is at work; its rules show here when it's done (a minute or so).",
+    "samples_forgotten": "Its kept answers are gone.",
+}
 
 
 def rule_choices(store: Store) -> list[dict]:
     """The rules, for the picker in the alias editor."""
     return [
-        {"id": str(r.id), "label": r.name, "note": KIND_LABELS.get(r.kind, r.kind) + ("" if r.enabled else " · off")}
+        {
+            "id": str(r.id),
+            "label": r.name,
+            "note": f"{KIND_LABELS.get(r.kind, r.kind)}, {ACTION_SHORT.get(r.action, r.action)}"
+            + ("" if r.state == "on" else f" · {STATE_LABELS.get(r.state, r.state)}"),
+        }
         for r in store.list_rules()
     ]
 
@@ -41,7 +66,23 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
     def find(rule_id: int):
         return next((r for r in store.list_rules() if r.id == rule_id), None)
 
+    def labels() -> dict:
+        return {
+            "kinds": KINDS,
+            "kind_labels": KIND_LABELS,
+            "scopes": SCOPES,
+            "scope_labels": SCOPE_LABELS,
+            "actions": ACTIONS,
+            "action_labels": ACTION_LABELS,
+            "action_short": ACTION_SHORT,
+            "action_would": ACTION_WOULD,
+            "states": STATES,
+            "state_labels": STATE_LABELS,
+            "start_chars": rules_mod.START_CHARS,
+        }
+
     def editor(request: Request, session, rule, error: str | None = None):
+        aliases = {a.id: a.name for a in store.list_aliases()}
         return page(
             request,
             "rule_edit.html",
@@ -49,12 +90,9 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
             r=rule,
             new=rule.id is None,
             error=error,
-            kinds=KINDS,
-            kind_labels=KIND_LABELS,
-            scopes=SCOPES,
-            scope_labels=SCOPE_LABELS,
             users=store.rule_users().get(rule.id, []) if rule.id is not None else [],
-            start_chars=rules_mod.START_CHARS,
+            made_for=aliases.get(rule.made_by) if getattr(rule, "made_by", None) is not None else None,
+            **labels(),
         )
 
     def draft(form: dict, rule_id: int | None = None) -> SimpleNamespace:
@@ -66,25 +104,46 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
             find=str(form.get("find", "")),
             case=form.get("case") == "on",
             scope=str(form.get("scope", "start")),
-            enabled=form.get("enabled") == "on" or rule_id is None,
+            action=str(form.get("action", "fail")),
+            negate=form.get("negate") == "on",
+            state=str(form.get("state", "on")),
             notes=str(form.get("notes", "")),
-            hits=0,
-            last_hit=None,
+            made_by=None,
+            why="",
         )
 
-    def listing(request: Request, session, tried: dict | None = None):
-        aliases = [a for a in store.list_aliases() if a.answer_rules]
+    def listing(request: Request, session, tried: dict | None = None, note: str | None = None):
+        aliases = store.list_aliases()
+        names = {a.id: a.name for a in aliases}
+        learning = store.rule_learning()
+        counts = store.sample_counts()
+        running = getattr(request.app.state, "makers_running", set())
+        makers = [
+            {
+                "alias": a,
+                "mode": LEARN_LABELS.get(a.learn_rules, a.learn_rules),
+                "fails": counts.get(a.id, {}).get("fail", 0),
+                "passes": counts.get(a.id, {}).get("pass", 0),
+                "state": learning.get(a.id, {}),
+                "running": a.id in running,
+                "checker": a.check_answers,
+            }
+            for a in aliases
+            if a.learn_rules != "off"
+        ]
         return page(
             request,
             "rules.html",
             session,
             rules=store.list_rules(),
-            kind_labels=KIND_LABELS,
             users=store.rule_users(),
-            aliases=aliases,
+            aliases=[a for a in aliases if a.answer_rules],
+            made_for=names,
+            makers=makers,
             quiet_before=time.time() - STALE_S,
             tried=tried,
-            start_chars=rules_mod.START_CHARS,
+            note=note,
+            **labels(),
         )
 
     @app.get("/admin/rules")
@@ -95,29 +154,49 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
     @app.post("/admin/rules/try")
     async def rules_try(request: Request):
         """The rules on a pasted answer, as an alias tries them (its rules, in its order) or all of them: which
-        match, and the first (the one that fails the answer)."""
+        match, which decides and how, and what the ones watching would have done."""
         session, form = await require_post(request, "admin")
         answer = str(form.get("answer", ""))[:TRY_MAX].replace("\r\n", "\n")
         alias_name = str(form.get("alias", ""))
         every = {r.id: r for r in store.list_rules()}
         alias = next((a for a in store.list_aliases() if a.name == alias_name), None)
         order = [every[i] for i in alias.answer_rules if i in every] if alias else list(every.values())
-        rows = [{"rule": r, "match": r.enabled and rules_mod.matches(r, answer)} for r in order]
-        first = rules_mod.first_match(order, answer)
-        tried = {"answer": answer, "alias": alias_name, "rows": rows, "first": first.name if first else None}
+        decision = rules_mod.decide(order, answer)
+        rows = [{"rule": r, "match": r.state != "off" and rules_mod.matches(r, answer)} for r in order]
+        tried = {"answer": answer, "alias": alias_name, "rows": rows, "decides": decision.rule}
         return listing(request, session, tried)
+
+    @app.post("/admin/rules/propose")
+    async def rules_propose(request: Request):
+        """An alias's rule maker, now (in the background)."""
+        session, form = await require_post(request, "admin")
+        try:
+            alias_id = int(str(form.get("alias_id", "")))
+        except ValueError:
+            return back("/admin/rules", error="invalid")
+        start = getattr(request.app.state, "start_rule_maker", None)
+        why = start(alias_id) if start else "the rule maker isn't available"
+        if why:
+            return listing(request, session, note=f"Its rule maker didn't start: {why}.")
+        store.audit(session.user.username, "rules.propose", str(alias_id))
+        return back("/admin/rules", "proposing")
+
+    @app.post("/admin/rules/samples/{alias_id}/forget")
+    async def rules_forget_samples(alias_id: int, request: Request):
+        session, _ = await require_post(request, "admin")
+        store.forget_samples(alias_id, session.user.username)
+        return back("/admin/rules", "samples_forgotten")
 
     @app.get("/admin/rules/new")
     async def rule_new(request: Request):
         session = require(request, "admin")
-        return editor(request, session, draft({"kind": "contains", "scope": "start"}))
+        return editor(request, session, draft({"kind": "contains", "scope": "start", "action": "fail", "state": "on"}))
 
     @app.post("/admin/rules")
     async def rules_create(request: Request):
         session, form = await require_post(request, "admin")
         try:
-            fields = rules_mod.clean_rule(form)
-            store.create_rule(session.user.username, **fields)
+            store.create_rule(session.user.username, **rules_mod.clean_rule(form))
         except RuleError as exc:
             return editor(request, session, draft(form), str(exc))
         except sqlite3.IntegrityError:
@@ -139,12 +218,25 @@ def mount_rule_pages(app: FastAPI, store: Store, h: Helpers) -> None:
         if find(rule_id) is None:
             return back("/admin/rules", error="invalid")
         try:
-            fields = rules_mod.clean_rule(form)
-            store.update_rule(rule_id, session.user.username, enabled=form.get("enabled") == "on", **fields)
+            store.update_rule(rule_id, session.user.username, **rules_mod.clean_rule(form))
         except RuleError as exc:
             return editor(request, session, draft(form, rule_id), str(exc))
         except sqlite3.IntegrityError:
             return editor(request, session, draft(form, rule_id), "That name is already taken.")
+        h.reload()
+        return back("/admin/rules", "saved")
+
+    @app.post("/admin/rules/{rule_id}/state")
+    async def rules_state(rule_id: int, request: Request):
+        """On (turning on a rule the model made is approving it), watching or off."""
+        session, form = await require_post(request, "admin")
+        state = str(form.get("state", ""))
+        if state not in STATES:
+            return back("/admin/rules", error="invalid")
+        try:
+            store.set_rule_state(rule_id, session.user.username, state)
+        except KeyError:
+            return back("/admin/rules", error="invalid")
         h.reload()
         return back("/admin/rules", "saved")
 

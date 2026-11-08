@@ -62,9 +62,11 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
     model if it's on. The first that fails it sends the same request to the next fallback model (needs one), and the
     Requests page says why. The last model's answer isn't checked: nothing is left to fall back to.</p>
     <label>Rules, in order {{ picker("answer_rules", a.answer_rules, "multi", "Add an answer rule…", True, "rule-choices", True) }}
-      <small class="muted">Exact text or a pattern (made on the <a href="/admin/rules">Rules</a> page): the first that
-      matches fails the answer. They cost nothing and take no time. When they all look at the start of the answer and
-      the checker model is off, only that start is held back before the answer streams on.</small></label>
+      <input type="hidden" name="rules_seen" value="{{ rules_seen }}">
+      <small class="muted">Exact text, words or a pattern (made on the <a href="/admin/rules">Rules</a> page): the first
+      one on that matches decides: it fails or passes the answer, or asks the checker model. They cost nothing and take
+      no time. Rules watching decide nothing (they need the checker model on). When they all look at the start of the
+      answer and the checker model is off, only that start is held back before the answer streams on.</small></label>
     <fieldset class="plain"><legend class="small muted">What it reads</legend>
       <input type="hidden" name="kinds" value="shown">
       <div class="row wrap">{% for k in answer_kinds %}
@@ -82,6 +84,29 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
       <small class="muted">The checker sees these, the user's last message and the answer, not the rest of the
       conversation, and answers PASS or FAIL with a reason. A checked answer reaches the app all at once once it's
       checked, not word by word; if the checker fails or takes over two minutes, the answer goes through.</small></label>
+    <label>Ask the checker model <select name="check_when">
+      {% for w in check_when %}<option value="{{ w }}" {% if a.check_when == w %}selected{% endif %}>{{ check_when_labels[w] }}</option>{% endfor %}
+    </select>
+      <small class="muted">Only for answers a rule sends to it: an answer no rule decided passes without it. Pair it with
+      rules that ask the checker, e.g. "Any of these: sorry / unable / cannot". It saves the checker's requests, not the
+      wait: with a checker model on, an answer is still held back until it has all come.</small></label>
+    <label class="inline-field">Spot checks <input type="number" name="spot_checks" min="0" max="100" value="{{ a.spot_checks }}"> % of the answers decided without the checker</label>
+    <small class="muted">These go to the checker model too, in the background and at low priority: they change nothing for
+      the answer, but show how often each rule agrees with the checker (Rules page), and a rule the model made that starts
+      disagreeing goes back to watching by itself. At most 4 run at once (more are skipped). 0: none.</small>
+    <label>Rules from the model <select name="learn_rules">
+      {% for m in learn_modes %}<option value="{{ m }}" {% if a.learn_rules == m %}selected{% endif %}>{{ learn_labels[m] }}</option>{% endfor %}
+    </select>
+      <small class="muted">Its rule maker reads the answers the checker model judged (kept encrypted, up to 200 of each
+      verdict, for 7 days) and proposes rules; one that would have decided a kept answer wrongly, or whose pattern is
+      slow, is dropped, and the rest are added at the end of this alias's rules (ahead of the rules it made that ask the
+      checker), watching. Then either you turn them on (Rules page), or they turn on by themselves once the checker has
+      agreed with them 20 times (at most once not), and go back to watching if they start disagreeing. A rule that asks
+      the checker is on at once (it can't decide wrongly). A rule of its own you delete isn't proposed again. Needs the
+      checker model on; turning it off forgets the kept answers.</small></label>
+    <label>Rule maker model {{ picker("learn_model", a.learn_model, "single", "blank = the checker model") }}</label>
+    <label class="check"><input type="checkbox" name="learn_pass" {% if a.learn_pass %}checked{% endif %}>
+      Rules that pass answers may turn on by themselves too (a wrong one lets a bad answer through unnoticed)</label>
   </fieldset>
 
   <fieldset class="card">

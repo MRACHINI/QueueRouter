@@ -1994,6 +1994,52 @@ the base image's zlib (CVE-2026-85091 and CVE-2026-76844), fixed in Debian but n
 no 0.74.0 image was published. The Dockerfile now runs `apt-get upgrade` on the pinned base; the scanned image is
 still the one that ships. Same features as 0.74.0.
 
+v0.75.0: rules that decide either way, the checker asked only when a rule sends it, and rules a model proposes.
+- Asked for: rules that pass answers too (an answer without certain words goes through, no checker request), a
+  rule that passes or fails but lets the next check run, and a model that writes rules from the checker's
+  verdicts, proposing them for approval or turning them on by itself when they're a sure match.
+- A rule's action (`answer_rules.ACTIONS`): fail; pass (nothing else runs); pass_free (the checker model isn't
+  asked, the built-in refusal phrases still run: they're free); ask (the checker decides). New kinds: "any of
+  these" (words or phrases, one per line), and "doesn't" (`negate`) on any kind. The first rule that's on and
+  matches decides (`decide`); with none, the built-in phrases, then the checker.
+- `aliases.check_when`: the checker reads every answer no rule decided (as before) or only those a rule asks it to
+  ("asked": an answer no rule decided passes without it; it saves requests, not the wait, as a checker model still
+  means the whole answer is held).
+- States: on, watching (it decides nothing; when the checker reads an answer it matched, whether the checker agreed
+  with what it would have done is counted: `agrees`, `rule_outcomes`, written each second with
+  `Store.apply_rule_outcomes`), off. Agreement shows on the Rules page (all time, and the last 20).
+- Spot checks (`aliases.spot_checks`, % of the answers decided without the checker; 5 for a new alias, 0 for those
+  made before 0.75): they go to the checker in the background, at low priority, as their own rows ("spot check"),
+  at most 4 at once per alias (more are skipped) and each for at most the checker's time limit; they change nothing
+  for the answer but feed the same counts, and the kept answers. Rules watching are left out when the alias has no
+  checker model (nothing would measure them).
+- The rule maker (app/rule_maker.py; `aliases.learn_rules` off / propose / auto, `learn_model`, `learn_pass`): with
+  the checker on, each answer it judges (check or spot check) is kept for it (`answer_samples`, encrypted, 200 of
+  each verdict per alias, 7 days). After 10 new failed answers (or 50 passed; once it has run, a day after a new
+  failed one; never twice in ten minutes), or "Propose rules now", its model reads the newest 30 of each (quoted as
+  text to study, with the check's instructions and the alias's rules) and proposes up to 5 rules as JSON. Each is
+  tried on all the kept answers (`keep`): a fail rule must match 2 failed and no passed, a pass rule (made
+  pass_free) 2 passed and no failed, an ask rule 2 failed; repeats and the rest are dropped. Kept ones go at the end
+  of the alias's rules (a fail or pass rule ahead of the ask rules it made, which would otherwise match first and
+  leave it nothing to decide): watching, or on at once for an ask rule in auto mode (it can't decide wrongly); in
+  propose mode they wait for you ("to approve"). In auto mode a watching rule the model made turns on once the
+  checker agreed with it 20 times with at most 1 disagreement (a pass rule only with `learn_pass`), and one that's on
+  goes back to watching once it disagreed more than 2 of its last 20 times (`next_state`); hand-made rules never
+  change by themselves. It asks as the client whose answers it learned from (the last one since the start).
+- Its model's patterns are untrusted: only the first 10 proposals are read, trying them runs in a thread (the
+  `regex` searches release the GIL) and takes at most 20 s in all, and a pattern that takes over 50 ms on one kept
+  answer is dropped (it would hold up every answer: rules run on the event loop, at most 250 ms each). A run is
+  noted (when, and what it did or that it failed) whatever happens, so a failing one waits like any other.
+- Repeats: what it proposes is compared (kind, text any case, "doesn't") with the alias's rules, every rule it made
+  (attached or not) and those of them you deleted (`rule_learning.rejected`, the last 200).
+- Changes by hand: a new state (by hand) starts a rule's last-20 outcomes afresh (old disagreements would turn it
+  back to watching at once); a change to what it looks for or does also starts its counts afresh. The checker's
+  verdicts are applied in one transaction (read and written), so they don't undo a change made meanwhile. The alias
+  editor keeps the rules its rule maker attached while the page was open (`rules_seen`).
+- Kept answers: clipped to 20,000 characters (start and end), deleted after 7 days by the hourly prune too, and
+  all of an alias's go when its rule maker is turned off or the alias is deleted (the rules it made stay, as if made
+  by hand: a new alias may get its id).
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

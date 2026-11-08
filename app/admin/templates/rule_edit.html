@@ -3,29 +3,49 @@
 {% block content %}
 <p class="small"><a href="/admin/rules">← Answer rules</a></p>
 <h1>{% if new %}New rule{% else %}Rule <code>{{ r.name }}</code>{% endif %}</h1>
+{% if made_for %}
+<p class="small muted">Made by the rule maker of alias <strong>{{ made_for }}</strong>{% if r.why %}: {{ r.why }}{% endif %}.
+{% if r.sample_fails or r.sample_passes %}On the answers kept then it matched {{ r.sample_fails }} failed and {{ r.sample_passes }} passed.{% else %}Changed since, by hand.{% endif %}
+{% if r.agreed or r.disagreed %}Since, the checker agreed with it {{ r.agreed }} times, {{ r.disagreed }} not.{% endif %}
+{% if r.awaiting %}<strong>It's waiting for you to turn it on.</strong>{% endif %}{% if r.note %} Last change: {{ r.note }}.{% endif %}</p>
+{% endif %}
 
 <form method="post" action="{% if new %}/admin/rules{% else %}/admin/rules/{{ r.id }}{% endif %}" class="alias-editor">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <fieldset class="card">
     <legend>Rule</legend>
     <label>Name <input name="name" value="{{ r.name }}" required maxlength="64" placeholder="e.g. Sorry, I can't" autocomplete="off">
-      <small class="muted">The Requests page says which rule failed an answer by this name.</small></label>
+      <small class="muted">The Requests page says which rule decided an answer by this name.</small></label>
     <label>Looks for <select name="kind">
       {% for k in kinds %}<option value="{{ k }}" {% if r.kind == k %}selected{% endif %}>{{ kind_labels[k] }}</option>{% endfor %}
     </select>
-      <small class="muted">Contains: the text anywhere in what it reads. Starts with: the answer begins with it. Pattern:
-      a regular expression (Python syntax; <code>^</code> and <code>$</code> match at each line).</small></label>
-    <label>Text or pattern <textarea name="find" rows="3" maxlength="2000" required placeholder="e.g. I can't help with · or a pattern: ^(I'm sorry|Sorry), (but )?I (can't|cannot)">{{ r.find }}</textarea></label>
+      <small class="muted">Contains: the text anywhere in what it reads. Any of these: any of several words or phrases,
+      one per line. Starts with: the answer begins with it. Pattern: a regular expression (Python syntax; <code>^</code>
+      and <code>$</code> match at each line).</small></label>
+    <label>Text, words or pattern <textarea name="find" rows="4" maxlength="2000" required placeholder="e.g. I can't help with · or, for Any of these, one per line: sorry / unable / I cannot · or a pattern: ^(I'm sorry|Sorry),? (but )?I (can't|cannot)">{{ r.find }}</textarea></label>
+    <label class="check"><input type="checkbox" name="negate" {% if r.negate %}checked{% endif %}> doesn't: the rule matches when the text isn't there</label>
     <label>Where <select name="scope">
       {% for s in scopes %}<option value="{{ s }}" {% if r.scope == s %}selected{% endif %}>{{ scope_labels[s] }}</option>{% endfor %}
     </select>
-      <small class="muted">At the start: the first {{ start_chars }} characters of the answer. Only that much is held back
-      before the answer streams on, when an alias's rules all look at the start and it has no checker model.
-      Anywhere: the whole answer, held back until it has all come. (Starts with always looks at the start.)</small></label>
+      <small class="muted">At the start: the first {{ start_chars }} characters of the answer (only that much is held back
+      before the answer streams on, when an alias's rules all look at the start and it has no checker model). Anywhere:
+      the whole answer. (Starts with always looks at the start.)</small></label>
     <label class="check"><input type="checkbox" name="case" {% if r.case %}checked{% endif %}> match case (else any case, and ' and ’ count as the same)</label>
+    <label>When it matches <select name="action">
+      {% for a in actions %}<option value="{{ a }}" {% if r.action == a %}selected{% endif %}>{{ action_labels[a] }}</option>{% endfor %}
+    </select>
+      <small class="muted">Fail it: the same request goes to the alias's next model. Pass it: the app gets the answer and
+      nothing else runs (not the checker model, nor the built-in refusal phrases). Pass it, but run the free checks: the
+      checker model isn't asked, the built-in refusal phrases still run. Ask the checker model: it decides (also when the
+      alias asks it only for answers a rule sends to it). A rule that passes answers skips everything the checker would
+      have looked at, not only refusals.</small></label>
+    <label>State <select name="state">
+      {% for s in states %}<option value="{{ s }}" {% if r.state == s %}selected{% endif %}>{{ state_labels[s] }}</option>{% endfor %}
+    </select>
+      <small class="muted">Watching: it decides nothing; when the checker model reads an answer it matched, whether the
+      checker agreed with what it would have done is counted, so you can see if it can be trusted.</small></label>
     <label>Notes <input name="notes" value="{{ r.notes }}" maxlength="300" placeholder="optional"></label>
-    {% if not new %}<label class="check"><input type="checkbox" name="enabled" {% if r.enabled %}checked{% endif %}> on</label>
-    <p class="small muted">{% if users %}Used by {{ users | join(", ") }}.{% else %}Not used yet: attach it in an alias's editor (Answer check).{% endif %}</p>{% endif %}
+    {% if not new %}<p class="small muted">{% if users %}Used by {{ users | join(", ") }}.{% else %}Not used yet: attach it in an alias's editor (Answer check).{% endif %}</p>{% endif %}
   </fieldset>
   <div class="row">
     <button type="submit">{% if new %}Add rule{% else %}Save{% endif %}</button>

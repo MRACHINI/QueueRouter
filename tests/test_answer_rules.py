@@ -13,8 +13,8 @@ from tests.test_admin import OWNER, csrf_of, login
 from tests.test_answer_check import TOOLS, chat, entries, words
 
 
-def rule(kind="contains", find="I can't help", scope="start", case=False, enabled=True, name="r", rule_id=1):
-    return Rule(rule_id, name, kind, find, case, scope, enabled)
+def rule(kind="contains", find="I can't help", scope="start", case=False, enabled=True, name="r", rule_id=1, **more):
+    return Rule(rule_id, name, kind, find, case, scope, more.pop("state", "on" if enabled else "off"), **more)
 
 
 def test_what_a_rule_matches():
@@ -34,7 +34,12 @@ def test_what_a_rule_matches():
 def test_a_rules_settings_are_checked():
     fields = clean_rule({"name": " Sorry,  I can't ", "kind": "pattern", "find": "^sorry", "scope": "anywhere"})
     assert fields == {"name": "Sorry, I can't", "kind": "pattern", "find": "^sorry", "case": False, "scope": "anywhere",
-                      "notes": ""}  # fmt: skip
+                      "action": "fail", "negate": False, "state": "on", "notes": ""}  # fmt: skip
+    raw = {"name": "w", "kind": "any", "find": " sorry \r\n\r\nunable\n", "action": "ask", "negate": "on"}
+    words_ = clean_rule(raw)
+    assert words_["find"] == "sorry\nunable" and words_["action"] == "ask" and words_["negate"] is True
+    with pytest.raises(RuleError):
+        clean_rule({"name": "n", "kind": "contains", "find": "x", "action": "maybe"})
     for wrong in ({"kind": "pattern", "find": "(unclosed"}, {"kind": "glob"}, {"find": " "}, {"name": ""}):
         with pytest.raises(RuleError):
             clean_rule({"name": "n", "kind": "contains", "find": "x", "scope": "start", **wrong})
@@ -113,7 +118,7 @@ async def test_a_rule_fails_an_answer_and_the_next_model_answers(make_stack):
         assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "good answer"
         assert stack.mock["models"] == ["strict-model", "mock-model"]  # no checker model was asked
         main, calls = await entries(stack)
-        assert main["answer_check"] == "strict-model: rule 'Sorry' matched"
+        assert main["answer_check"] == "strict-model: rule 'Sorry' failed it"
         assert main["fallback"] == "strict-model -> mock-model (rule: Sorry)"
         assert {e["role"] for e in calls} == {"failed answer rule"}
         async with c.stream("POST", "/v1/chat/completions", headers=stack.headers, json=chat(stream=True)) as r:
@@ -183,7 +188,7 @@ async def test_the_editor_checks_rules_and_kinds(make_stack):
         assert "m=created" in (await save_alias(c, [sorry])).headers["location"]
         csrf = csrf_of((await c.get("/admin/rules")).text)
         tried = await c.post("/admin/rules/try", data={"csrf": csrf, "answer": "Sorry, no.", "alias": "smart"})
-        assert "Fails the answer: <strong>Sorry</strong>" in tried.text
+        assert "Decided by <strong>Sorry</strong>: it fails." in tried.text
         r = await c.post(f"/admin/rules/{sorry}/delete", data={"csrf": csrf})
         assert "m=deleted" in r.headers["location"]
         assert next(a for a in store.list_aliases() if a.name == "smart").answer_rules == ()  # taken off the alias

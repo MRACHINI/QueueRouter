@@ -31,7 +31,17 @@ from .. import cron as cron_mod
 from .. import jobs as jobs_mod
 from ..agents import parse_tags
 from ..alerts import LEVELS, SPECS, WEBHOOK_KINDS, Alerts, Note
-from ..answer_rules import ANSWER_KIND_LABELS, ANSWER_KINDS, DEFAULT_ANSWER_KINDS, RULES_PER_ALIAS
+from ..answer_rules import (
+    ANSWER_KIND_LABELS,
+    ANSWER_KINDS,
+    CHECK_WHEN,
+    CHECK_WHEN_LABELS,
+    DEFAULT_ANSWER_KINDS,
+    LEARN_LABELS,
+    LEARN_MODES,
+    RULES_PER_ALIAS,
+    SPOT_DEFAULT,
+)
 from ..auth import AuthGuard, client_ip, how_long, ignored_proxy
 from ..backup import MAX_UPLOAD_BYTES, RestoreError, backup_path, list_backups, make_archive, stage_restore
 from ..catalog import make_filter, parse_filter
@@ -105,6 +115,9 @@ ALIAS_ERRORS = {  # what was wrong in the alias editor
     "answer_rules": f"Answer rules need at least one fallback model (a failed answer goes to the next model), and "
     f"an alias takes up to {RULES_PER_ALIAS} of them.",
     "check_kinds": "Tick at least one kind of answer for the check to read.",
+    "check_when": "Choose when the checker model is asked.",
+    "spot_checks": "Spot checks: 0 to 100%.",
+    "learn_rules": "Rules from the model need the checker model on: the rule maker learns from its verdicts.",
     "council_search_max": "Searches per member: 1 to 10.",
     "council_search_results": "Results per search: 1 to 10.",
     "orch_rounds": "Orchestrator rounds: 1 to 30.",
@@ -185,6 +198,7 @@ MESSAGES = {
     "group_models": "Pick at least one model or alias, or tick Every model.",
     "edits": f"Up to {edit_routes.EDITS_PER_OWNER} prompt edits.",
     **edit_routes.MESSAGES,
+    **rule_routes.MESSAGES,
 }
 
 MAX_USERNAME = 100
@@ -2027,12 +2041,25 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             check_kinds = check_kinds or DEFAULT_ANSWER_KINDS
         elif (answer_rules or check_answers) and not check_kinds:
             raise ValueError("check_kinds")
+        check_when = str(form.get("check_when", "undecided"))
+        if check_when not in CHECK_WHEN:
+            raise ValueError("check_when")
+        spot_checks = int_field(form, "spot_checks", 0, 100, SPOT_DEFAULT)
+        learn_rules = str(form.get("learn_rules", "off"))
+        if learn_rules not in LEARN_MODES or (learn_rules != "off" and not check_answers):
+            raise ValueError("learn_rules")
+        learn_model = " ".join(str(form.get("learn_model", "")).split())[:200]
         edits = edit_routes.edit_ids(form, store)
         return {
             "edits": edits,
             "label": label,
             "answer_rules": answer_rules,
             "check_kinds": check_kinds or DEFAULT_ANSWER_KINDS,
+            "check_when": check_when,
+            "spot_checks": spot_checks,
+            "learn_rules": learn_rules,
+            "learn_model": learn_model,
+            "learn_pass": form.get("learn_pass") == "on",
             "target_model": target,
             "upstream_ids": upstream_ids,
             "notes": str(form.get("notes", ""))[:300],
@@ -2100,10 +2127,20 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             edits=items("edits"),
             answer_rules=items("answer_rules"),
             check_kinds=tuple(k for k in ANSWER_KINDS if form.get(f"kind_{k}") == "on"),
+            check_when=str(form.get("check_when", "undecided")),
+            spot_checks=str(form.get("spot_checks", SPOT_DEFAULT)),
+            learn_rules=str(form.get("learn_rules", "off")),
+            learn_model=str(form.get("learn_model", "")).strip(),
+            learn_pass=form.get("learn_pass") == "on",
             enabled=form.get("enabled") == "on" if existing else True,
         )
 
-    def alias_page(request: Request, session: AdminSession, alias, error: str | None = None) -> HTMLResponse:
+    def alias_page(
+        request: Request, session: AdminSession, alias, error: str | None = None, rules_seen: str | None = None
+    ) -> HTMLResponse:
+        """``rules_seen``: the rules the alias had when its editor was first opened (a form shown again keeps it)."""
+        if rules_seen is None:
+            rules_seen = ",".join(str(i) for i in alias.answer_rules)
         return page(
             request,
             "alias_edit.html",
@@ -2111,6 +2148,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             a=alias,
             new=alias.id is None,
             error=error,
+            rules_seen=rules_seen,
             triggers=TRIGGERS,
             compact_modes=[m for m in COMPACT_MODES if m in ENABLED_COMPACT_MODES],
             council_modes=COUNCIL_MODES,
@@ -2122,6 +2160,10 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             rule_choices=rule_routes.rule_choices(store),
             answer_kinds=ANSWER_KINDS,
             answer_kind_labels=ANSWER_KIND_LABELS,
+            check_when=CHECK_WHEN,
+            check_when_labels=CHECK_WHEN_LABELS,
+            learn_modes=LEARN_MODES,
+            learn_labels=LEARN_LABELS,
             search_on=store.get_tunables().get("search_provider", "off") not in ("", "off"),
         )
 
@@ -2146,6 +2188,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             council_search=False, council_search_max=3, council_search_results=5, council_fetch=False,
             orch_rounds=6, orch_tasks=8, orch_seconds=300, council_roles="", check_answers=False, check_model="",
             check_instructions="", edits=(), enabled=True, answer_rules=(), check_kinds=DEFAULT_ANSWER_KINDS,
+            check_when="undecided", spot_checks=SPOT_DEFAULT, learn_rules="off", learn_model="", learn_pass=False,
         )  # fmt: skip
         return alias_page(request, session, empty)
 
@@ -2183,12 +2226,18 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             if not ALIAS_NAME.fullmatch(name):
                 raise ValueError("name")
             fields = alias_fields(form, name, existing.name)
+            if "rules_seen" in form:  # rules its rule maker attached while the editor was open stay attached
+                seen = {int(v) for v in str(form["rules_seen"]).split(",") if v.strip().isdecimal()}
+                picked = fields["answer_rules"]
+                since = tuple(i for i in existing.answer_rules if i not in seen and i not in picked)
+                fields["answer_rules"] = (*picked, *since)[:RULES_PER_ALIAS]
             if name != existing.name:  # renamed: what QueueRouter keeps that names it follows (store.rename_alias)
                 listed = {m for ids in ctx.models_by_upstream().values() for m in ids}
                 store.rename_alias(alias_id, name, session.user.username, own_settings=existing.name not in listed)
             store.update_alias(alias_id, session.user.username, enabled=form.get("enabled") == "on", **fields)
         except (RulesError, ValueError, KeyError, sqlite3.IntegrityError) as exc:
-            return alias_page(request, session, alias_from_form(form, existing), alias_error(exc))
+            seen = str(form["rules_seen"]) if "rules_seen" in form else None
+            return alias_page(request, session, alias_from_form(form, existing), alias_error(exc), seen)
         ctx.reload()
         return back("/admin/models", "saved")
 

@@ -39,10 +39,18 @@ from a **web admin UI**.
   `finish_reason: content_filter` or a reply opening with a refusal. The request is resent
   unchanged.
 - **Answer checks** (opt-in per alias), in order, the first that fails an answer deciding:
-  - *answer rules* (Rules page): exact text (contains, starts with) or a pattern, made once and attached in order
-    to aliases; looking at the start of the answer (only that much is held back before it streams on) or
-    anywhere in it (the whole answer is held back). They cost nothing. **Try it** shows which rule a pasted
-    answer hits;
+  - *answer rules* (Rules page): exact text (contains, any of a list of words, starts with) or a pattern, or
+    "doesn't", made once and attached in order to aliases; looking at the start of the answer (only that much is
+    held back before it streams on) or anywhere in it. The first rule that matches decides: fail the answer, pass
+    it (nothing else runs), pass it but run the free checks, or ask the checker model, which an alias can ask
+    only for answers a rule sends to it. A rule can watch first: it decides nothing, and the Rules page shows how
+    often the checker agreed with it. They cost nothing. **Try it** shows which rule decides a pasted answer;
+  - an alias's *rule maker* (opt-in): a model reads the answers the checker judged (kept encrypted for a week)
+    and proposes rules; one that would have decided a kept answer wrongly is dropped, the rest start watching,
+    and either you turn them on or they turn on by themselves once the checker has agreed with them 20 times
+    (rules that pass answers only if you allow it), and go back to watching if they start disagreeing (one you
+    delete isn't proposed again; a slow pattern is dropped). Spot
+    checks send some answers a rule decided to the checker too, in the background, to keep measuring;
   - the built-in refusal phrases (the "refused" trigger), which also catch a refusal a provider puts in a field
     of its own;
   - a checker model you pick, which reads the answer with your instructions and the user's last message (not

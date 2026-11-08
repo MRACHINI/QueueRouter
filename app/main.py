@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import random
 import signal
 import sys
 import time
@@ -47,6 +48,7 @@ from . import council as council_mod
 from . import cron as cron_mod
 from . import edits as edits_mod
 from . import jobs as jobs_mod
+from . import rule_maker as rule_maker_mod
 from . import thinking as thinking_mod
 from . import tools as tools_mod
 from .admin import AdminContext, mount_admin
@@ -130,6 +132,7 @@ ADMIN_MAX_BODY = 4 * 1024 * 1024  # admin forms and the Playground (the restore 
 CONTENT_CAPTURE_MAX = 16 * 1024 * 1024  # streamed reply bytes kept for content logging (cut later)
 MAX_FORWARDS = 8  # aliases one request may be forwarded through (the editor refuses loops; this ends any other)
 EDIT_RESULT_DAYS = 30  # a prompt edit's kept rewrite unused this long is deleted (made again when needed)
+SPOTS_AT_ONCE = 4  # spot checks of one alias running at once (more are skipped: they only measure its rules)
 CATALOG_MAX_AGE_S = 3600
 
 
@@ -316,8 +319,12 @@ class Check:
     model: str | None  # None: rules only
     instructions: str
     client: ClientKey
-    rules: tuple[answer_rules.Rule, ...] = ()
+    rules: tuple[answer_rules.Rule, ...] = ()  # on and watching, in order
     kinds: tuple[str, ...] = answer_rules.DEFAULT_ANSWER_KINDS
+    when: str = "undecided"  # the checker reads every answer no rule decided, or only those a rule sends to it
+    spot: int = 0  # % of the answers decided without the checker that it reads too, in the background
+    alias_id: int | None = None
+    learn: str = "off"  # its rule maker: answers the checker judged are kept for it unless "off"
 
     @property
     def whole(self) -> bool:
@@ -557,7 +564,13 @@ def create_app(
             set_seen=store.set_made_seen,
         )
     )
-    rule_hits: dict[int, tuple[int, float]] = {}  # answer rule id -> (answers it failed, when last), till written
+    rule_hits: dict[int, tuple[int, float]] = {}  # answer rule id -> (answers it decided, when last), till written
+    rule_outcomes: list[tuple[int, bool]] = []  # (rule id, the checker agreed?), till written (app/answer_rules.py)
+    answer_samples: list[tuple[int, str, str, str]] = []  # checked answers kept for rule makers, till written
+    learning_clients: dict[int, ClientKey] = {}  # alias id -> the client its rule maker asks as (its last checked)
+    makers_running: set[int] = set()  # aliases whose rule maker is at work
+    spots_running: dict[int | None, int] = {}  # alias id -> its spot checks in flight
+    background_tasks: set[asyncio.Task] = set()  # spot checks and rule makers in flight
 
     def summary() -> dict:
         s = snapshot.settings
@@ -719,13 +732,89 @@ def create_app(
                 await asyncio.to_thread(store.add_edit_hits, hits)
             except Exception as exc:
                 log.error(json.dumps({"event": "edit_hits_write_failed", "error": repr(exc)[:200]}))
-        if rule_hits:  # how often each answer rule failed an answer (Rules page)
+        if rule_hits:  # how often each answer rule decided an answer (Rules page)
             taken = dict(rule_hits)
             rule_hits.clear()
             try:
                 await asyncio.to_thread(store.add_rule_hits, taken)
             except Exception as exc:
                 log.error(json.dumps({"event": "rule_hits_write_failed", "error": repr(exc)[:200]}))
+        if rule_outcomes:  # the checker agreeing with rules, or not: some turn on or go back to watching by themselves
+            outcomes = rule_outcomes[:]
+            rule_outcomes.clear()
+            try:
+                if changed := await asyncio.to_thread(store.apply_rule_outcomes, outcomes):
+                    for note in changed:
+                        log.info(json.dumps({"event": "rule_state_changed", "note": note}))
+                    reload()
+            except Exception as exc:
+                log.error(json.dumps({"event": "rule_outcomes_write_failed", "error": repr(exc)[:200]}))
+        learners = {a.id for a in snapshot.aliases.values() if a.learn_rules != "off"}
+        for alias_id in set(learning_clients) - learners:  # deleted, or its rule maker turned off
+            learning_clients.pop(alias_id, None)
+        if answer_samples:  # checked answers kept for rule makers, which may now have enough to propose rules
+            samples = [s for s in answer_samples if s[0] in learners]
+            answer_samples.clear()
+            try:
+                keep, days = rule_maker_mod.SAMPLE_KEEP, rule_maker_mod.SAMPLE_DAYS
+                await asyncio.to_thread(store.add_samples, samples, keep, days)
+                learning = await asyncio.to_thread(store.rule_learning)
+            except Exception as exc:
+                log.error(json.dumps({"event": "samples_write_failed", "error": repr(exc)[:200]}))
+            else:
+                for alias_id in {s[0] for s in samples}:
+                    if rule_maker_mod.due(learning.get(alias_id) or {}, time.time()):
+                        start_rule_maker(alias_id)
+
+    def start_rule_maker(alias_id: int) -> str:
+        """An alias's rule maker reads its kept answers and proposes rules, in the background; "" once it's
+        started, else why not."""
+        alias = next((a for a in snapshot.aliases.values() if a.id == alias_id), None)
+        if alias is None or alias.learn_rules == "off":
+            return "its rule maker is off"
+        if alias_id in makers_running:
+            return "it's already at work"
+        client = learning_clients.get(alias_id)
+        if client is None:  # it asks as the client whose answers it learns from: one since this start
+            return "it starts after the alias's next checked answer"
+        makers_running.add(alias_id)
+        in_background(make_rules(alias, client))
+        return ""
+
+    async def make_rules(alias, client: ClientKey) -> None:
+        """One run of an alias's rule maker (app/rule_maker.py): its model reads the kept answers and proposes
+        rules; those that would have decided the kept answers rightly are added (watching, or on, or waiting for
+        you, by the alias's settings) at the end of its rules. Its run is noted whatever happens, so a run that
+        fails isn't tried again at once."""
+        note = "it failed"
+        try:
+            samples = await asyncio.to_thread(store.samples_for, alias.id)
+            rules = [snapshot.rules[i] for i in alias.answer_rules if i in snapshot.rules]
+            avoid = [answer_rules.rule_key(r.kind, r.find, r.negate) for r in rules]
+            avoid += await asyncio.to_thread(store.made_rule_keys, alias.id)
+            model = alias.learn_model or alias.check_model or alias.target_model
+            payload = rule_maker_mod.payload(model, alias.check_instructions, rules, samples)
+            body = await internal_completion(client, payload, "low", tag="check", role="rule maker")
+            answer = edits_mod.reply_text(body) if body is not None else None
+            proposals = rule_maker_mod.parse(answer) if answer else None
+            if proposals is None:
+                note = "its model's answer wasn't the rules asked for" if answer else "its model's request failed"
+            else:  # its patterns are tried off the event loop: a slow one can't hold up serving
+                made, dropped = await asyncio.to_thread(
+                    rule_maker_mod.keep, proposals, samples, avoid, alias.learn_rules
+                )
+                names = await asyncio.to_thread(store.add_made_rules, alias.id, made)
+                note = rule_maker_mod.summary(names, made, dropped, len(proposals))
+                if names:
+                    reload()
+        except Exception as exc:
+            note = f"it failed: {type(exc).__name__}"
+            log.error(json.dumps({"event": "rule_maker_failed", "alias": alias.name, "error": repr(exc)[:200]}))
+        finally:
+            makers_running.discard(alias.id)
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(store.note_rule_maker_run, alias.id, note)
+            log.info(json.dumps({"event": "rule_maker_ran", "alias": alias.name, "note": note}))
 
     def restore_rate_windows() -> None:
         """After a restart, rebuild the last 24 h of rate-limit windows from the request log."""
@@ -814,6 +903,7 @@ def create_app(
                     await asyncio.to_thread(store.prune_content, cfg().content_log_days)
                     await asyncio.to_thread(store.prune_summaries, cfg().compaction_keep_days)
                     await asyncio.to_thread(store.prune_edit_results, EDIT_RESULT_DAYS)
+                    await asyncio.to_thread(store.prune_samples, rule_maker_mod.SAMPLE_DAYS)
                 except Exception as exc:  # e.g. database locked or disk full: try again next hour
                     log.error(json.dumps({"event": "prune_failed", "error": repr(exc)[:200]}))
                 try:
@@ -913,6 +1003,8 @@ def create_app(
     app.state.bootstrap = bootstrap
     app.state.stats = stats
     app.state.edit_engine = edit_engine
+    app.state.start_rule_maker = start_rule_maker  # the Rules page's "Propose rules now"
+    app.state.makers_running = makers_running
     app.state.circuits = circuits
     app.state.prices = prices
     app.state.scores = scores
@@ -2189,22 +2281,42 @@ def create_app(
         answered = time.monotonic()
         try:
             shown = answer.shown()
-            if rule := answer_rules.first_match(check.rules, shown):
+            decision = answer_rules.decide(check.rules, shown)
+            rule, watched = decision.rule, decision.watched
+            if rule is not None:
                 count, _ = rule_hits.get(rule.id, (0, 0.0))
                 rule_hits[rule.id] = (count + 1, time.time())  # for the Rules page
-                add_note(adm.rlog, "answer_check", f"{step.model}: rule '{rule.name}' matched")
+            if rule is not None and rule.action == "fail":
+                add_note(adm.rlog, "answer_check", f"{step.model}: rule '{rule.name}' failed it")
+                spot_check(adm, check, step, shown, rule, watched)
                 note_discarded(adm, step, held, timed, answered, "failed answer rule", f"rule: {rule.name}")
                 await replay.aclose()
                 yield None, f"rule: {rule.name}"
+                return
+            if rule is not None and rule.action == "pass":  # nothing else runs
+                add_note(adm.rlog, "answer_check", f"{step.model}: rule '{rule.name}' passed it")
+                spot_check(adm, check, step, shown, rule, watched)
+                yield Got(replay, got.target), ""
                 return
             if "refused" in triggers and is_refusal(answer):
                 note_discarded(adm, step, held, timed, answered, "refused")
                 await replay.aclose()
                 yield None, "refused"
                 return
-            if check.model is None:  # rules only, and they passed it
+            if rule is not None and rule.action == "pass_free":  # the free checks ran: not the checker model
+                add_note(adm.rlog, "answer_check", f"{step.model}: rule '{rule.name}' passed it (free checks ran)")
+                spot_check(adm, check, step, shown, rule, watched)
                 yield Got(replay, got.target), ""
                 return
+            asked = rule if rule is not None and rule.action == "ask" else None
+            if check.model is None or (check.when == "asked" and asked is None):
+                if check.model is not None:  # it reads only answers a rule sends to it
+                    add_note(adm.rlog, "answer_check", f"{step.model}: no rule asked the checker, passed on")
+                    spot_check(adm, check, step, shown, None, watched)
+                yield Got(replay, got.target), ""
+                return
+            if asked is not None:
+                add_note(adm.rlog, "answer_check", f"{step.model}: rule '{asked.name}' asked the checker")
             limit = answer_check.TIMEOUT_S
             if adm.deadline is not None:
                 limit = min(limit, adm.deadline - answered)
@@ -2243,6 +2355,8 @@ def create_app(
                 passed, reason = None, "the checker's request failed"
             else:
                 passed, reason = answer_check.verdict_of(body)
+            if passed is not None:  # what the rules watching (and one that asked) are measured by, and kept to learn
+                learn_from(check, shown, not passed, reason, asked, watched)
             seconds = f"{time.monotonic() - started:.1f} s"
             if passed is None:
                 add_note(adm.rlog, "answer_check", f"{step.model}: not checked ({reason}), passed on")
@@ -2261,6 +2375,74 @@ def create_app(
         finally:
             adm.rlog.fields["stage"] = None
         yield Got(replay, got.target), ""
+
+    def learn_from(
+        check: Check, shown: str, failed: bool, reason: str, rule: answer_rules.Rule | None, watched: list
+    ) -> None:
+        """The checker's verdict on an answer: whether it agreed with ``rule`` (the one that decided it, or asked)
+        and with each rule ``watched`` (they decide nothing yet), counted for the Rules page and for rules turning on
+        or off by themselves; and, when the alias's rule maker is on, the answer kept for it (app/rule_maker.py)."""
+        for r in (*watched, *([rule] if rule is not None else [])):
+            rule_outcomes.append((r.id, answer_rules.agrees(r.action, failed)))
+        if check.learn != "off" and check.alias_id is not None:
+            kept = answer_check.clip(shown, rule_maker_mod.SAMPLE_CHARS)
+            answer_samples.append((check.alias_id, "fail" if failed else "pass", "" if not failed else reason, kept))
+            learning_clients[check.alias_id] = check.client
+
+    def spot_check(
+        adm: Admission, check: Check, step: Step, shown: str, rule: answer_rules.Rule | None, watched: list
+    ) -> None:
+        """Some of the answers decided without the checker model (``check.spot`` %) go to it too, in the background,
+        as low priority: how often the rule that decided agrees with it shows on the Rules page, and a rule the
+        model made that starts disagreeing goes back to watching by itself. The answer itself is already on its way
+        (or failed): the spot check changes nothing for it. At most SPOTS_AT_ONCE run at once per alias (more are
+        skipped), each for at most the checker's time limit."""
+        if check.model is None or check.spot <= 0 or random.random() * 100 >= check.spot:  # noqa: S311
+            return
+        if spots_running.get(check.alias_id, 0) >= SPOTS_AT_ONCE:
+            return
+        payload = answer_check.check_payload(check.model, check.instructions, step.body, shown)
+        spots_running[check.alias_id] = spots_running.get(check.alias_id, 0) + 1
+
+        async def run() -> None:
+            try:
+                body = await asyncio.wait_for(
+                    internal_completion(
+                        check.client,
+                        payload,
+                        "low",
+                        tag="check",
+                        origin=adm.headers,
+                        role="spot check",
+                        parent=adm.request_id,
+                    ),
+                    answer_check.TIMEOUT_S,
+                )
+            except TimeoutError:
+                return
+            finally:
+                if (left := spots_running.get(check.alias_id, 1) - 1) > 0:
+                    spots_running[check.alias_id] = left
+                else:
+                    spots_running.pop(check.alias_id, None)
+            passed, reason = answer_check.verdict_of(body) if body is not None else (None, "")
+            if passed is not None:
+                learn_from(check, shown, not passed, reason, rule, watched)
+
+        in_background(run())
+
+    def in_background(work: Awaitable) -> asyncio.Task:
+        """A task of QueueRouter's own (a spot check, a rule maker), kept until it ends; an error is logged."""
+        task = asyncio.ensure_future(work)
+        background_tasks.add(task)
+
+        def done(t: asyncio.Task) -> None:
+            background_tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                log.warning(json.dumps({"event": "background_failed", "error": repr(t.exception())[:200]}))
+
+        task.add_done_callback(done)
+        return task
 
     def note_discarded(
         adm: Admission,
@@ -4404,11 +4586,23 @@ def create_app(
         more = len(entries) > 1 or hop is not None  # something to move on to
         check = None  # the alias's answer check: chat completions from apps (not QueueRouter's own requests)
         if alias and more and not internal and path == "chat/completions" and isinstance(payload, dict):
-            rules = tuple(r for i in alias.answer_rules if (r := snapshot.rules.get(i)) is not None and r.enabled)
             checker = alias.check_answers and alias.check_instructions.strip()
+            # rules on, and those watching when there is a checker whose verdicts they are measured by
+            live = ("on", "watch") if checker else ("on",)
+            rules = tuple(r for i in alias.answer_rules if (r := snapshot.rules.get(i)) is not None and r.state in live)
             if rules or checker:
                 model = (alias.check_model or alias.target_model) if checker else None
-                check = Check(model, alias.check_instructions, client, rules, alias.check_kinds)
+                check = Check(
+                    model,
+                    alias.check_instructions,
+                    client,
+                    rules,
+                    alias.check_kinds,
+                    alias.check_when,
+                    alias.spot_checks,
+                    alias.id,
+                    alias.learn_rules if checker else "off",
+                )
         param_changes = []
         strip_usage = False  # usage asked for here, not by the app: its chunk is left out of the app's stream
         if isinstance(payload, dict):

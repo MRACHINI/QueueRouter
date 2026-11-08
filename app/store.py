@@ -23,7 +23,18 @@ from datetime import date, timedelta
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from .answer_rules import DEFAULT_ANSWER_KINDS, Rule, kinds_of
+from .answer_rules import (
+    CHECK_WHEN,
+    DEFAULT_ANSWER_KINDS,
+    LEARN_MODES,
+    REJECTED_KEEP,
+    RULES_PER_ALIAS,
+    SPOT_DEFAULT,
+    Rule,
+    kinds_of,
+    next_state,
+    rule_key,
+)
 from .config import PRIORITIES, SECRET_TUNABLES, TUNABLES, ClientPolicy, Settings, parse_access_keys
 from .edits import Edit
 from .names import EVERY
@@ -635,6 +646,46 @@ MIGRATIONS: list[str] = [
     ALTER TABLE aliases ADD COLUMN answer_rules TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE aliases ADD COLUMN check_kinds TEXT NOT NULL DEFAULT '["text", "empty"]';
     """,
+    # 45: what a rule does (fail, pass, pass keeping the free checks, ask the checker), "doesn't", watching; rules an
+    # alias's rule maker made (app/rule_maker.py) and how often they agreed with the checker; when an alias asks its
+    # checker, its spot checks and rule maker; the checked answers kept for the rule maker (encrypted)
+    """
+    ALTER TABLE answer_rules ADD COLUMN action TEXT NOT NULL DEFAULT 'fail';
+    ALTER TABLE answer_rules ADD COLUMN negate INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE answer_rules ADD COLUMN state TEXT NOT NULL DEFAULT 'on';
+    UPDATE answer_rules SET state = 'off' WHERE enabled = 0;
+    ALTER TABLE answer_rules ADD COLUMN made_by INTEGER;
+    ALTER TABLE answer_rules ADD COLUMN why TEXT NOT NULL DEFAULT '';
+    ALTER TABLE answer_rules ADD COLUMN sample_fails INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE answer_rules ADD COLUMN sample_passes INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE answer_rules ADD COLUMN agreed INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE answer_rules ADD COLUMN disagreed INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE answer_rules ADD COLUMN recent TEXT NOT NULL DEFAULT '';
+    ALTER TABLE answer_rules ADD COLUMN awaiting INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE answer_rules ADD COLUMN note TEXT NOT NULL DEFAULT '';
+    ALTER TABLE aliases ADD COLUMN check_when TEXT NOT NULL DEFAULT 'undecided';
+    ALTER TABLE aliases ADD COLUMN spot_checks INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE aliases ADD COLUMN learn_rules TEXT NOT NULL DEFAULT 'off';
+    ALTER TABLE aliases ADD COLUMN learn_model TEXT NOT NULL DEFAULT '';
+    ALTER TABLE aliases ADD COLUMN learn_pass INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE answer_samples (
+        id INTEGER PRIMARY KEY,
+        alias_id INTEGER NOT NULL,
+        verdict TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        answer TEXT NOT NULL,
+        created_at REAL NOT NULL
+    );
+    CREATE INDEX answer_samples_alias ON answer_samples (alias_id, verdict, created_at);
+    CREATE TABLE rule_learning (
+        alias_id INTEGER PRIMARY KEY,
+        last_run REAL,
+        new_fails INTEGER NOT NULL DEFAULT 0,
+        new_passes INTEGER NOT NULL DEFAULT 0,
+        note TEXT NOT NULL DEFAULT '',
+        rejected TEXT NOT NULL DEFAULT '[]'
+    );
+    """,
 ]
 HOURLY_USAGE = 40  # the migration that added usage_hourly
 
@@ -840,6 +891,11 @@ class Alias:
     label: str = ""  # display name (opencode, the Models page); blank = the name. Apps always send the name
     answer_rules: tuple[int, ...] = ()  # its answer rules, in order (app/answer_rules.py)
     check_kinds: tuple[str, ...] = DEFAULT_ANSWER_KINDS  # what its answer check reads
+    check_when: str = "undecided"  # its checker model: for every answer no rule decided, or only those "asked"
+    spot_checks: int = SPOT_DEFAULT  # % of answers decided without the checker that it reads too, in the background
+    learn_rules: str = "off"  # its rule maker (app/rule_maker.py): off / propose / auto
+    learn_model: str = ""  # the rule maker's model; blank = the checker's
+    learn_pass: bool = False  # rules that pass answers may turn on by themselves too
 
     @property
     def shown(self) -> str:
@@ -1833,6 +1889,11 @@ class Store:
                 r["label"] or "",
                 tuple(i for i in json.loads(r["answer_rules"] or "[]") if isinstance(i, int)),
                 kinds_of(json.loads(r["check_kinds"] or "[]")),
+                r["check_when"] if r["check_when"] in CHECK_WHEN else "undecided",
+                r["spot_checks"] if r["spot_checks"] is not None else SPOT_DEFAULT,
+                r["learn_rules"] if r["learn_rules"] in LEARN_MODES else "off",
+                r["learn_model"] or "",
+                bool(r["learn_pass"]),
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -1870,6 +1931,11 @@ class Store:
         label: str = "",
         answer_rules: tuple[int, ...] = (),
         check_kinds: tuple[str, ...] = DEFAULT_ANSWER_KINDS,
+        check_when: str = "undecided",
+        spot_checks: int = SPOT_DEFAULT,
+        learn_rules: str = "off",
+        learn_model: str = "",
+        learn_pass: bool = False,
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
@@ -1912,9 +1978,11 @@ class Store:
                 ),
             )
             db.execute(
-                "UPDATE aliases SET answer_rules = ?, check_kinds = ? WHERE id = ?",
-                (json.dumps(list(answer_rules)), json.dumps(list(check_kinds)), cur.lastrowid),
-            )
+                "UPDATE aliases SET answer_rules = ?, check_kinds = ?, check_when = ?, spot_checks = ?, "
+                "learn_rules = ?, learn_model = ?, learn_pass = ? WHERE id = ?",
+                (json.dumps(list(answer_rules)), json.dumps(list(check_kinds)), check_when, spot_checks,
+                 learn_rules, learn_model, int(learn_pass), cur.lastrowid),
+            )  # fmt: skip
         self.audit(
             actor,
             "alias.create",
@@ -1953,8 +2021,17 @@ class Store:
             "label",
             "answer_rules",
             "check_kinds",
+            "check_when",
+            "spot_checks",
+            "learn_rules",
+            "learn_model",
+            "learn_pass",
         }
         self._update("aliases", alias_id, allowed, fields)
+        if fields.get("learn_rules") == "off":  # its rule maker is off: the answers kept for it go
+            with self.tx() as db:
+                db.execute("DELETE FROM answer_samples WHERE alias_id = ?", (alias_id,))
+                db.execute("UPDATE rule_learning SET new_fails = 0, new_passes = 0 WHERE alias_id = ?", (alias_id,))
         self.audit(actor, "alias.update", str(alias_id), fields)
 
     def rename_alias(self, alias_id: int, name: str, actor: str, own_settings: bool = True) -> None:
@@ -1987,7 +2064,7 @@ class Store:
                 roles = "\n".join(role(line) for line in (a["council_roles"] or "").splitlines())
                 db.execute(
                     "UPDATE aliases SET target_model = ?, fallbacks = ?, council_members = ?, council_judge = ?, "
-                    "compact_model = ?, check_model = ?, council_roles = ? WHERE id = ?",
+                    "compact_model = ?, check_model = ?, learn_model = ?, council_roles = ? WHERE id = ?",
                     (
                         one(a["target_model"]),
                         many(a["fallbacks"]),
@@ -1995,6 +2072,7 @@ class Store:
                         one(a["council_judge"] or ""),
                         one(a["compact_model"] or ""),
                         one(a["check_model"] or ""),
+                        one(a["learn_model"] or ""),
                         roles,
                         a["id"],
                     ),
@@ -2032,11 +2110,16 @@ class Store:
         self.audit(actor, "alias.rename", old, {"to": name})
 
     def delete_alias(self, alias_id: int, actor: str) -> None:
+        """The alias, the answers kept for its rule maker, and its rule maker's state; the rules it made stay, as
+        made by hand (a new alias may get its id)."""
         with self.tx() as db:
             db.execute("DELETE FROM aliases WHERE id = ?", (alias_id,))
+            db.execute("DELETE FROM answer_samples WHERE alias_id = ?", (alias_id,))
+            db.execute("DELETE FROM rule_learning WHERE alias_id = ?", (alias_id,))
+            db.execute("UPDATE answer_rules SET made_by = NULL, awaiting = 0 WHERE made_by = ?", (alias_id,))
         self.audit(actor, "alias.delete", str(alias_id))
 
-    # -- answer rules (app/answer_rules.py) ----------------------------------------------------
+    # -- answer rules (app/answer_rules.py, app/rule_maker.py) ---------------------------------
 
     def list_rules(self) -> list[Rule]:
         return [
@@ -2047,47 +2130,112 @@ class Store:
                 r["find"],
                 bool(r["match_case"]),
                 r["scope"],
-                bool(r["enabled"]),
+                r["state"],
                 r["notes"],
                 r["hits"],
                 r["last_hit"],
                 r["created_at"],
+                r["action"],
+                bool(r["negate"]),
+                r["made_by"],
+                r["why"],
+                r["sample_fails"],
+                r["sample_passes"],
+                r["agreed"],
+                r["disagreed"],
+                r["recent"],
+                bool(r["awaiting"]),
+                r["note"],
             )
             for r in self.query("SELECT * FROM answer_rules ORDER BY name COLLATE NOCASE")
         ]
 
-    def create_rule(self, actor: str, enabled: bool = True, **rule: object) -> int:
-        """``rule``: name, kind, find, case, scope, notes (answer_rules.clean_rule). IntegrityError: the name is
-        taken."""
+    _RULE_FIELDS = ("name", "kind", "find", "match_case", "scope", "action", "negate", "state", "notes")
+
+    @staticmethod
+    def _rule_row(rule: dict) -> tuple:
+        """``rule`` (answer_rules.clean_rule) as the columns in ``_RULE_FIELDS``."""
+        return (
+            rule["name"],
+            rule["kind"],
+            rule["find"],
+            int(bool(rule["case"])),
+            rule["scope"],
+            rule.get("action", "fail"),
+            int(bool(rule.get("negate"))),
+            rule.get("state", "on"),
+            rule.get("notes", ""),
+        )
+
+    def create_rule(self, actor: str, **rule: object) -> int:
+        """``rule``: answer_rules.clean_rule's fields. IntegrityError: the name is taken."""
         with self.tx() as db:
             cur = db.execute(
-                "INSERT INTO answer_rules (name, kind, find, match_case, scope, enabled, notes, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (rule["name"], rule["kind"], rule["find"], int(bool(rule["case"])), rule["scope"], int(enabled),
-                 rule.get("notes", ""), time.time()),
-            )  # fmt: skip
+                f"INSERT INTO answer_rules ({', '.join(self._RULE_FIELDS)}, created_at) VALUES ({'?, ' * 9}?)",  # noqa: S608
+                (*self._rule_row(rule), time.time()),
+            )
         self.audit(actor, "rule.create", str(rule["name"]))
         return cur.lastrowid
 
-    def update_rule(self, rule_id: int, actor: str, enabled: bool = True, **rule: object) -> None:
+    _MATCHING = ("kind", "find", "match_case", "scope", "action", "negate")  # what a rule does: its counts go with it
+
+    def update_rule(self, rule_id: int, actor: str, **rule: object) -> None:
+        """A change by hand: a rule the model made that you turn on is no longer waiting for you. A change to what
+        it looks for or does starts its counts with the checker afresh (they were the old rule's); a change of
+        state starts its recent outcomes afresh (or old disagreements would turn it back at once)."""
+        sets = ", ".join(f"{name} = ?" for name in self._RULE_FIELDS)
+        row = self._rule_row(rule)
+        new = dict(zip(self._RULE_FIELDS, row, strict=True))
+        with self.tx() as db:
+            old = db.execute("SELECT * FROM answer_rules WHERE id = ?", (rule_id,)).fetchone()
+            if old is None:
+                raise KeyError(rule_id)
+            db.execute(
+                f"UPDATE answer_rules SET {sets}, awaiting = awaiting AND ? != 'on' WHERE id = ?",  # noqa: S608
+                (*row, new["state"], rule_id),
+            )
+            if any(old[f] != new[f] for f in self._MATCHING):
+                db.execute(
+                    "UPDATE answer_rules SET agreed = 0, disagreed = 0, recent = '', note = '', sample_fails = 0, "
+                    "sample_passes = 0 WHERE id = ?",
+                    (rule_id,),
+                )
+            elif old["state"] != new["state"]:
+                db.execute("UPDATE answer_rules SET recent = '', note = '' WHERE id = ?", (rule_id,))
+        self.audit(actor, "rule.update", str(rule_id), {"name": rule["name"], "state": rule.get("state")})
+
+    def set_rule_state(self, rule_id: int, actor: str, state: str) -> None:
+        """On, watching or off, by hand (turning a rule the model made on is approving it); its recent outcomes
+        start afresh (or old disagreements would turn it back to watching at once)."""
         with self.tx() as db:
             cur = db.execute(
-                "UPDATE answer_rules SET name = ?, kind = ?, find = ?, match_case = ?, scope = ?, enabled = ?, "
-                "notes = ? WHERE id = ?",
-                (rule["name"], rule["kind"], rule["find"], int(bool(rule["case"])), rule["scope"], int(enabled),
-                 rule.get("notes", ""), rule_id),
-            )  # fmt: skip
+                "UPDATE answer_rules SET state = ?, awaiting = awaiting AND ? != 'on', note = '', recent = '' "
+                "WHERE id = ?",
+                (state, state, rule_id),
+            )
             if cur.rowcount == 0:
                 raise KeyError(rule_id)
-        self.audit(actor, "rule.update", str(rule_id), {"name": rule["name"], "enabled": enabled})
+        self.audit(actor, "rule.state", str(rule_id), {"state": state})
 
     def delete_rule(self, rule_id: int, actor: str) -> None:
-        """The rule, and its place in aliases."""
+        """The rule, and its place in aliases. A rule a rule maker made is remembered for it, so it isn't proposed
+        again."""
         with self.tx() as db:
-            row = db.execute("SELECT name FROM answer_rules WHERE id = ?", (rule_id,)).fetchone()
+            row = db.execute("SELECT * FROM answer_rules WHERE id = ?", (rule_id,)).fetchone()
             if row is None:
                 raise KeyError(rule_id)
             db.execute("DELETE FROM answer_rules WHERE id = ?", (rule_id,))
+            if row["made_by"] is not None:
+                learning = db.execute(
+                    "SELECT rejected FROM rule_learning WHERE alias_id = ?", (row["made_by"],)
+                ).fetchone()
+                rejected = json.loads(learning["rejected"] or "[]") if learning else []
+                rejected = [*rejected, rule_key(row["kind"], row["find"], bool(row["negate"]))][-REJECTED_KEEP:]
+                db.execute(
+                    "INSERT INTO rule_learning (alias_id, rejected) VALUES (?, ?) "
+                    "ON CONFLICT (alias_id) DO UPDATE SET rejected = excluded.rejected",
+                    (row["made_by"], json.dumps(rejected, ensure_ascii=False)),
+                )
             for alias in db.execute("SELECT id, answer_rules FROM aliases").fetchall():
                 ids = json.loads(alias["answer_rules"] or "[]")
                 if rule_id in ids:
@@ -2110,6 +2258,156 @@ class Store:
             db.executemany(
                 "UPDATE answer_rules SET hits = hits + ?, last_hit = MAX(COALESCE(last_hit, 0), ?) WHERE id = ?",
                 [(n, at, i) for i, (n, at) in hits.items()],
+            )
+
+    def apply_rule_outcomes(self, outcomes: list[tuple[int, bool]]) -> list[str]:
+        """Whether the checker agreed with what each rule did or would have done, in order; a rule the model made
+        may turn on or go back to watching by itself (answer_rules.next_state, by its alias's settings). What
+        changed by itself, in words."""
+        if not outcomes:
+            return []
+        changed: list[str] = []
+        updated: dict[int, Rule] = {}
+        with self.tx() as db:  # read and written in one go: a change by hand meanwhile isn't undone
+            aliases = {a.id: a for a in self.list_aliases()}
+            rules = {r.id: r for r in self.list_rules()}
+            for rule_id, agreed in outcomes:
+                rule = updated.get(rule_id) or rules.get(rule_id)
+                if rule is None:
+                    continue
+                owner = aliases.get(rule.made_by) if rule.made_by is not None else None
+                learn, learn_pass = (owner.learn_rules, owner.learn_pass) if owner else ("off", False)
+                fields = next_state(rule, agreed, learn, learn_pass)
+                if fields.get("state", rule.state) != rule.state:
+                    changed.append(f"rule '{rule.name}': {fields['note']}")
+                updated[rule_id] = replace(rule, **fields)
+            db.executemany(
+                "UPDATE answer_rules SET agreed = ?, disagreed = ?, recent = ?, state = ?, awaiting = ?, note = ? "
+                "WHERE id = ?",
+                [(r.agreed, r.disagreed, r.recent, r.state, int(r.awaiting), r.note, i) for i, r in updated.items()],
+            )
+        return changed
+
+    def add_made_rules(self, alias_id: int, made: list[dict], actor: str = "rule maker") -> list[str]:
+        """Rules an alias's rule maker made (answer_rules.clean_rule's fields, plus why, sample_fails,
+        sample_passes, awaiting), attached at the end of its rules, up to RULES_PER_ALIAS, except that one that
+        fails or passes answers goes ahead of the rules it made that ask the checker (one of those matching first
+        would leave it nothing to decide); a name already taken gets a number. Their names."""
+        names: list[str] = []
+        with self.tx() as db:
+            row = db.execute("SELECT answer_rules FROM aliases WHERE id = ?", (alias_id,)).fetchone()
+            if row is None:
+                return names
+            ids = json.loads(row["answer_rules"] or "[]")
+            asking = {
+                r["id"]
+                for r in db.execute(
+                    "SELECT id FROM answer_rules WHERE made_by = ? AND action = 'ask'", (alias_id,)
+                ).fetchall()
+            }
+            taken = {r["name"] for r in db.execute("SELECT name FROM answer_rules").fetchall()}
+            for rule in made:
+                if len(ids) >= RULES_PER_ALIAS:
+                    break
+                name, n = rule["name"], 2
+                while name in taken:
+                    name, n = f"{rule['name'][:56]} ({n})", n + 1
+                taken.add(name)
+                cur = db.execute(
+                    f"INSERT INTO answer_rules ({', '.join(self._RULE_FIELDS)}, made_by, why, sample_fails, "  # noqa: S608
+                    f"sample_passes, awaiting, created_at) VALUES ({'?, ' * 14}?)",
+                    (*self._rule_row({**rule, "name": name}), alias_id, rule.get("why", "")[:300],
+                     rule.get("sample_fails", 0), rule.get("sample_passes", 0), int(bool(rule.get("awaiting"))),
+                     time.time()),
+                )  # fmt: skip
+                first_ask = next((n for n, i in enumerate(ids) if i in asking), len(ids))
+                if rule.get("action") == "ask":
+                    asking.add(cur.lastrowid)
+                    ids.append(cur.lastrowid)
+                else:
+                    ids.insert(first_ask, cur.lastrowid)
+                names.append(name)
+            db.execute("UPDATE aliases SET answer_rules = ? WHERE id = ?", (json.dumps(ids), alias_id))
+        if names:
+            self.audit(actor, "rule.made", str(alias_id), {"rules": names})
+        return names
+
+    # -- the answers kept for an alias's rule maker ---------------------------------------------
+
+    def add_samples(self, samples: list[tuple[int, str, str, str]], keep: int, days: float) -> None:
+        """Checked answers (alias id, "pass" or "fail", the checker's reason, the answer), encrypted; each alias
+        keeps its newest ``keep`` of each verdict, none older than ``days``. Its rule maker's counts of new ones go
+        up."""
+        if not samples:
+            return
+        now = time.time()
+        with self.tx() as db:
+            for alias_id, verdict, reason, answer in samples:
+                db.execute(
+                    "INSERT INTO answer_samples (alias_id, verdict, reason, answer, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (alias_id, verdict, reason[:300], self.encrypt(answer), now),
+                )
+                column = "new_fails" if verdict == "fail" else "new_passes"
+                db.execute(
+                    f"INSERT INTO rule_learning (alias_id, {column}) VALUES (?, 1) "  # noqa: S608
+                    f"ON CONFLICT (alias_id) DO UPDATE SET {column} = {column} + 1",
+                    (alias_id,),
+                )
+            db.execute("DELETE FROM answer_samples WHERE created_at < ?", (now - days * 86_400,))
+            for alias_id, verdict in {(s[0], s[1]) for s in samples}:
+                db.execute(
+                    "DELETE FROM answer_samples WHERE alias_id = ? AND verdict = ? AND id NOT IN "
+                    "(SELECT id FROM answer_samples WHERE alias_id = ? AND verdict = ? ORDER BY id DESC LIMIT ?)",
+                    (alias_id, verdict, alias_id, verdict, keep),
+                )
+
+    def samples_for(self, alias_id: int) -> list[dict]:
+        """An alias's kept answers, newest first: verdict, reason, answer."""
+        rows = self.query(
+            "SELECT verdict, reason, answer FROM answer_samples WHERE alias_id = ? ORDER BY id DESC", (alias_id,)
+        )
+        return [
+            {"verdict": r["verdict"], "reason": r["reason"], "answer": self.reveal(r["answer"]) or ""} for r in rows
+        ]
+
+    def sample_counts(self) -> dict[int, dict[str, int]]:
+        counts: dict[int, dict[str, int]] = {}
+        for r in self.query("SELECT alias_id, verdict, COUNT(*) AS n FROM answer_samples GROUP BY alias_id, verdict"):
+            counts.setdefault(r["alias_id"], {})[r["verdict"]] = r["n"]
+        return counts
+
+    def forget_samples(self, alias_id: int, actor: str) -> None:
+        with self.tx() as db:
+            db.execute("DELETE FROM answer_samples WHERE alias_id = ?", (alias_id,))
+            db.execute("UPDATE rule_learning SET new_fails = 0, new_passes = 0 WHERE alias_id = ?", (alias_id,))
+        self.audit(actor, "samples.forget", str(alias_id))
+
+    def rule_learning(self) -> dict[int, dict]:
+        """Alias id -> its rule maker's last run, new answers since, what it last did, and the rules it made that
+        you deleted (answer_rules.rule_key)."""
+        learning = {}
+        for r in self.query("SELECT * FROM rule_learning"):
+            learning[r["alias_id"]] = {**dict(r), "rejected": json.loads(r["rejected"] or "[]")}
+        return learning
+
+    def made_rule_keys(self, alias_id: int) -> list[list]:
+        """What a rule maker shouldn't propose again: the rules it made, attached or not, and those you deleted."""
+        made = self.query("SELECT kind, find, negate FROM answer_rules WHERE made_by = ?", (alias_id,))
+        keys = [rule_key(r["kind"], r["find"], bool(r["negate"])) for r in made]
+        return keys + (self.rule_learning().get(alias_id) or {}).get("rejected", [])
+
+    def prune_samples(self, keep_days: float) -> None:
+        """Kept answers older than ``keep_days`` go (also for aliases that keep no new ones)."""
+        with self.tx() as db:
+            db.execute("DELETE FROM answer_samples WHERE created_at < ?", (time.time() - keep_days * 86_400,))
+
+    def note_rule_maker_run(self, alias_id: int, note: str) -> None:
+        """Its rule maker ran (or tried to): when, and what it did; its counts of new answers start again."""
+        with self.tx() as db:
+            db.execute(
+                "INSERT INTO rule_learning (alias_id, last_run, note) VALUES (?, ?, ?) ON CONFLICT (alias_id) "
+                "DO UPDATE SET last_run = excluded.last_run, note = excluded.note, new_fails = 0, new_passes = 0",
+                (alias_id, time.time(), note[:500]),
             )
 
     # -- prompt edits (app/edits.py) -----------------------------------------------------------
