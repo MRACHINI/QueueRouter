@@ -1,5 +1,6 @@
 """Two-factor sign-in (TOTP) and recovery codes."""
 
+import asyncio
 import re
 import time
 
@@ -32,6 +33,8 @@ async def test_setup_login_recovery_and_reset(make_stack):
         password = OWNER["admin_password"]
         bad = await c.post("/admin/account/2fa/enable", data={"csrf": csrf, "code": "000000", "current": password})
         assert "didn&#39;t match" in bad.text or "didn't match" in bad.text
+        if (left := 30 - time.time() % 30) < 15:  # the code below must stay valid till it's used: start a step afresh
+            await asyncio.sleep(left + 0.1)
         now = time.time()
         code = totp.code_at(secret, int(now // 30) - 1)  # previous step: the current one stays unused
         no_password = await c.post("/admin/account/2fa/enable", data={"csrf": csrf, "code": code})

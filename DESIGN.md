@@ -2040,6 +2040,11 @@ v0.75.0: rules that decide either way, the checker asked only when a rule sends 
   all of an alias's go when its rule maker is turned off or the alias is deleted (the rules it made stay, as if made
   by hand: a new alias may get its id).
 
+v0.75.1: no 0.75.0 image was published: CI's test run for the tag failed (the same commit passed on main). A test
+of two-factor sign-in made a code for the previous 30-second step and used it a few requests later; when a new
+step began in between (more likely on a busy runner), the code was two steps old and refused. It now starts afresh
+when fewer than 15 s of a step are left. Same features as 0.75.0.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
