@@ -2114,6 +2114,40 @@ failed first, more likely on a busy runner. They now break it with HTTP 503s on 
 models. Also, the answer-rule tests' alias editor helper turns spot checks off unless a test asks for them (at 5%
 they called a tagger now and then). Same features as 0.77.0.
 
+v0.78.0: Synthetic and Refuseless as known providers, a thinking level fitted to each model's own, and switching an
+upstream to a known provider.
+- Asked for: support for synthetic.new and refuseless.com with their reasoning and special fields (their public
+  docs were read first: no key, nothing live); a forced level ("always max") that becomes each model's highest; a
+  Custom upstream moved to a known provider.
+- Fitting a level (`main.fit_level`, before the per-provider translation): the level a request carries (the app's,
+  or one an alias's or client's parameter rule forces) that the model doesn't have on that upstream becomes the
+  nearest it has, from below (`thinking.nearest`): "max" is its highest. Its levels are the ones opencode's selector
+  shows (`thinking_for`: yours on the Models page, now here too and for Claude Code's effort, then its provider's
+  list, then the reference). A model whose levels aren't known gets the level as before. Claude's own API fits its
+  levels itself (`claude._effort`). A lowered level is kept on the request (`requests.thinking`, migration 48:
+  "max → high (the nearest m has on u)") and shown in its details.
+- Refuseless (`api.refuseless.com/v1`, style "refuseless"): each model's levels from `reasoning_efforts` /
+  `reasoning_default` (`from_refuseless`; "off" is "none"), sent as off / low / high / max (any other level it
+  refuses: the nearest below, also when a model's levels are unknown); `vision` for image input (`takes_images`);
+  `pricing` in USD per million (`input_per_m`, `output_per_m`, `cached_input_per_m`, the account's own, discounts
+  applied) as the upstream's price, as OpenRouter's per-token one is (it read as free before).
+- Synthetic (`api.synthetic.new/openai/v1`, style "synthetic"): low / medium / high (xhigh and max: high; minimal:
+  low), no off switch, so "none" asks for nothing (its default). Its list states no levels: the reference by name
+  gives them. Plans Go $9, Standard $30, Big $90 a month (a weekly quota each; past it, billed at API prices) set
+  the pool's monthly price, so opencode shows its models as included, as ArliAI's plans do. Neither publishes a
+  parallel limit: both presets start at 4.
+- Plans of any provider (`presets.all_plans`, `plan_choice`): the pickers' values are "<preset>:<plan>" (a bare
+  name is ArliAI's, as before); a pool's plan reads "<provider> <plan>".
+- 402 (out of credit: Refuseless's `insufficient_credits`, OpenRouter's) is handled like a used-up quota (a hard
+  429): that upstream is skipped for the model for a while and the request moves to another one, or fails as
+  `upstream_quota_exhausted`, which an alias's fallback takes ("unavailable" or "errors").
+- An upstream's provider in its row (Upstreams page): changing it changes what QueueRouter knows it as (thinking
+  style, what it reads from its model list; Anthropic speaks Claude's own API). "and take its defaults" also sets
+  the provider's base URL, parameter rules and retries in place of the row's. Thinking styles go by the address
+  first, then by the provider (`thinking.PRESET_STYLES`), so an upstream behind a proxy can say what it is.
+- Not done (no live check yet): Synthetic's `/v2/quotas` and Refuseless's `/v1/credits` balances; Refuseless's
+  long-context price tier; Synthetic's `infinite:` models, which need streaming.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

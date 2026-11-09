@@ -65,7 +65,7 @@ from ..fallback import DEFAULT_TRIGGERS, TRIGGERS, loop_of
 from ..names import EVERY, ModelNames
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
-from ..presets import ARLIAI_PLANS, PRESETS, plan_for
+from ..presets import PRESETS, all_plans, plan_choice
 from ..pricing import (
     DEFAULT_MIX,
     MIX_DAYS,
@@ -159,6 +159,7 @@ REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "fallback",
     "answer_check",
     "answer_tags",
+    "thinking",
     "via",
     "edits",
 )
@@ -1305,7 +1306,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             info=info,
             pools_live=pools_live,
             presets=PRESETS.values(),
-            arliai_plans=ARLIAI_PLANS,
+            plans=all_plans(),
             test=test,
             strategy=store.get_tunables().get("lb_strategy", "least-busy"),
         )
@@ -1322,8 +1323,10 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         return value
 
     def pool_fields(form: dict) -> dict:
-        """max_concurrency / context_cap / plan from the form; an ArliAI plan fills the first two."""
-        plan = plan_for("arliai", str(form.get("plan", "")) or None)
+        """max_concurrency / context_cap / plan from the form; a provider's plan (ArliAI's, Synthetic's) fills the
+        first two and its price."""
+        chosen = plan_choice(str(form.get("plan", "")) or None)
+        label, plan = chosen if chosen else (None, None)
         concurrency = int_field(form, "max_concurrency", 1, 1000, plan.max_concurrency if plan else 1)
         context_cap = int_field(form, "context_cap", 1, 10_000_000)
         if plan and not str(form.get("max_concurrency", "")).strip():
@@ -1337,7 +1340,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         if plan and embeddings is None and "embedding_concurrency" not in form:
             embeddings = plan.embedding_concurrency
         return {
-            "plan": f"ArliAI {plan.name}" if plan else (str(form.get("plan_label", "")).strip() or None),
+            "plan": label if plan else (str(form.get("plan_label", "")).strip() or None),
             "max_concurrency": concurrency,
             "context_cap": context_cap,
             "min_spacing_ms": int_field(form, "min_spacing_ms", 0, 600_000, 0),
@@ -1449,7 +1452,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             new_pool = pool_choice == "new"
             if new_pool:
                 fields = pool_fields(form)
-                if preset.key != "arliai" and not str(form.get("max_concurrency", "")).strip():
+                planned = plan_choice(str(form.get("plan", "")) or None)  # a plan sets it (ArliAI's, Synthetic's)
+                if preset.key != "arliai" and not planned and not str(form.get("max_concurrency", "")).strip():
                     fields["max_concurrency"] = preset.max_concurrency
                 pool_id = store.create_pool(name, fields.pop("max_concurrency"), session.user.username, **fields)
             else:
@@ -1505,6 +1509,16 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 if int(pool) not in {p.id for p in store.list_pools()}:
                     raise ValueError("pool")
                 fields["pool_id"] = int(pool)
+            if "preset" in form:  # another provider: what QueueRouter knows it as (a custom one becomes a known one)
+                preset = PRESETS.get(str(form["preset"]))
+                if preset is None:
+                    raise ValueError("preset")
+                fields["preset"] = preset.key
+                if form.get("preset_defaults") == "on":  # and its defaults, in place of the row's
+                    if preset.key != "custom":
+                        fields["base_url"] = preset.base_url
+                    fields["params"] = preset.params
+                    fields["max_retries"] = preset.max_retries
             store.update_upstream(upstream_id, session.user.username, **fields)
         except RulesError:
             return back("/admin/upstreams", error="rules_invalid")

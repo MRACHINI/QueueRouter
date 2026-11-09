@@ -728,6 +728,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE answer_rules ADD COLUMN tag_id INTEGER;
     ALTER TABLE requests ADD COLUMN answer_tags TEXT;
     """,
+    # 48: a thinking level lowered to one the model has (app/thinking.py nearest), per request
+    """
+    ALTER TABLE requests ADD COLUMN thinking TEXT;
+    """,
 ]
 CHECKERS_CONVERTED = "checkers_converted"  # meta: each alias's checker model became a tagger (_convert_checkers)
 CHECKER_TAGS = (  # what a converted checker gives: exactly one of these
@@ -796,6 +800,7 @@ REQUEST_COLUMNS = (
     "via",
     "edits",
     "answer_tags",
+    "thinking",
 )
 
 

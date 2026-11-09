@@ -23,9 +23,10 @@ from a **web admin UI**.
   model-aware routing, **failover** on errors, **circuit breakers** with health probes. For a model several
   upstreams offer, apps get balancing and failover through an alias: its bare ID is refused, so a request never
   goes to an upstream nobody picked (see [Model names](#model-names)).
-- **Provider presets** (ArliAI, Google Gemini, NVIDIA, OpenRouter, OpenAI, local servers…) incl. an
-  **ArliAI plan selector** (Free → Max) that sets parallel requests
-  and context cap.
+- **Provider presets** (ArliAI, Synthetic, Refuseless, Google Gemini, NVIDIA, OpenRouter, OpenAI, local
+  servers…) incl. a **plan selector** (ArliAI Free → Max, Synthetic Go / Standard / Big) that sets parallel
+  requests, context cap and the monthly price. An upstream added as Custom can be switched to a known provider in
+  its row (optionally taking that provider's base URL, parameter rules and retries).
 - **Model aliases** (`smart`, `code`, …) that you can repoint without touching any app; listed in
   `/v1/models` with the target's context size. An alias's model or fallbacks can be other aliases: the request
   is forwarded to that alias and handled its way (council, orchestrator, answer check, its own fallbacks); if
@@ -451,11 +452,16 @@ client key.
 
 Models that can think get a level selector in opencode 2.x (next to the model; ctrl+t in the terminal): `none`,
 `low`, `high`… as the model offers them, or `off` / `thinking` for models that can only switch thinking on and off.
-QueueRouter finds the levels in each upstream's model list (OpenRouter lists them) or, by name, in OpenRouter's public
-list, and asks each upstream its own way (OpenRouter `reasoning.effort`, a self-hosted vLLM server's chat-template
-switch, OpenAI-style `reasoning_effort`). ArliAI's models get none: they think whatever is sent. Claude's models (the
+QueueRouter finds the levels in each upstream's model list (OpenRouter and Refuseless list them) or, by name, in
+OpenRouter's public list, and asks each upstream its own way (OpenRouter `reasoning.effort`, a self-hosted vLLM
+server's chat-template switch, Refuseless's `off` / `low` / `high` / `max`, Synthetic's `low` / `medium` / `high`,
+OpenAI-style `reasoning_effort`). ArliAI's models get none: they think whatever is sent. Claude's models (the
 Anthropic preset) offer Claude's own levels, `low` to `max`, as its model list states. Correct a model on
 **Models → Thinking levels**. Needs the QueueRouter plugin (re-install it once after upgrading to 0.38).
+
+A level the model doesn't have is sent as the nearest one it has, from below: so a parameter rule
+`{"overrides": {"reasoning_effort": "max"}}` on an alias makes every one of its models, on every provider, think at
+its own highest level. The Requests page says when a level was lowered.
 
 ### Cost in opencode
 

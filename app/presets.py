@@ -36,6 +36,13 @@ ARLIAI_PLANS = (
     Plan("Pro", 2, 262_144, 30, 2),
     Plan("Max", 6, 524_288, 160, 6),
 )
+# Synthetic's subscriptions from synthetic.new/pricing (November 2026): a weekly credit quota each; it publishes no
+# parallel-request limit, so each plan starts at the preset's
+SYNTHETIC_PLANS = (
+    Plan("Go", 4, None, 9),
+    Plan("Standard", 4, None, 30),
+    Plan("Big", 4, None, 90),
+)
 
 PRESETS: dict[str, Preset] = {
     p.key: p
@@ -49,6 +56,25 @@ PRESETS: dict[str, Preset] = {
             note="Parallel requests and context cap depend on your plan.",
         ),
         Preset("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", 8),
+        Preset(
+            "synthetic",
+            "Synthetic",
+            "https://api.synthetic.new/openai/v1",
+            4,
+            plans=SYNTHETIC_PLANS,
+            note="Models are named hf:… (e.g. hf:zai-org/GLM-4.7). Thinking levels: low, medium, high (no off). "
+            "Parallel requests aren't published: 4 is a start; lower it if it answers 429. Usage past a plan's "
+            "weekly quota is billed at API prices.",
+        ),
+        Preset(
+            "refuseless",
+            "Refuseless",
+            "https://api.refuseless.com/v1",
+            4,
+            note="Prepaid credits. Its model list states each model's thinking levels (off, low, high, max), image "
+            "input and your prices, and QueueRouter uses them. Out of credits (402), the request moves to another "
+            "upstream. Parallel requests aren't published: 4 is a start.",
+        ),
         Preset("openai", "OpenAI", "https://api.openai.com/v1", 8, params='{"strip": ["top_k"]}'),
         Preset("groq", "Groq", "https://api.groq.com/openai/v1", 4),
         Preset("together", "Together AI", "https://api.together.xyz/v1", 8),
@@ -114,3 +140,18 @@ def plan_for(preset_key: str | None, plan_name: str | None) -> Plan | None:
     if not preset or not plan_name:
         return None
     return next((p for p in preset.plans if p.name == plan_name), None)
+
+
+def all_plans() -> list[tuple[str, str, Plan]]:
+    """Every provider's plans, for the pickers: (value "<preset>:<plan>", label "<provider> <plan>", plan)."""
+    return [(f"{p.key}:{plan.name}", f"{p.label} {plan.name}", plan) for p in PRESETS.values() for plan in p.plans]
+
+
+def plan_choice(value: str | None) -> tuple[str, Plan] | None:
+    """(its label, the plan) for a picker's value ("synthetic:Go"; a bare name is ArliAI's, as before); None for
+    "custom limits" or one that doesn't exist."""
+    if not value:
+        return None
+    key, _, name = value.partition(":") if ":" in value else ("arliai", "", value)
+    plan = plan_for(key, name)
+    return (f"{PRESETS[key].label} {plan.name}", plan) if plan else None

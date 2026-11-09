@@ -24,11 +24,11 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
     <td data-label="">
       <form method="post" action="/admin/pools/{{ p.id }}" class="row wrap">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <select name="plan" aria-label="ArliAI plan" data-plan-select>
+        <select name="plan" aria-label="Plan" data-plan-select>
           <option value="">custom limits</option>
-          {% for plan in arliai_plans %}
-          <option value="{{ plan.name }}" data-concurrency="{{ plan.max_concurrency }}" data-context="{{ plan.context_cap }}" data-price="{{ plan.monthly_price }}" data-embeddings="{{ plan.embedding_concurrency or '' }}"
-            {% if p.plan == "ArliAI " ~ plan.name %}selected{% endif %}>ArliAI {{ plan.name }}</option>
+          {% for value, label, plan in plans %}
+          <option value="{{ value }}" data-concurrency="{{ plan.max_concurrency }}" data-context="{{ plan.context_cap or '' }}" data-price="{{ plan.monthly_price }}" data-embeddings="{{ plan.embedding_concurrency or '' }}"
+            {% if p.plan == label %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
         </select>
         <label class="inline-field">parallel <input type="number" name="max_concurrency" min="1" max="1000" value="{{ p.max_concurrency }}" required></label>
@@ -76,6 +76,10 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
     <td data-label="">
       <form method="post" action="/admin/upstreams/{{ u.id }}" class="row wrap">
         <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="inline-field" title="What QueueRouter knows it as: how it's asked for thinking levels, what it reads from its model list (levels, image input, prices). Anthropic speaks Claude's own API.">Provider <select name="preset">
+          {% for p in presets %}<option value="{{ p.key }}" {% if (u.preset or "custom") == p.key %}selected{% endif %}>{{ p.label }}</option>{% endfor %}
+        </select></label>
+        <label class="check" title="Its base URL, parameter rules and retries become the provider's (your other settings stay)"><input type="checkbox" name="preset_defaults"> and take its defaults</label>
         <input name="base_url" value="{{ u.base_url }}" aria-label="Base URL" class="grow">
         <input name="api_key" type="password" placeholder="new API key (blank = keep)" autocomplete="off" aria-label="API key">
         <select name="pool" aria-label="Pool">
@@ -140,8 +144,8 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
   <label data-new-pool>Plan
     <select name="plan" data-plan-select>
       <option value="">custom limits</option>
-      {% for plan in arliai_plans %}
-      <option value="{{ plan.name }}" data-concurrency="{{ plan.max_concurrency }}" data-context="{{ plan.context_cap }}" data-price="{{ plan.monthly_price }}" data-embeddings="{{ plan.embedding_concurrency or '' }}">ArliAI {{ plan.name }} — {{ plan.max_concurrency }} parallel</option>
+      {% for value, label, plan in plans %}
+      <option value="{{ value }}" data-concurrency="{{ plan.max_concurrency }}" data-context="{{ plan.context_cap or '' }}" data-price="{{ plan.monthly_price }}" data-embeddings="{{ plan.embedding_concurrency or '' }}">{{ label }} — {{ plan.max_concurrency }} parallel, ${{ "%g" | format(plan.monthly_price) }}/month</option>
       {% endfor %}
     </select>
   </label>

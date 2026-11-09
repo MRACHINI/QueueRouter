@@ -129,6 +129,8 @@ IDLE_AFTER_S = 45  # a conversation this quiet gets its summary updated in the b
 _NOT_INHERITED = {"authorization", "x-api-key", "cookie", "host", "content-length", "content-type", "accept-encoding"}
 HISTORY_POINTS, HISTORY_EVERY_S = 1800, 1  # dashboard chart: 30 minutes, one point per second
 QUOTA_BLOCK_S = 3600  # how long an upstream whose quota ran out is skipped for that model (unless it says)
+OUT_OF_CREDIT_STATUS = 402  # the account is out of credit (Refuseless, OpenRouter): handled as a used-up quota
+PER_M_PRICES = ("input_per_m", "output_per_m", "cached_input_per_m")  # a model list's prices per million (Refuseless)
 ADMIN_MAX_BODY = 4 * 1024 * 1024  # admin forms and the Playground (the restore upload has its own limit)
 CONTENT_CAPTURE_MAX = 16 * 1024 * 1024  # streamed reply bytes kept for content logging (cut later)
 MAX_FORWARDS = 8  # aliases one request may be forwarded through (the editor refuses loops; this ends any other)
@@ -217,6 +219,7 @@ class RequestLog:
             "fallback": None,  # why it moved on to the alias's next model ("a -> b (reason)"; several: "; ")
             "answer_check": None,  # what the alias's answer check said, per model checked (app/taggers.py)
             "answer_tags": None,  # the tags its answers got, "a,b" (its rules' and taggers')
+            "thinking": None,  # its thinking level, lowered to one the model has ("max → high (…)")
             "via": None,  # forwarded from alias to alias: the way it came ("a → b"; the app asked for a)
             "edits": None,  # what its prompt edits did, as JSON (app/edits.py Outcome.summary)
             "tags": None,
@@ -632,11 +635,14 @@ def create_app(
             return Price(0.0, 0.0, 0.0, source="plan")
         listed = (entry or {}).get("pricing")
         if isinstance(listed, dict):
-            try:  # USD per token, as strings
-                rates = [
-                    float(listed.get(k) or listed.get("prompt") or 0)
-                    for k in ("prompt", "completion", "input_cache_read")
-                ]
+            try:
+                if "input_per_m" in listed:  # Refuseless: USD per million tokens, your discounts applied
+                    rates = [float(listed.get(k) or listed.get("input_per_m") or 0) * 1e-6 for k in PER_M_PRICES]
+                else:  # OpenRouter: USD per token, as strings
+                    rates = [
+                        float(listed.get(k) or listed.get("prompt") or 0)
+                        for k in ("prompt", "completion", "input_cache_read")
+                    ]
             except (TypeError, ValueError):
                 rates = []
             if len(rates) == 3 and min(rates) >= 0:  # -1: priced per request (routers)
@@ -1614,17 +1620,21 @@ def create_app(
             return thinking_mod.Thinking(thinking_mod.levels(efforts), None, "yours") if efforts else None
         for target, entry in pairs:
             native = claude.native(target.upstream)  # Claude's own levels, which its model list states
-            style = "claude" if native else thinking_mod.style_of(target.upstream.base_url, entry)
+            upstream = target.upstream
+            style = "claude" if native else thinking_mod.style_of(upstream.base_url, entry, upstream.preset)
             if style in ("none", "fixed"):  # no levels to offer there
                 continue
             if native:
                 found = thinking_mod.from_claude(entry)
+            elif style == "refuseless":  # its own list states each model's levels
+                found = thinking_mod.from_refuseless(entry)
             else:
                 found = thinking_mod.from_block(entry.get("reasoning"), entry.get("supported_parameters") or ())
             source = target.upstream.name
             if found is None or found == ("none", "high"):  # nothing, or only on / off: the reference may know more
                 ref = reference.thinking(snapshot.names.name(model_id, target.upstream.name))
-                if ref is not None and (found is not None or style in ("openai", "openrouter", "claude")):
+                known_api = ("openai", "openrouter", "claude", "synthetic")  # its levels are those of the model
+                if ref is not None and style != "refuseless" and (found is not None or style in known_api):
                     found, source = ref, "OpenRouter (reference)"
             if found is None or (style == "unknown" and source != target.upstream.name):
                 continue  # an unknown API: only levels its own list states
@@ -1769,6 +1779,38 @@ def create_app(
         finite = [b for b in budgets if b >= 0]  # -1 = keep retrying
         return not finite or retries < min(finite)
 
+    def fit_level(
+        adm: Admission, payload: dict, target: Target, entry: dict | None, hint: str | None, native: bool
+    ) -> None:
+        """The thinking level a request asks for, fitted to the model's levels on ``target`` (yours on the Models
+        page, its provider's list, or the reference): one it doesn't have becomes the nearest it has, from below, so
+        "max" is its highest, whether the app asked for it or an alias's or client's rule forces it. An app that says
+        only how hard to think (``hint``: Claude Code's effort) gets the nearest level, and nothing for a model whose
+        levels aren't known. Claude's own API fits its levels itself (app/claude.py). A lowered level is noted on
+        the Requests page."""
+        asked = payload.get("reasoning_effort")
+        if asked is None:
+            if not hint:
+                return
+        elif native or not isinstance(asked, str):
+            return
+        model = str(payload.get("model") or "")
+        found = thinking_for(model, [(target, entry or {})], store.list_model_thinking())
+        values = [value for _, value in found.variants] if found else []
+        if not values:
+            return
+        if asked is None:
+            if level := thinking_mod.nearest(values, hint):
+                payload["reasoning_effort"] = level
+            return
+        wanted = "none" if asked.lower() == "off" else asked.lower()
+        if wanted in values:
+            payload["reasoning_effort"] = wanted
+            return
+        if (level := thinking_mod.nearest(values, wanted)) and level != wanted:
+            payload["reasoning_effort"] = level
+            adm.rlog.fields["thinking"] = f"{asked} → {level} (the nearest {model} has on {target.upstream.name})"
+
     def speaks_claude(adm: Admission, target: Target) -> bool:
         return adm.path == "chat/completions" and claude.native(target.upstream)
 
@@ -1797,15 +1839,13 @@ def create_app(
                     )
                     if images and text_only(str(payload.get("model") or ""), target, entry):
                         payload = council_mod.without_images(payload)  # a note, rather than the provider's 400
-                    if hint and "reasoning_effort" not in payload:  # to no model whose levels aren't known
-                        found = thinking_for(str(payload.get("model") or ""), [(target, entry or {})], {})
-                        level = thinking_mod.nearest([value for _, value in found.variants], hint) if found else None
-                        if level:
-                            payload["reasoning_effort"] = level
+                    if thinking:
+                        fit_level(adm, payload, target, entry, hint, native)
                     if native:
                         payload = claude.request(payload, entry)
                     else:
-                        thinking_mod.translate(payload, thinking_mod.style_of(target.upstream.base_url, entry))
+                        style = thinking_mod.style_of(target.upstream.base_url, entry, target.upstream.preset)
+                        thinking_mod.translate(payload, style)
                 body = json.dumps(payload).encode()
         headers = upstream_headers(adm.headers, target.api_key)
         if native:
@@ -1945,13 +1985,14 @@ def create_app(
                         adm.rlog.fields["error"] = f"{reason} talking to {target.upstream.name}"[:500]
                     else:
                         status = response.status_code
-                        if status == BUSY_STATUS:
+                        if status in (BUSY_STATUS, OUT_OF_CREDIT_STATUS):
                             try:
                                 content = await response.aread()
                             finally:
                                 await response.aclose()
                             message, hard, wait = describe_429(content)
-                            adm.rlog.fields["error"] = f"429 from {target.upstream.name}: {message}"[:500]
+                            hard = hard or status == OUT_OF_CREDIT_STATUS  # out of credit: it won't come back soon
+                            adm.rlog.fields["error"] = f"{status} from {target.upstream.name}: {message}"[:500]
                             if hard:  # quota used up: waiting won't help
                                 block_quota(target.id, model, wait)
                                 others = [
@@ -1970,7 +2011,7 @@ def create_app(
                                     ticket = None
                                     yield Backoff(0, retries, f"quota used up on {target.upstream.name}, failing over")
                                     break
-                                yield Failed(429, f"{target.upstream.name}: {message}", "upstream_quota_exhausted")
+                                yield Failed(status, f"{target.upstream.name}: {message}", "upstream_quota_exhausted")
                                 return
                             if can_retry(adm, retries, target):
                                 delay = retry_delay(
