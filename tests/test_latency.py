@@ -84,6 +84,12 @@ async def test_streamed_requests_are_timed_and_shown(make_stack):
         assert (await c.get("/admin/response-times?window=forever")).status_code == 200  # falls back to 24h
         details = (await c.get(f"/admin/api/requests/{streamed['id']}")).json()
         assert details["tokens_per_s"] > 10 and details["first_token_ms"] == streamed["first_token_ms"]
+        # and in each row of the Requests page: its own column, empty for a request that wasn't streamed
+        listed = {row["id"]: row for row in (await c.get("/admin/api/requests")).json()["rows"]}
+        assert listed[streamed["id"]]["tokens_per_s"] == streamed["tokens_per_s"]
+        assert listed[plain["id"]]["tokens_per_s"] is None
+        page = (await c.get("/admin/requests")).text
+        assert ">Tok/s</th>" in page and page.count('colspan="13"') == 3
 
         alerts = stack.app.state.alerts
         store.save_alert_rule("slow_first_token", True, 0.001, 3600, 3600, "t")

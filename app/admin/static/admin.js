@@ -736,7 +736,7 @@ function localTimes(scope) {
 // details when you open it. Queued and running requests come from the live stream, and only the rows that changed
 // are redrawn; finished ones are fetched as they're written, and wait behind a button while you're scrolled down.
 function liveRequests(root) {
-  const COLUMNS = 12;
+  const COLUMNS = 13;
   const AT_TOP_PX = 150;
   const nowBody = document.getElementById("now-requests");
   const nowCount = document.getElementById("now-count");
@@ -772,6 +772,12 @@ function liveRequests(root) {
     return cell;
   };
   const milliseconds = (ms) => (ms === null || ms === undefined ? "—" : String(Math.round(ms)));
+  // Output speed of a streamed answer (tokens per second, first token to last); none for other requests.
+  const speed = (r) => {
+    const v = r.tokens_per_s;
+    if (v === null || v === undefined) return td("Tok/s", "num", "—");
+    return td("Tok/s", "num", v < 10 ? Number(v).toFixed(1) : String(Math.round(v)));
+  };
   const money = (v) => {
     if (v >= 100) return `$${Math.round(v).toLocaleString("en-US")}`;
     if (v >= 1) return `$${v.toFixed(2)}`;
@@ -983,7 +989,7 @@ function liveRequests(root) {
     tr.append(
       timeCell(r), clientCell(r), modelCell(r), outcome,
       queue, td("First byte ms", "num", first), took, input, td("Cached", "num", "—"), td("Out", "num", "—"),
-      td("Total", "num", "—"), text("Finish", r.stream ? "streaming" : ""),
+      td("Tok/s", "num", "—"), td("Total", "num", "—"), text("Finish", r.stream ? "streaming" : ""),
     );
     return { tr, tick: queued ? queue : took };
   };
@@ -1055,7 +1061,7 @@ function liveRequests(root) {
       timeCell(r), clientCell(r), modelCell(r), outcome,
       td("Queue ms", "num", milliseconds(r.queue_ms)), td("First byte ms", "num", milliseconds(r.ttft_ms)),
       td("Upstream ms", "num", milliseconds(r.upstream_ms)), input,
-      spend("Cached", r.tokens_cached, r.cost_cached), spend("Out", r.tokens_out, r.cost_out), total,
+      spend("Cached", r.tokens_cached, r.cost_cached), spend("Out", r.tokens_out, r.cost_out), speed(r), total,
       text("Finish", r.finish_reason),
     );
     return tr;

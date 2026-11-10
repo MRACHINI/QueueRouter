@@ -208,7 +208,8 @@ from a **web admin UI**.
   elsewhere).
 - **Response times** per model and upstream: the provider's own timings for streamed requests (its queue,
   first token, thinking time, output speed, longest pause, retry waits), median and worst 5% over the last
-  hour, day or week, with a trend chart; an optional alert when a model gets slow to start.
+  hour, day or week, with a trend chart; an optional alert when a model gets slow to start. Each streamed
+  request's output speed is in its row on the Requests page (Tok/s).
 - **Structured-output repair**: JSON-mode replies and tool-call arguments with common breakage
   (code fences, extra text, trailing commas, cut-off brackets) are fixed before they reach the app
   (`X-QueueRouter-Structured: repaired | invalid`).

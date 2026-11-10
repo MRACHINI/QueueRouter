@@ -324,7 +324,7 @@ tr.part td.indent { padding-left: 2.2em; }
 .num, table.dense th.num { text-align: right; }
 .price { display: inline-block; min-width: 7ch; margin-left: 0.7ch; text-align: right; color: var(--muted); }
 
-.requests-table { table-layout: fixed; min-width: 1120px; }
+.requests-table { table-layout: fixed; min-width: 1180px; }
 .requests-table td { overflow: hidden; text-overflow: ellipsis; }
 .requests-table col.c-time { width: 12ch; }
 .requests-table col.c-client { width: 11ch; }
@@ -334,6 +334,7 @@ tr.part td.indent { padding-left: 2.2em; }
 .requests-table col.c-in { width: 20ch; }
 .requests-table col.c-cached { width: 22ch; }
 .requests-table col.c-out { width: 19ch; }
+.requests-table col.c-speed { width: 7ch; }
 .requests-table col.c-total { width: 10ch; }
 .requests-table col.c-finish { width: 12ch; }
 .requests-table tr.req { cursor: pointer; }

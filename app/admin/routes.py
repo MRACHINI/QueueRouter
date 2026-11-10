@@ -130,7 +130,7 @@ LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes /
 REQUEST_LIST_COLUMNS = (
     "id, ts, client, priority, model, target_model, upstream, status, outcome, retries, queue_ms, ttft_ms, "
     "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, finish_reason, stopped, "
-    "compaction, council, role, parent, answer_check, answer_tags, via, edits IS NOT NULL AS edited"
+    "tokens_per_s, compaction, council, role, parent, answer_check, answer_tags, via, edits IS NOT NULL AS edited"
 )
 REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "id",

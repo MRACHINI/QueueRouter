@@ -17,7 +17,8 @@
   </form>
 </div>
 <p class="muted small">Metadata only, never prompts or responses. Times in ms; costs at today's official prices. Click a row for its
-details. <code>length</code> under Finish means the reply was cut off by the token limit.</p>
+details. <code>length</code> under Finish means the reply was cut off by the token limit. Tok/s is the output speed of
+a streamed answer, from its first token to its last.</p>
 <noscript><p class="notice err">The request list needs JavaScript.</p></noscript>
 
 <section id="requests-live" data-stream="/admin/api/live?view=brief" data-rows="/admin/api/requests" data-filters="/admin/api/requests/filters" data-catch-up="{{ catch_up }}">
@@ -26,13 +27,13 @@ details. <code>length</code> under Finish means the reply was cut off by the tok
   <colgroup>
     <col class="c-time"><col class="c-client"><col><col class="c-outcome">
     <col class="c-ms"><col class="c-first"><col class="c-ms"><col class="c-in"><col class="c-cached"><col class="c-out">
-    <col class="c-total"><col class="c-finish">
+    <col class="c-speed"><col class="c-total"><col class="c-finish">
   </colgroup>
-  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Outcome</th><th class="num" title="Queue ms">Queue</th><th class="num" title="First byte ms">First byte</th><th class="num" title="Upstream ms: from being sent to the last byte">Took</th><th class="num" title="Tokens that weren't cached">In</th><th class="num">Cached</th><th class="num">Out</th><th class="num">Total</th><th>Finish</th></tr></thead>
-  <tbody><tr class="section"><td colspan="12">Now <span class="badge" id="now-count">0</span> <span class="muted">queued and running</span></td></tr></tbody>
+  <thead><tr><th>Time</th><th>Client</th><th>Model</th><th>Outcome</th><th class="num" title="Queue ms">Queue</th><th class="num" title="First byte ms">First byte</th><th class="num" title="Upstream ms: from being sent to the last byte">Took</th><th class="num" title="Tokens that weren't cached">In</th><th class="num">Cached</th><th class="num">Out</th><th class="num" title="Output tokens per second, from the first token to the last (thinking included; streamed answers only)">Tok/s</th><th class="num">Total</th><th>Finish</th></tr></thead>
+  <tbody><tr class="section"><td colspan="13">Now <span class="badge" id="now-count">0</span> <span class="muted">queued and running</span></td></tr></tbody>
   <tbody id="now-requests"></tbody>
-  <tbody><tr class="section"><td colspan="12">Finished</td></tr></tbody>
-  <tbody id="finished-requests"><tr class="placeholder"><td colspan="12" class="muted">Loading…</td></tr></tbody>
+  <tbody><tr class="section"><td colspan="13">Finished</td></tr></tbody>
+  <tbody id="finished-requests"><tr class="placeholder"><td colspan="13" class="muted">Loading…</td></tr></tbody>
 </table>
 </div>
 <p class="small muted" id="requests-more"></p>

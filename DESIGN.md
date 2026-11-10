@@ -2148,6 +2148,14 @@ upstream to a known provider.
 - Not done (no live check yet): Synthetic's `/v2/quotas` and Refuseless's `/v1/credits` balances; Refuseless's
   long-context price tier; Synthetic's `infinite:` models, which need streaming.
 
+v0.79.0: the Requests page shows each request's output speed in its row.
+- Asked for: tokens per second in the row, not only in the details that open under it.
+- A "Tok/s" column after Out: `requests.tokens_per_s`, measured since 0.40 for streamed answers (UsageSniffer:
+  output tokens over the time from the first token to the last, thinking included; none for an answer too short
+  to time), now in `REQUEST_LIST_COLUMNS`. One decimal below 10, whole numbers above. "—" for a request that
+  wasn't streamed, one still running, and a council's own row (its members' rows have theirs): no estimate from
+  the total time, which holds the wait for the first token and would read too slow.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
