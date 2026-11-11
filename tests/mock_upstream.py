@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -115,6 +116,28 @@ def create_mock(limit: int = 2) -> FastAPI:
             {"title": f"Result for {query}", "url": "https://example.com/1", "content": f"snippet about {query}"}
         ]
         return {"results": results}
+
+    @app.post("/v2/search")
+    async def synthetic_search(request: Request):
+        """Synthetic's search API: state["synthetic_searches"] holds the queries, state["synthetic_keys"] the keys
+        they came with; state["synthetic_status"] refuses them (429: over its hourly quota)."""
+        query = (await request.json()).get("query", "")
+        state.setdefault("synthetic_searches", []).append(query)
+        state.setdefault("synthetic_keys", []).append(request.headers.get("authorization", ""))
+        if state.get("synthetic_status"):
+            return JSONResponse({"error": "search quota exceeded"}, status_code=state["synthetic_status"])
+        found = {"url": "https://example.com/s", "title": f"Synthetic result for {query}"}
+        found |= {"text": f"page text about {query}", "published": "2026-11-01T00:00:00.000Z"}
+        return {"results": [found]}
+
+    @app.get("/v2/quotas")
+    async def synthetic_quotas():
+        """Synthetic's quotas: an hourly search quota of 250, renewing in state["synthetic_renews_in"] seconds."""
+        state["quotas_asked"] = state.get("quotas_asked", 0) + 1
+        renews = time.gmtime(time.time() + state.get("synthetic_renews_in", 1800))
+        hourly = {"limit": 250, "requests": len(state.get("synthetic_searches", []))}
+        hourly["renewsAt"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", renews)
+        return {"subscription": {"limit": 500, "requests": 0}, "search": {"hourly": hourly}}
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request):

@@ -8,6 +8,7 @@
   {% for section, fields in sections.items() %}
   <fieldset class="card">
     <legend>{{ section }}</legend>
+    {% if section == "Web search" and search_note %}<p class="small muted" id="search-note">{{ search_note }}</p>{% endif %}
     <div class="grid">
       {% for f in fields %}
       {% if f.choices %}

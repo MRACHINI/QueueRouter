@@ -2156,6 +2156,25 @@ v0.79.0: the Requests page shows each request's output speed in its row.
   wasn't streamed, one still running, and a council's own row (its members' rows have theirs): no estimate from
   the total time, which holds the wait for the first token and would read too slow.
 
+v0.80.0: Synthetic's search API as a web search provider, and a backup search provider.
+- Asked for: Synthetic's "web search API for coding agents" used by QueueRouter, and a fall back to the user's own
+  SearXNG when its limit is reached. Its cost isn't published; the user's `/v2/quotas` shows search with an hourly
+  quota of its own (250), apart from the request and weekly limits.
+- Provider "synthetic" (`websearch.search`): `POST api.synthetic.new/v2/search {"query"}` → `results[] {url, title,
+  text, published}`, `text` as the snippet (cut to 500 characters for the model, as every provider's). Its key:
+  Settings > Web search's, or left blank, the key of a Synthetic upstream (`main.search_key_of`: by preset or
+  address). It serves any model: QueueRouter runs the search and hands over the results.
+- Backup (`search_backup`, `search_backup_key`; `websearch.search_any`): the providers are asked in order until
+  one answers. Any failure of the first counts (a limit, a refused key, down, a time-out), not an empty result; a
+  query refused as a secret reaches none. A provider that failed is left out (asked last) for a while, so a search
+  doesn't wait for it each time: over a limit (402 / 429 / 432), until its quota renews when it says so
+  (Synthetic: `synthetic_quota`, the free `/v2/quotas`, at most an hour), else 10 minutes; another failure, 1
+  minute. With one provider nothing is left out. The skips are in memory (a restart asks again).
+- Shown: a council's or orchestrator's trace says "N results from searxng (synthetic returned HTTP 429 …)" when the
+  backup answered; Claude Code's searches (/v1/messages) have no trace line, so the server log has a
+  `search_backup_used` event. Settings > Web search shows "Synthetic: 212 of 250 searches left this hour (renews
+  14:57 UTC)" (read at most once a minute) and a provider that is left out for now.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

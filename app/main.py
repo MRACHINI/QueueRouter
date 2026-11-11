@@ -3089,6 +3089,63 @@ def create_app(
             return None
         return bytes(response.body)
 
+    search_skips: dict[str, float] = {}  # search provider -> monotonic time until which it's left out (it failed)
+    search_quota: dict = {"at": 0.0, "key": "", "quota": None}  # Synthetic's hourly search quota, kept a minute
+
+    def search_key_of(provider: str, key: str) -> str:
+        """A search provider's key: the one set for it, or for Synthetic left blank, a Synthetic upstream's."""
+        if key or provider != "synthetic":
+            return key
+        for target in snapshot.upstreams.values():
+            upstream = target.upstream
+            if upstream.preset == "synthetic" or "synthetic.new" in upstream.base_url.lower():
+                return target.api_key
+        return ""
+
+    def search_plan() -> list[tuple[str, str, str]]:
+        """The search providers to ask, in order: [(provider, key, SearXNG's address)]; none when search is off."""
+        s = cfg()
+        if s.search_provider in ("", "off"):
+            return []
+        chosen = [(s.search_provider, s.search_key), (s.search_backup, s.search_backup_key)]
+        return [(p, search_key_of(p, key), s.search_url) for p, key in chosen if p not in ("", "off")]
+
+    async def web_search(query: str, count: int) -> websearch.Found:
+        """A web search by the provider set in Settings, or its backup when that one fails (app/websearch.py)."""
+        found = await websearch.search_any(app.state.client, search_plan(), query, count, search_skips)
+        if found.failed:
+            log.info(json.dumps({"event": "search_backup_used", "provider": found.provider, "failed": found.failed}))
+        return found
+
+    async def search_status() -> str:
+        """For Settings > Web search: Synthetic's searches left this hour, and a provider left out for now."""
+        plan = search_plan()
+        notes = []
+        key = next((key for provider, key, _ in plan if provider == "synthetic"), "")
+        if key:
+            if search_quota["key"] != key or time.monotonic() - search_quota["at"] > 60:
+                quota = await websearch.synthetic_quota(app.state.client, key)
+                search_quota.update(at=time.monotonic(), key=key, quota=quota)
+            if quota := search_quota["quota"]:
+                left = max(quota["limit"] - quota["used"], 0)
+                when = time.strftime("%H:%M UTC", time.gmtime(quota["renews_at"])) if quota["renews_at"] else ""
+                notes.append(
+                    f"Synthetic: {left} of {quota['limit']} searches left this hour"
+                    + (f" (renews {when})." if when else ".")
+                )
+            else:
+                notes.append("Synthetic: its search quota couldn't be read (check the key).")
+        elif any(provider == "synthetic" for provider, _, _ in plan):
+            notes.append("Synthetic has no key: set one here, or add a Synthetic upstream.")
+        now = time.monotonic()
+        for provider, _, _ in plan:
+            if (until := search_skips.get(provider, 0.0)) > now and len(plan) > 1:
+                minutes = max(round((until - now) / 60), 1)
+                notes.append(f"{provider} failed its last search: the other provider answers for {minutes} more min.")
+        return " ".join(notes)
+
+    app.state.search_status = search_status
+
     async def try_tagger(client_name: str, payload: dict) -> tuple[bytes | None, str]:
         """The Taggers page's Try it: a tagger's request, as an enabled client (a row of its own on the Requests
         page); (its reply's body, "") or (None, why not)."""
@@ -3563,16 +3620,14 @@ def create_app(
                 progress(f"{who} searches the web", f': "{query[:80]}"')
                 search_count[0] += 1
                 try:
-                    found = await websearch.search(
-                        app.state.client, s.search_provider, s.search_key, s.search_url, query,
-                        alias.council_search_results,
-                    )  # fmt: skip
+                    found = await web_search(query, alias.council_search_results)
                 except websearch.SearchError as exc:
                     search_errors.append(str(exc))
                     progress(f"{who}: search failed ({exc})")
                     return f"Search failed: {exc}. Do not present unverified facts as found."
-                progress(f"{who}: {len(found)} results")
-                return websearch.results_text(query, found)
+                backup = f" from {found.provider} ({'; '.join(found.failed)})" if found.failed else ""
+                progress(f"{who}: {len(found.results)} results{backup}")
+                return websearch.results_text(query, found.results)
 
             async def member(
                 i: int,
@@ -4375,11 +4430,8 @@ def create_app(
             if self.left <= 0:
                 return query, None, "max_uses_exceeded", "The search limit is reached: answer with what you have."
             self.left -= 1
-            s = cfg()
             try:
-                found = await websearch.search(
-                    app.state.client, s.search_provider, s.search_key, s.search_url, query, SEARCH_RESULTS
-                )
+                found = (await web_search(query, SEARCH_RESULTS)).results
             except websearch.SearchError as exc:
                 reason = str(exc)
                 code = (

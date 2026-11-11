@@ -5,7 +5,11 @@ query with its own search key (Settings > Web search), gives the member the resu
 until it answers without searching (or reaches the alias's search limit). The judge then sees the
 sources each member used. The app (opencode) never sees this tool.
 
-Providers: Tavily, Brave Search, SearXNG (self-hosted: queries stay on your own server).
+Providers: Tavily, Brave Search, SearXNG (self-hosted: queries stay on your own server), Synthetic (its search API,
+with the key of a Synthetic subscription: an hourly quota of its own, ``synthetic_quota``).
+A backup provider (``search_any``) answers when the first one fails: its limit is reached, its key is refused, it's
+down. A provider that failed is skipped for a while, so each search doesn't wait for it again: until its quota
+renews when it says so (Synthetic), else SKIP_LIMIT_S after a limit and SKIP_DOWN_S after another failure.
 Queries are written by models, so they could contain code or private names: members are told not to,
 and a query that looks like it holds a secret (API keys, tokens, private keys) is refused here.
 """
@@ -18,12 +22,20 @@ import ipaddress
 import json
 import re
 import socket
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
-PROVIDERS = ("off", "tavily", "brave", "searxng")
+PROVIDERS = ("off", "tavily", "brave", "searxng", "synthetic")
+SYNTHETIC_URL = "https://api.synthetic.new/v2"  # its search and quota API (tests point it at their mock)
+LIMIT_STATUS = (402, 429, 432)  # out of credits / over a limit (432: Tavily's plan limit)
+SKIP_LIMIT_S = 600  # a provider over its limit that doesn't say until when is skipped this long (with a backup)
+SKIP_DOWN_S = 60  # one that failed another way
+SKIP_MAX_S = 3600
 TOOL_NAME = "queuerouter_web_search"
 TOOL = {
     "type": "function",
@@ -61,7 +73,21 @@ _URL_SECRET = re.compile(
 
 
 class SearchError(Exception):
-    pass
+    """Why a search (or a page read) failed, in words for the model and the Requests page; ``status``: the
+    provider's HTTP status, when that is why."""
+
+    def __init__(self, reason: str, status: int | None = None) -> None:
+        super().__init__(reason)
+        self.status = status
+
+
+@dataclass
+class Found:
+    """A search's results, the provider that gave them, and why those tried before it failed."""
+
+    results: list[dict]
+    provider: str
+    failed: list[str] = field(default_factory=list)
 
 
 def check_query(query: str) -> str:
@@ -118,13 +144,82 @@ async def search(
                 {"title": i.get("title", ""), "url": i.get("url", ""), "snippet": i.get("content", "")}
                 for i in items[:count]
             ]
+        if provider == "synthetic":
+            if not key:
+                raise SearchError("Synthetic needs a key (Settings > Web search, or a Synthetic upstream)")
+            response = await client.post(
+                f"{SYNTHETIC_URL}/search", headers={"Authorization": f"Bearer {key}"}, json={"query": query}, timeout=30
+            )
+            response.raise_for_status()
+            items = response.json().get("results") or []
+            return [
+                {"title": i.get("title", ""), "url": i.get("url", ""), "snippet": i.get("text", "")}
+                for i in items[:count]
+                if isinstance(i, dict)
+            ]
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
         hint = " (check the key and the plan's credits)" if status in (401, 402, 403, 429, 432) else ""
-        raise SearchError(f"{provider} returned HTTP {status}{hint}") from None
-    except (httpx.HTTPError, ValueError) as exc:
+        raise SearchError(f"{provider} returned HTTP {status}{hint}", status) from None
+    except (httpx.HTTPError, ValueError, AttributeError) as exc:
         raise SearchError(f"{provider}: {type(exc).__name__}") from None
     raise SearchError("web search is off (Settings > Web search)")
+
+
+async def synthetic_quota(client: httpx.AsyncClient, key: str) -> dict | None:
+    """A Synthetic account's hourly search quota ({"limit", "used", "renews_at": epoch seconds or None}); None when
+    it can't be read. Asking is free and counts against nothing."""
+    try:
+        response = await client.get(f"{SYNTHETIC_URL}/quotas", headers={"Authorization": f"Bearer {key}"}, timeout=10)
+        response.raise_for_status()
+        hourly = (response.json().get("search") or {}).get("hourly") or {}
+        limit, used = int(hourly["limit"]), int(hourly.get("requests") or 0)
+    except (httpx.HTTPError, ValueError, AttributeError, KeyError, TypeError):
+        return None
+    try:
+        renews = datetime.fromisoformat(str(hourly.get("renewsAt")).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        renews = None
+    return {"limit": limit, "used": used, "renews_at": renews}
+
+
+async def _skip_for(client: httpx.AsyncClient, provider: str, key: str, error: SearchError) -> float:
+    """How long a provider that failed is left out (seconds): until its quota renews when it's over its limit and
+    says when (Synthetic), else a fixed while."""
+    if error.status not in LIMIT_STATUS:
+        return SKIP_DOWN_S
+    if provider == "synthetic" and (quota := await synthetic_quota(client, key)) and quota["renews_at"]:
+        return min(max(quota["renews_at"] - time.time(), SKIP_DOWN_S), SKIP_MAX_S)
+    return SKIP_LIMIT_S
+
+
+async def search_any(
+    client: httpx.AsyncClient, plan: list[tuple[str, str, str]], query: str, count: int, skips: dict[str, float]
+) -> Found:
+    """``query`` asked of the providers in ``plan`` ([(provider, key, base_url)]: the first, then its backup) until
+    one answers. ``skips`` (provider -> time.monotonic() until which it's left out) is kept between searches: a
+    provider that failed is tried last until then, so a search doesn't wait for it each time. A query that mustn't
+    leave QueueRouter is refused before any of them. SearchError when all failed (their reasons), or search is off."""
+    query = check_query(query)
+    plan = [p for n, p in enumerate(plan) if p[0] not in ("", "off") and p[0] not in [q[0] for q in plan[:n]]]
+    if not plan:
+        raise SearchError("web search is off (Settings > Web search)")
+    now = time.monotonic()
+    left_out = [p for p in plan if skips.get(p[0], 0.0) > now]
+    failed: list[str] = []
+    last: SearchError | None = None
+    for provider, key, base_url in [*(p for p in plan if p not in left_out), *left_out]:
+        try:
+            results = await search(client, provider, key, base_url, query, count)
+        except SearchError as exc:
+            failed.append(str(exc))
+            last = exc
+            if len(plan) > 1:  # with nothing else to ask, it's asked again next time
+                skips[provider] = time.monotonic() + await _skip_for(client, provider, key, exc)
+            continue
+        skips.pop(provider, None)
+        return Found(results, provider, failed)
+    raise SearchError("; ".join(failed), last.status if last and len(failed) == 1 else None)
 
 
 def results_text(query: str, results: list[dict]) -> str:

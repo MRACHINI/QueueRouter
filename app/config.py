@@ -266,6 +266,8 @@ TUNABLES: dict[str, type] = {
     "search_provider": str,
     "search_key": str,
     "search_url": str,
+    "search_backup": str,
+    "search_backup_key": str,
     "passthrough_get_paths": str,
     "metrics_token": str,
     "otel_endpoint": str,
@@ -287,7 +289,7 @@ TUNABLES: dict[str, type] = {
     "circuit_cooldown_s": float,
 }
 # stored encrypted, never shown back
-SECRET_TUNABLES = frozenset({"metrics_token", "otel_headers", "search_key", "rank_key"})
+SECRET_TUNABLES = frozenset({"metrics_token", "otel_headers", "search_key", "search_backup_key", "rank_key"})
 
 
 @dataclass(frozen=True)
@@ -336,9 +338,11 @@ class Settings:
     compaction_idle_minutes: int = 60  # summaries are forgotten after this long unused
     compaction_saved: bool = False  # also keep summaries in the database (encrypted), so they survive restarts
     compaction_keep_days: int = 7  # saved summaries are deleted after this long unused
-    search_provider: str = "off"  # web search for council members: off | tavily | brave | searxng
-    search_key: str = ""  # its API key (Tavily, Brave)
+    search_provider: str = "off"  # web search: off | tavily | brave | searxng | synthetic (app/websearch.py)
+    search_key: str = ""  # its API key (Tavily, Brave, Synthetic; blank for Synthetic: a Synthetic upstream's)
     search_url: str = ""  # SearXNG address, e.g. http://searxng:8080
+    search_backup: str = "off"  # the provider asked when the first one fails (its limit, its key, down)
+    search_backup_key: str = ""  # its API key
     passthrough_get_paths: str = ""  # /v1/ GET paths forwarded to the provider, comma-separated (default: none)
     metrics_token: str = ""  # /metrics needs "Authorization: Bearer <token>"; empty = /metrics is off
     otel_endpoint: str = ""  # OTLP/HTTP collector base URL (traces go to <it>/v1/traces); empty = off

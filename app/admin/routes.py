@@ -209,6 +209,7 @@ MAX_USERNAME = 100
 SETTING_CHOICES: dict[str, tuple[str, ...]] = {
     "lb_strategy": STRATEGIES,
     "search_provider": SEARCH_PROVIDERS,
+    "search_backup": SEARCH_PROVIDERS,
     "rank_index": tuple(RANK_INDEXES),
 }
 
@@ -287,18 +288,33 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
     "search_provider": (
         "Web search",
         "Provider",
-        "Lets council members search the web before the judge decides (per alias: Council > members can search). "
-        "SearXNG runs on your own server, so queries stay there.",
+        "Lets council members search the web before the judge decides (per alias: Council > members can search), "
+        "and runs Claude Code's web search. SearXNG runs on your own server, so queries stay there. Synthetic is "
+        "its search API, included in its subscriptions with an hourly quota of its own.",
     ),
     "search_key": (
         "Web search",
         "API key",
-        "Tavily or Brave key (stored encrypted; leave blank to keep the current one). Each search uses credits.",
+        "Tavily, Brave or Synthetic key (stored encrypted; leave blank to keep the current one). Each search uses "
+        "credits or quota. For Synthetic, none set here means the key of your Synthetic upstream.",
     ),
     "search_url": (
         "Web search",
         "SearXNG address",
-        "Only for SearXNG, e.g. http://searxng:8080 (its JSON output must be enabled).",
+        "Only for SearXNG (as provider or backup), e.g. http://searxng:8080 (its JSON output must be enabled).",
+    ),
+    "search_backup": (
+        "Web search",
+        "Backup provider",
+        "Asked when the provider's search fails: its limit is reached, its key is refused, it's down. The provider "
+        "is then left out for a while (until its quota renews, where it says when; else 10 minutes after a limit, "
+        "1 minute after another failure), so searches don't wait for it each time. A search that finds nothing "
+        "isn't a failure.",
+    ),
+    "search_backup_key": (
+        "Web search",
+        "Backup's API key",
+        "The backup's own key, if it needs one (SearXNG doesn't; Synthetic can use your Synthetic upstream's).",
     ),
     "opencode_plugin_updates": (
         "opencode",
@@ -734,7 +750,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                     "choices": SETTING_CHOICES.get(name, ()),
                 }
             )
-        return page(request, "settings.html", session, sections=sections)
+        status = getattr(request.app.state, "search_status", None)  # searches left this hour, a provider left out
+        search_note = await status() if status else ""
+        return page(request, "settings.html", session, sections=sections, search_note=search_note)
 
     @app.post("/admin/settings")
     async def settings_submit(request: Request):

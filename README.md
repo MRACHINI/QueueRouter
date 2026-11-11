@@ -139,11 +139,14 @@ from a **web admin UI**.
   model alone. Mix providers so a council doesn't take all of one account's
   slots. Streaming apps get their response at once (keep-alives while members work); the Requests page shows
   "council: pick 2/3: GLM-4.7", and the members' and judge's requests are tagged `#council`.
-- **Web search for council members**: with a search provider set up (Settings > Web search: Tavily, Brave or
-  your own SearXNG), council members can search before the judge decides. QueueRouter runs the searches,
+- **Web search for council members**: with a search provider set up (Settings > Web search: Tavily, Brave, your
+  own SearXNG, or Synthetic's search API with your Synthetic key), council members can search before the judge
+  decides. QueueRouter runs the searches,
   gives each member its results and asks it again (up to a per-alias limit), and the judge sees every member's
   sources. opencode never sees this tool. Queries that look like they contain secrets are refused. The same search
-  runs Claude's web search tool for apps on `/v1/messages`, such as Claude Code.
+  runs Claude's web search tool for apps on `/v1/messages`, such as Claude Code. A **backup provider** answers when
+  the first one fails (its limit is reached, its key is refused, it's down), and the first is left out until its
+  quota renews (Synthetic says when) or for a few minutes; Settings shows Synthetic's searches left this hour.
 - **Orchestrator** (council mode "orchestrate"): the judge model leads the team. It plans, gives members
   focused tasks (briefs: they see only the task it writes), searches and reads the web, uses a calculator,
   may ask again, then answers (text or the app's own tools). Progress streams live into the app's thinking
@@ -585,7 +588,7 @@ What QueueRouter does for Claude Code:
 - The model's thinking is shown as Claude's thinking, and keep-alives go out while a provider sends nothing. Claude
   Code gives up on a stream that stays silent for about five minutes, which a model thinking over a large review can.
 - Its web search works: QueueRouter runs the searches the model asks for with its own search (**Settings → Web
-  search**: Tavily, Brave or your SearXNG), gives the model the results, and answers in Claude's own form, sources
+  search**: Tavily, Brave, your SearXNG or Synthetic, with a backup), gives the model the results, and answers in Claude's own form, sources
   included. Up to the tool's own limit (5 if it sets none), 10 at most.
 - Tool calls reach it whole and with ids of their own: a provider that mixes up the pieces of parallel calls, or
   numbers its calls from 0 in every answer, can't make it lose one (`Tool result missing due to internal error`).
