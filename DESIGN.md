@@ -2209,6 +2209,9 @@ window). Checked in a 2000 x 1400 browser window against a test server with 130 
 scrolling (50 before), all 130 and "That's the end of the log." at the bottom. The browser pane was hidden during
 the check, where scroll events and observers don't fire, so the scroll was sent by hand.
 
+v0.80.4: same code as 0.80.3, whose image was never built: its tests passed on GitHub, but the image job got no runner
+during a GitHub Actions outage (2026-11-11) and the run was failed after waiting.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
