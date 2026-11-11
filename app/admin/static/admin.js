@@ -1149,6 +1149,7 @@ function liveRequests(root) {
         loaded = true;
         updateNote();
         settle();
+        if (nearBottom()) loadOlder(); // a tall window shows the end of the first page: nothing would scroll it into view
       }
     } catch (_) {
       /* changed filters, or the next update tries again */
@@ -1240,6 +1241,7 @@ function liveRequests(root) {
   }, { rootMargin: "400px" }).observe(note);
   window.addEventListener("scroll", () => {
     if (waiting.length && window.scrollY <= AT_TOP_PX) settle();
+    if (nearBottom()) loadOlder(); // the observer only says when the end comes into view, not that it still is
   }, { passive: true });
   newRows.addEventListener("click", () => {
     window.scrollTo(0, 0);

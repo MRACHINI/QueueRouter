@@ -2198,6 +2198,17 @@ and after a purge removed rows the table is read again in the background, once a
 offer a value no row has). An older page that fails to load is asked for again while the end of the list is in view
 (after 2 s, then less often, 30 s at most); before, only scrolling away and back did.
 
+v0.80.3: the Requests page loads older rows in a tall window. What 0.80.2 fixed wasn't what the user saw (the bottom
+of the list with no "Loading…" and no "end of the log"): the page asks for older rows when its last line comes into
+view (IntersectionObserver, 400 px early), and an observer only reports a change. In a window tall enough to show
+the end of the first 50 rows (about 1250 px of page against a 1400 px window plus the margin), that line was in view
+from the start, when there were no rows yet to page from, and stayed in view, so nothing ever asked; once enough new
+requests had made the list longer than the window, scrolling worked. Now the page also asks after its first rows
+arrive and on every scroll while the end is near (loadOlder goes on by itself until the list is longer than the
+window). Checked in a 2000 x 1400 browser window against a test server with 130 requests: 100 rows without
+scrolling (50 before), all 130 and "That's the end of the log." at the bottom. The browser pane was hidden during
+the check, where scroll events and observers don't fire, so the scroll was sent by hand.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
