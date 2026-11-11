@@ -25,6 +25,13 @@ COPY requirements.txt .
 # Every package, dependencies included, is pinned with its hashes (requirements.in lists the direct ones).
 RUN pip install --require-hashes -r requirements.txt && pip uninstall -y pip
 COPY app ./app
+# Bytecode for the standard library, the packages and the app, made once here: the app runs as a user that can't
+# write it (and on a read-only filesystem), so without it every start compiles everything again, which is most of a
+# start's work (tens of seconds on a slow or CPU-limited host). "unchecked-hash": used as it is, the sources in an
+# image don't change. Files that don't compile (a package's templates) are skipped; the app's own must all compile.
+RUN python -m compileall -q --invalidation-mode unchecked-hash \
+        "$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')" || true; \
+    python -m compileall -q --invalidation-mode unchecked-hash /srv/app
 COPY docker/entrypoint.sh /usr/local/bin/queuerouter-entrypoint
 RUN chmod 755 /usr/local/bin/queuerouter-entrypoint
 

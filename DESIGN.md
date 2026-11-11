@@ -2175,6 +2175,19 @@ v0.80.0: Synthetic's search API as a web search provider, and a backup search pr
   `search_backup_used` event. Settings > Web search shows "Synthetic: 212 of 250 searches left this hour (renews
   14:57 UTC)" (read at most once a minute) and a provider that is left out for now.
 
+v0.80.1: the image ships its code precompiled, so a start no longer compiles everything.
+- Found on the user's server: 40 s from a redeploy to serving, 35 s of it before the first log line. Not the
+  database (620 MB opens at once; a 710 MB test database started in 1.8 s): loading the code took 23 s there under
+  the example compose's half-CPU limit. The python image ships its standard library without bytecode, the image
+  set PYTHONDONTWRITEBYTECODE, and the app runs as a user that can't write it on a read-only filesystem, so every
+  start (and every health check's `python -c`) compiled the standard library, the packages and the app again.
+- The Dockerfile now runs `compileall` over the standard library (packages included) and `/srv/app`, with
+  `--invalidation-mode unchecked-hash` (the sources in an image don't change; no stat per file). Measured at half
+  a CPU and 256 MB on the test host: loading the code 3.4 s → 1.4 s, container start to serving 4.4 s → 2.1 s.
+  The image grows from 274 to 298 MB.
+- A CPU limit still stretches what's left, so the example compose files now give QueueRouter a full CPU and 512 MB
+  (were half a CPU and 256 MB).
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

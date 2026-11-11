@@ -19,7 +19,7 @@ services:
     deploy:
       replicas: 1             # never scale: the queue lives in memory
       resources:
-        limits: { cpus: "0.5", memory: 256M }
+        limits: { cpus: "1", memory: 512M }   # less CPU stretches every start (loading the code is CPU work)
     networks: [traefik]
     labels:
       - traefik.enable=false  # Traefik talks to the gate
