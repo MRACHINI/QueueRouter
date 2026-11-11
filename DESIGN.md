@@ -2212,6 +2212,16 @@ the check, where scroll events and observers don't fire, so the scroll was sent 
 v0.80.4: same code as 0.80.3, whose image was never built: its tests passed on GitHub, but the image job got no runner
 during a GitHub Actions outage (2026-11-11) and the run was failed after waiting.
 
+v0.80.5: same features as 0.80.3; 0.80.4's image wasn't built either: its tag's test run failed (main's passed) in
+test_a_tagger_that_fails_lets_the_answer_through, slow tagger case: the request got the fallback's answer where the
+held one should pass on, with no tagger_failed line in the log. The same failed once in 19 full runs on the test
+host (before 0.80.2; giving the slow tagger 10 s in place of 3 changed nothing, so it isn't a late reply slipping
+in) and in none of about 120 runs of that test or its file alone, under load. Cause unknown. Two changes: the test
+now says on failure what the request's notes, calls and timing were; and run_taggers no longer reads the result of a
+tagger request it stopped for being late (it counts as "took over N s" however the request ended), and a tagger
+request ending with an error of its own counts as failed (tagger_error in the log) where it was raised and would
+have counted as the answering model's error. Neither is known to be the cause.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

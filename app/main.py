@@ -2488,6 +2488,7 @@ def create_app(
                 )
             )
             started = time.monotonic()
+            late = False
             try:
                 while not task.done() and (left := started + limit - time.monotonic()) > 0:
                     await asyncio.wait({task}, timeout=min(keepalive_s(), left))
@@ -2495,13 +2496,20 @@ def create_app(
                         yield Checking()
             finally:
                 if not task.done():
+                    late = True
                     task.cancel()  # its own request ends too (its slot freed), as a cancelled one
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await task
             asked += 1
             seconds = f"{time.monotonic() - started:.1f} s"
-            if task.cancelled():
+            # A request stopped for being late doesn't always end as cancelled: it can end with an error of its own
+            # instead. That is the tagger's failure, never the answer's: raised from here it would count as the
+            # model's and send the request on to the next one.
+            if late or task.cancelled():
                 reply = taggers_mod.Reply(None, problem=f"it took over {round(limit)} s")
+            elif (error := task.exception()) is not None:
+                log.warning(json.dumps({"event": "tagger_error", "tagger": tagger.name, "error": repr(error)[:200]}))
+                reply = taggers_mod.Reply(None, problem="its request failed")
             elif (replied := task.result()) is None:
                 reply = taggers_mod.Reply(None, problem="its request failed")
             else:

@@ -255,9 +255,16 @@ async def test_a_tagger_that_fails_lets_the_answer_through(make_stack, monkeypat
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
         await add_checked(c, stack.app.state.store)
+        began = time.monotonic()
         r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat())
-        assert r.json()["choices"][0]["message"]["content"] == "bad answer"
-    main, _ = await entries(stack)
+        took = round(time.monotonic() - began, 1)
+    main, calls = await entries(stack)
+    # Shown when it fails: on a busy runner the slow tagger's case now and then got the fallback's answer (v0.80.4's
+    # tag run), and nothing said why.
+    seen = {k: main.get(k) for k in ("answer_check", "fallback", "error", "outcome")} | {"took": took}
+    seen["calls"] = [(e.get("role"), e.get("outcome"), e.get("error")) for e in calls]
+    seen["tagger_requests"] = len(stack.mock.get("check_inputs", []))
+    assert r.json()["choices"][0]["message"]["content"] == "bad answer", seen
     assert main["answer_check"].startswith(f"strict-model: {note} (") and main["fallback"] is None
     assert main["answer_check"].endswith(" → next; strict-model: passed (no tagger failed it)")
 
