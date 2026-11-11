@@ -175,14 +175,39 @@ async def test_rows_cost_and_details(make_stack):
         assert (await c.get("/admin/api/requests/nope")).status_code == 404
 
 
-async def test_filter_choices_are_kept_for_a_while(make_stack):
+async def test_filter_choices_are_read_once_then_kept_current(make_stack):
+    """The table is scanned once (it takes seconds on a long log, and older rows waited behind it); what's written
+    afterwards is added as it's written, and a purge has it read again, in the background."""
     stack = make_stack(bootstrap=OWNER)
+    store = stack.app.state.store
+    with store.tx() as db:  # there before the first look
+        db.execute(
+            "INSERT INTO requests (id, ts, client, model, tags) VALUES ('old', ?, 'before', 'm-old', 'x,y')",
+            (time.time() - 3 * 86_400,),
+        )
+    scans = []
+    scan = store._scan_choices
+    store._scan_choices = lambda: (scans.append(1), scan())[1]
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         await login(c, stack.url)
-        assert (await c.get("/admin/api/requests/filters")).json()["client"] == []
+        choices = (await c.get("/admin/api/requests/filters")).json()
+        assert choices["client"] == ["before"] and choices["tag"] == ["x", "y"] and choices["model"] == ["m-old"]
         await c.post("/v1/chat/completions", headers=stack.headers, json=chat("a"))
-        await flushed(stack, 1)
-        assert (await c.get("/admin/api/requests/filters")).json()["client"] == []  # not scanned again yet
+        await flushed(stack, 2)
+        await asyncio.sleep(0.2)  # written, then noted
+        choices = (await c.get("/admin/api/requests/filters")).json()
+        assert len(choices["client"]) == 2 and "done" in choices["outcome"] and len(scans) == 1  # at once, no scan
+
+        assert store.prune_requests(1) == 1  # the old row goes
+        assert "before" in (await c.get("/admin/api/requests/filters")).json()["client"]  # read again daily at most
+        assert len(scans) == 1
+        store._choices_at -= 2 * 86_400
+        for _ in range(100):
+            choices = (await c.get("/admin/api/requests/filters")).json()
+            if "before" not in choices["client"]:
+                break
+            await asyncio.sleep(0.05)
+        assert len(choices["client"]) == 1 and choices["tag"] == [] and len(scans) == 2
 
 
 async def test_usage_body_and_its_period(make_stack):

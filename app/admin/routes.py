@@ -1599,8 +1599,6 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
 
     REQUEST_PAGE, REQUEST_CATCH_UP = 50, 300  # rows fetched at a time / at most after being away
     REQUEST_FILTERS = ("client", "outcome", "model", "upstream", "tag", "answer_tag")
-    FILTER_CHOICES_S = 60  # the choices scan the table, so they're kept this long
-    filter_choices: dict = {"at": None, "values": {}}
 
     @app.get("/admin/requests")
     async def requests_log(request: Request):
@@ -1638,12 +1636,9 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
     async def api_request_filters(request: Request):
         """What the Requests page's filters can choose from."""
         require(request, "viewer")
-        now = time.monotonic()
-        if filter_choices["at"] is None or now - filter_choices["at"] > FILTER_CHOICES_S:
-            values = await asyncio.to_thread(store.request_filter_values)
-            filter_choices.update(at=now, values=values)
-        labels = {value: ctx.model_label(value) for value in filter_choices["values"]["model"]}
-        return JSONResponse({**filter_choices["values"], "labels": labels})
+        values = await asyncio.to_thread(store.request_filter_values)
+        labels = {value: ctx.model_label(value) for value in values["model"]}
+        return JSONResponse({**values, "labels": labels})
 
     @app.get("/admin/api/requests/{request_id}")
     async def api_request(request_id: str, request: Request):

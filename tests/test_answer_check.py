@@ -244,7 +244,7 @@ async def test_answers_that_call_tools_are_not_checked(make_stack):
     [
         ({"check_status": 400}, "checker gave no tags (its request failed)"),
         ({"check_reply": "Hmm, hard to say."}, "checker gave no tags (unreadable reply: 'Hmm, hard to say.')"),
-        ({"check_delay": 3}, "checker gave no tags (it took over 1 s)"),
+        ({"check_delay": 10}, "checker gave no tags (it took over 1 s)"),  # far over: a busy runner stalls
     ],
 )
 async def test_a_tagger_that_fails_lets_the_answer_through(make_stack, monkeypatch, setup, note):

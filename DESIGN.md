@@ -2188,6 +2188,16 @@ v0.80.1: the image ships its code precompiled, so a start no longer compiles eve
 - A CPU limit still stretches what's left, so the example compose files now give QueueRouter a full CPU and 512 MB
   (were half a CPU and 256 MB).
 
+v0.80.2: the Requests page loads older rows at once on a long log. Its filters' choices were read from the whole
+table each time the page was opened (six DISTINCT scans, kept 60 s), on the connection every admin page reads
+through: on a 660 MB log at half a CPU that took 7 s on the test host (longer on a slow server), and the older rows
+asked for by scrolling down waited behind it (1.6 s for a read that takes 1 ms; the first rows were asked for before
+the scan and came at once). The choices are now read once after a start, in one pass on a connection of its own
+(Store._scan_choices), then kept in memory: record_requests adds what it writes, a renamed client is renamed there,
+and after a purge removed rows the table is read again in the background, once a day at most (until then a filter may
+offer a value no row has). An older page that fails to load is asked for again while the end of the list is in view
+(after 2 s, then less often, 30 s at most); before, only scrolling away and back did.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

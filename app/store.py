@@ -752,6 +752,10 @@ CLIENT_DATA_TABLES = (
     "compaction_summaries",
 )
 
+CHOICE_COLUMNS = ("client", "outcome", "model", "upstream", "tags", "answer_tags")  # the Requests page's filters
+CHOICE_KEYS = {"tags": "tag", "answer_tags": "answer_tag"}  # what the page calls them
+CHOICES_MAX = 200  # of each, shown
+CHOICES_RESCAN_S = 86_400  # after rows were removed, the table is read again this often at most
 CALLS_WITHIN_S = 6 * 3600  # a call for a request ends this close to it, at most (longest a request is tracked)
 REQUEST_COLUMNS = (
     "id",
@@ -1066,6 +1070,14 @@ class Store:
         self._reader.row_factory = sqlite3.Row
         self._reader.execute("PRAGMA query_only=ON")
         self._reader.execute("PRAGMA busy_timeout=5000")
+        # What the Requests page's filters can choose from: read from the table once (one pass, on a connection of
+        # its own, so no page waits behind it), then kept current as requests are written.
+        self._choices_lock = threading.Lock()
+        self._choices_scan = threading.Lock()  # one scan at a time
+        self._choices: dict[str, set[str]] | None = None  # as of the last scan; None before the first
+        self._choices_new: dict[str, set[str]] = {key: set() for key in CHOICE_COLUMNS}  # written since it began
+        self._choices_at = 0.0
+        self._choices_stale = False  # rows were removed or renamed since
 
     @classmethod
     def open(cls, data_dir: str, secret_key: str | None) -> Store:
@@ -1582,6 +1594,10 @@ class Store:
                         (new, old),
                     )
                     db.execute(f"DELETE FROM {table} WHERE client = ?", (old,))  # noqa: S608
+            with self._choices_lock:
+                for seen in (self._choices or {}, self._choices_new):
+                    seen.get("client", set()).discard(old)
+                self._choices_new["client"].add(new)
         self.audit(actor, "client.update", str(client_id), fields)
 
     def regenerate_client_key(self, client_id: int, actor: str) -> str:
@@ -1686,6 +1702,12 @@ class Store:
                 when = time.gmtime(row["ts"])
                 for table, slot, fmt in (("usage_daily", "day", "%Y-%m-%d"), ("usage_hourly", "hour", HOUR_FORMAT)):
                     db.execute(_ADD_USAGE.format(table=table, slot=slot), (time.strftime(fmt, when), *counts))
+        if keep_rows:  # once they're written: a scan that began before sees them, or they're added to it here
+            with self._choices_lock:
+                for row in rows:
+                    for column in CHOICE_COLUMNS:
+                        if isinstance(value := row.get(column), str) and value:
+                            self._choices_new[column].add(value)
 
     def request_family(self, request_id: str) -> list[sqlite3.Row]:
         """A request and the ones QueueRouter made for it (council members and judge, orchestrator calls),
@@ -1749,22 +1771,48 @@ class Store:
             (since,),
         )
 
+    def _scan_choices(self) -> None:
+        """Reads the filters' choices from the whole table: one pass, on a connection of its own, so that neither
+        requests nor the admin pages wait behind it (it takes seconds on a long log)."""
+        with self._choices_scan:
+            with self._choices_lock:
+                if self._choices is not None and not self._choices_stale:
+                    return  # another call scanned while this one waited
+                self._choices_new = {key: set() for key in CHOICE_COLUMNS}  # what's written from here on
+                self._choices_stale = False
+            found: dict[str, set[str]] = {key: set() for key in CHOICE_COLUMNS}
+            db = sqlite3.connect(self.path)
+            try:
+                db.execute("PRAGMA query_only=ON")
+                db.execute("PRAGMA busy_timeout=5000")
+                for row in db.execute(f"SELECT DISTINCT {', '.join(CHOICE_COLUMNS)} FROM requests"):  # noqa: S608
+                    for column, value in zip(CHOICE_COLUMNS, row, strict=True):
+                        if value:
+                            found[column].add(value)
+            finally:
+                db.close()
+            with self._choices_lock:
+                self._choices = found
+                self._choices_at = time.monotonic()
+
     def request_filter_values(self) -> dict[str, list[str]]:
-        values = {
-            column: [
-                r[0]
-                for r in self.read(
-                    f"SELECT DISTINCT {column} FROM requests WHERE {column} IS NOT NULL ORDER BY {column} LIMIT 200"
-                )
-            ]  # noqa: S608
-            for column in ("client", "outcome", "model", "upstream")
-        }
-        for column, key in (("tags", "tag"), ("answer_tags", "answer_tag")):
-            tags: set[str] = set()
-            sql = f"SELECT DISTINCT {column} FROM requests WHERE {column} IS NOT NULL AND {column} != '' LIMIT 500"  # noqa: S608
-            for (text,) in self.read(sql):
-                tags.update(t for t in text.split(",") if t)
-            values[key] = sorted(tags)
+        """What the Requests page's filters can choose from. The table is read once after a start (the first call
+        waits for that); from then on the answer is at hand, kept current as requests are written, and read again
+        behind the scenes, at most once a day, after old rows were removed."""
+        with self._choices_lock:
+            first = self._choices is None
+            again = self._choices_stale and time.monotonic() - self._choices_at > CHOICES_RESCAN_S
+        if first:
+            self._scan_choices()
+        elif again and not self._choices_scan.locked():
+            threading.Thread(target=self._scan_choices, name="filter-choices", daemon=True).start()
+        values: dict[str, list[str]] = {}
+        with self._choices_lock:
+            for column in CHOICE_COLUMNS:
+                seen = (self._choices or {}).get(column, set()) | self._choices_new[column]
+                if column in CHOICE_KEYS:  # a row's tags, comma-separated
+                    seen = {tag for text in seen for tag in text.split(",") if tag}
+                values[CHOICE_KEYS.get(column, column)] = sorted(seen)[:CHOICES_MAX]
         return values
 
     def usage_month(self, month: str) -> list[sqlite3.Row]:
@@ -1966,6 +2014,9 @@ class Store:
     def prune_requests(self, keep_days: int) -> int:
         with self.tx() as db:
             cur = db.execute("DELETE FROM requests WHERE ts < ?", (time.time() - keep_days * 86_400,))
+        if cur.rowcount:
+            with self._choices_lock:
+                self._choices_stale = True  # a filter may now offer something no row has
         return cur.rowcount
 
     # -- aliases -------------------------------------------------------------------------

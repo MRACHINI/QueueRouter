@@ -1196,6 +1196,8 @@ function liveRequests(root) {
     }
   };
   const nearBottom = () => note.getBoundingClientRect().top < window.innerHeight + 400;
+  const OLDER_RETRY_MS = 2000;
+  let olderWait = OLDER_RETRY_MS;
   const loadOlder = async () => {
     if (!hasOlder || loadingOlder || !rows.length) return;
     loadingOlder = true;
@@ -1219,11 +1221,19 @@ function liveRequests(root) {
         }
       }
     } catch (_) {
-      /* tried again the next time the end of the list comes into view */
+      /* tried again below */
     }
     loadingOlder = false;
     updateNote();
-    if (more && nearBottom()) loadOlder();
+    if (more) {
+      olderWait = OLDER_RETRY_MS;
+      if (nearBottom()) loadOlder();
+    } else if (mine === generation) { // it failed: again while the end of the list is in view, less and less often
+      setTimeout(() => {
+        if (nearBottom()) loadOlder();
+      }, olderWait);
+      olderWait = Math.min(olderWait * 2, 30000);
+    }
   };
   new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting) loadOlder();
