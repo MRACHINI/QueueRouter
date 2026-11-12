@@ -8,7 +8,7 @@ import time
 import httpx
 import pytest
 
-from app.pricing import PriceCatalog, model_costs, request_costs, summarize_usage, token_costs
+from app.pricing import PriceCatalog, alias_costs, model_costs, request_costs, summarize_usage, token_costs
 from tests.test_admin import OWNER, csrf_of, login
 from tests.test_usage import chat, flushed
 
@@ -22,11 +22,12 @@ def catalog():
     return prices
 
 
-def usage_row(model, prompt, cached, completion, day="2026-10-31", client="ali"):
+def usage_row(model, prompt, cached, completion, day="2026-10-31", client="ali", alias=""):
     return {
         "day": day,
         "client": client,
         "model": model,
+        "alias": alias,
         "upstream": "syn",
         "requests": 1,
         "errors": 0,
@@ -80,6 +81,24 @@ def test_models_dearest_first_with_a_total(catalog):
     clients = models[0]["clients"]
     assert [(c["client"], c["requests"], c["share"]) for c in clients] == [("bilal", 1, 0.75), ("ali", 1, 0.25)]
     assert models[1]["clients"][0]["share"] is None  # no price: no share
+
+
+def test_aliases_with_the_models_that_worked_for_them(catalog):
+    rows = [
+        usage_row("glm-4.7", 1_000_000, 0, 0, alias="smart"),  # its own model
+        usage_row("tagger-model", 500, 0, 5, alias="smart"),  # a call made for its requests
+        usage_row("glm-4.7", 3_000_000, 0, 0, alias="glm-4.7", client="bilal"),  # the model, asked for by name
+        usage_row("glm-4.7", 9_000_000, 0, 0),  # from before aliases were recorded
+    ]
+    aliases = alias_costs(rows, {}, catalog)
+    assert [(a["alias"], a["requests"]) for a in aliases] == [("glm-4.7", 1), ("smart", 2), ("", 1)]
+    smart = aliases[1]
+    assert smart["cost"] == pytest.approx(1) and not smart["priced"]  # the tagger's model has no price
+    assert [(m["model"], m["requests"], m["share"]) for m in smart["models"]] == [
+        ("glm-4.7", 1, 1.0),
+        ("tagger-model", 1, 0.0),
+    ]
+    assert sum(a["cost"] for a in aliases) == pytest.approx(model_costs(rows, {}, catalog)[1]["cost"])
 
 
 def test_clients_per_day_or_over_the_whole_period(catalog):

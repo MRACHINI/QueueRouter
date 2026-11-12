@@ -21,8 +21,9 @@ import sys
 import time
 import urllib.parse
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 import httpx
@@ -123,6 +124,23 @@ from .upstream import (
 
 log = logging.getLogger("queuerouter")
 
+# What the request being served was made for: the alias (or model) its app asked for. Set where an app's request is
+# let in; the calls QueueRouter makes for it (taggers, summaries, council members, prompt edits) run in its context,
+# or one copied from it (their tasks, the streamed answer), and are counted under that name (requests.alias, Usage).
+MADE_FOR: ContextVar[str | None] = ContextVar("made_for", default=None)
+
+
+@contextlib.contextmanager
+def made_for(name: str | None) -> Iterator[None]:
+    """QueueRouter's own calls in this block count under ``name`` (work done outside a request: an idle summary, a
+    rule maker); None: under their own model's name."""
+    token = MADE_FOR.set(name)
+    try:
+        yield
+    finally:
+        MADE_FOR.reset(token)
+
+
 HEALTH_INTERVAL_S = 30
 IDLE_AFTER_S = 45  # a conversation this quiet gets its summary updated in the background (summarise mode)
 # Headers of the original request not passed on to the requests QueueRouter makes for it.
@@ -202,6 +220,7 @@ class RequestLog:
             "priority": None,
             "session": None,
             "model": None,
+            "alias": None,  # a call of QueueRouter's own: what the request it works for asked for (MADE_FOR)
             "upstream": None,
             "stream": False,
             "status": None,
@@ -822,7 +841,8 @@ def create_app(
             model = alias.learn_model or (first.model if first else "") or alias.target_model
             how = taggers_mod.describe(alias.tag_chain, snapshot.taggers, snapshot.tags)
             payload = rule_maker_mod.payload(model, how, rules, samples)
-            body = await internal_completion(client, payload, "low", tag="check", role="rule maker")
+            with made_for(alias.name):
+                body = await internal_completion(client, payload, "low", tag="check", role="rule maker")
             answer = edits_mod.reply_text(body) if body is not None else None
             proposals = rule_maker_mod.parse(answer) if answer else None
             if proposals is None:
@@ -1354,6 +1374,7 @@ def create_app(
                     "ts": time.time() - elapsed,
                     "priority": f["priority"],
                     "requested_model": f["model"],
+                    "alias": f.get("alias"),
                     "target_model": f["target_model"],
                     "tags": f["tags"],
                     "compaction": f["compaction"],
@@ -2634,8 +2655,8 @@ def create_app(
         prompt, completion, cached, written = tokens
         row = RequestLog(f"qr-{uuid.uuid4().hex[:12]}", main.fields["method"], main.fields["path"], main.fields["ip"])
         row.started = main.started + (time.monotonic() - answered)  # its total time ends when it had all come
-        kept = ("client", "priority", "session", "model", "upstream", "stream", "position", "queue_ms", "retries")
-        kept += ("tags", "run", "user_agent", "sent_user_agent", "client_headers", "headers_ms")
+        kept = ("client", "priority", "session", "model", "alias", "upstream", "stream", "position", "queue_ms")
+        kept += ("retries", "tags", "run", "user_agent", "sent_user_agent", "client_headers", "headers_ms")
         row.fields.update({key: main.fields[key] for key in kept})
         row.fields.update(
             target_model=step.model,
@@ -3160,7 +3181,8 @@ def create_app(
         client = next((c for c in snapshot.clients.values() if c.name == client_name), None)
         if client is None:
             return None, f"there's no enabled client named {client_name}"
-        body = await internal_completion(client, payload, "normal", tag="check", role="tagger: try it")
+        with made_for(None):  # for no request: it counts under its own model
+            body = await internal_completion(client, payload, "normal", tag="check", role="tagger: try it")
         return body, "" if body is not None else "its request failed (the Requests page says why)"
 
     app.state.try_tagger = try_tagger
@@ -3941,6 +3963,7 @@ def create_app(
         step_model: str
         origin: Mapping[str, str] | None = None
         seen: float = dataclasses.field(default_factory=time.monotonic)
+        made_for: str | None = dataclasses.field(default_factory=MADE_FOR.get)  # what its request asked for
 
     idle_watch: dict[str, IdleWatch] = {}
 
@@ -3979,18 +4002,19 @@ def create_app(
                     continue
                 idle_watch.pop(key, None)  # once per quiet period
                 try:
-                    result = await summarise_request(
-                        watch.client,
-                        watch.session,
-                        watch.payload,
-                        watch.context,
-                        watch.output,
-                        watch.alias,
-                        watch.step_model,
-                        "low",
-                        compaction_mod.IDLE_START_AT,
-                        origin=watch.origin,
-                    )
+                    with made_for(watch.made_for):
+                        result = await summarise_request(
+                            watch.client,
+                            watch.session,
+                            watch.payload,
+                            watch.context,
+                            watch.output,
+                            watch.alias,
+                            watch.step_model,
+                            "low",
+                            compaction_mod.IDLE_START_AT,
+                            origin=watch.origin,
+                        )
                     if result is not None and not result.reused:
                         log.info(
                             json.dumps(
@@ -4706,6 +4730,9 @@ def create_app(
         # client's model list and queue limits apply to that request, not to the models working on it
         if not internal and not via and (refusal := policy_refusal(client, asked or model, allowed_by)):
             return refused(refusal)
+        if not internal:  # an app's request: what QueueRouter does for it from here on counts under what it asked for
+            asked_for = via[0] if via else model
+            MADE_FOR.set(asked_for if isinstance(asked_for, str) and asked_for else None)
         # The chain: the requested model, or the alias's model then its fallbacks (from ``start``). Another alias in
         # it is forwarded to (Hop): the request is served as one for that alias, its whole way (council,
         # orchestrator, answer check, its fallbacks), and comes back here for what follows it if that runs out.
@@ -4997,6 +5024,7 @@ def create_app(
             session=session and session[:8],
             position=position,
             model=via[0] if via else model,  # forwarded: still the name the app asked for
+            alias=MADE_FOR.get() if internal else None,  # QueueRouter's own call: the request it works for
             via=" → ".join((*via, alias.name))[:300] if via and alias else None,
             target_model=target_model if alias_used else None,
             compaction=steps[0].compaction,

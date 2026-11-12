@@ -70,6 +70,7 @@ from ..pricing import (
     DEFAULT_MIX,
     MIX_DAYS,
     PriceCatalog,
+    alias_costs,
     model_costs,
     request_costs,
     resolve,
@@ -1698,6 +1699,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 },
                 "models": models,
                 "model_total": model_total,
+                "aliases": alias_costs(stored, overrides, ctx.prices, names),
                 "catalog_loaded": bool(ctx.prices.prices),
                 "charts": usage_charts(usage_by(stored, overrides, ctx.prices, per, names), slots, per),
             }

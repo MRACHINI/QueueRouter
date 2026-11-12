@@ -493,6 +493,28 @@ def model_costs(rows, overrides: dict, catalog: PriceCatalog, names: ModelNames 
     return out, total
 
 
+def alias_costs(rows, overrides: dict, catalog: PriceCatalog, names: ModelNames | None = None) -> list[dict]:
+    """Usage rows -> one row per ``alias`` (what apps asked for: an alias, or a model asked for by its own name),
+    dearest first, each with the ``models`` that worked for it: its own, its fallbacks, and those of the calls
+    QueueRouter made for its requests (taggers, summaries, council members, prompt edits). Usage from before this
+    was recorded has none (""): one row, last."""
+    names = names or ModelNames()
+    book = _PriceBook(overrides, catalog, names)
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        model, upstream = row["model"], row["upstream"]
+        costs = book.costs(row)
+        asked = grouped.setdefault(row["alias"], {"alias": row["alias"], "models": {}, **_empty_usage()})
+        fresh = {"model": model, "upstream": upstream, "label": names.label(model, upstream)}
+        _add_usage(asked["models"].setdefault((upstream, model), {**fresh, **_empty_usage()}), row, costs)
+        _add_usage(asked, row, costs)
+    out = _dearest(grouped.values(), "alias")
+    out.sort(key=lambda r: r["alias"] == "")  # stable: the dearest first, what has no alias after them
+    for asked in out:
+        asked["models"] = _with_shares(asked["models"], asked, "label")
+    return out
+
+
 def usage_by(rows, overrides: dict, catalog: PriceCatalog, slot: str, names: ModelNames | None = None) -> dict:
     """Usage rows -> their totals with costs per ``row[slot]`` (an hour or a day: the charts)."""
     names = names or ModelNames()

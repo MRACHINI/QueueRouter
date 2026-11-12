@@ -87,6 +87,39 @@ included — <a href="/admin/models#pricing">set a price</a>.</p>
 </table>
 </div>
 
+<h2>Cost per alias (UTC)</h2>
+<p class="small muted">What each alias cost with everything done for its requests: its model, its fallbacks, and the
+calls QueueRouter made for them (taggers, summaries, council members, prompt edits). A model asked for by its own name
+is listed under that name.</p>
+<div class="table-wrap">
+<table class="cards dense">
+  <thead><tr><th>Alias</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">In</th><th class="num">Cached</th><th class="num">Out</th><th class="num">Total</th></tr></thead>
+  <tbody>
+  {% for a in aliases %}
+  {% set key = "alias:" ~ a.alias %}
+  <tr class="opens" data-key="{{ key }}">
+    <td data-label="Alias" class="wrap-any"><button type="button" class="expand" aria-expanded="false" title="Show the models that worked for it">{% if a.alias %}{{ a.alias }}{% else %}Not recorded (before 0.81.0){% endif %}</button></td>
+    {{ counts(a) }}
+  </tr>
+  {% for m in a.models %}
+  <tr class="part" data-of="{{ key }}" hidden>
+    <td data-label="Model" class="wrap-any indent">{{ m.label }}</td>
+    {{ counts(m) }}
+  </tr>
+  {% endfor %}
+  {% else %}
+  <tr><td colspan="7" class="muted">No usage recorded in this period.</td></tr>
+  {% endfor %}
+  {% if aliases %}
+  <tr class="total">
+    <td data-label="Alias">Total</td>
+    {{ counts(model_total) }}
+  </tr>
+  {% endif %}
+  </tbody>
+</table>
+</div>
+
 <div class="row between wrap">
   <h2>{% if merged %}Per client, whole period (UTC){% else %}Per day (UTC){% endif %}</h2>
   <div class="seg" role="group" aria-label="Group this table">

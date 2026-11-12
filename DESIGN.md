@@ -509,7 +509,8 @@ non-stream in flight → upstream call cancelled.
   pages. A council has
   no model of its own: its row adds up the calls made for it, which keep their own rows and alone count as usage.
 - ArliAI is flat-rate, so cost is optional — useful for pay-per-token upstreams added later.
-- Nightly rollup into `usage_daily`; UI charts per client / model / upstream / day.
+- Nightly rollup into `usage_daily`; UI charts per client / model / upstream / day. Since v0.81.0 also per alias: what
+  each request was made for, the calls QueueRouter made for it included (see the v0.81.0 note).
 - Rate limits (TPM/TPD) and quotas read the same counters.
 
 ---
@@ -2221,6 +2222,21 @@ now says on failure what the request's notes, calls and timing were; and run_tag
 tagger request it stopped for being late (it counts as "took over N s" however the request ended), and a tagger
 request ending with an error of its own counts as failed (tagger_error in the log) where it was raised and would
 have counted as the answering model's error. Neither is known to be the cause.
+
+v0.81.0: cost per alias. Every request row and every usage total now says what it was made for (`alias`): the alias,
+or the model, its app asked for (the first one, when forwarded from alias to alias). The calls QueueRouter makes for
+a request (taggers and spot checks, summaries, council members and judge, orchestrator calls, prompt edits) and the
+answers it discarded (a failed check, a refusal) carry the same name, so an alias's own model, its fallbacks and
+all of that add up under it. How it gets there: a context variable (MADE_FOR in app/main.py) set where an app's
+request is let in; QueueRouter's own calls run in that context or a copy of it (their tasks, the streamed answer),
+so no call site passes it and a new kind of call can't forget to. Work done outside a request names it itself: an
+idle summary (kept with the conversation it watches), a rule maker (its alias); the Taggers page's "Try it" counts
+under its own model. `usage_daily` and `usage_hourly` were rebuilt with `alias` in their key (migration 49); usage
+from before has none and shows as one "Not recorded (before 0.81.0)" line, since totals can't be split afterwards.
+Usage page: a "Cost per alias" table, each alias opening to the models that worked for it; a model asked for by its
+own name is listed under that name, so the table's total is the page's total. Requests page: the model filter also
+shows the calls made for the requests that asked for it (rows written before 0.81 have no `alias`: for them it
+filters as before).
 
 ### Later (agreed, not scheduled)
 

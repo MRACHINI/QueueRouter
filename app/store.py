@@ -732,6 +732,52 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE requests ADD COLUMN thinking TEXT;
     """,
+    # 49: what a request was made for: the alias (or model) its app asked for, on the request itself and on every
+    # call QueueRouter made for it (taggers, summaries, council members, prompt edits), and in the usage totals, so
+    # an alias's whole cost adds up. Usage from before has none (''): the tables are rebuilt with it in their key.
+    """
+    ALTER TABLE requests ADD COLUMN alias TEXT;
+    CREATE TABLE usage_daily_new (
+        day TEXT NOT NULL,
+        client TEXT NOT NULL,
+        model TEXT NOT NULL,
+        upstream TEXT NOT NULL,
+        alias TEXT NOT NULL DEFAULT '',
+        requests INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, client, model, upstream, alias)
+    );
+    INSERT INTO usage_daily_new (day, client, model, upstream, requests, errors, prompt_tokens, completion_tokens,
+            cached_tokens, cache_write_tokens)
+        SELECT day, client, model, upstream, requests, errors, prompt_tokens, completion_tokens, cached_tokens,
+            cache_write_tokens FROM usage_daily;
+    DROP TABLE usage_daily;
+    ALTER TABLE usage_daily_new RENAME TO usage_daily;
+    CREATE TABLE usage_hourly_new (
+        hour TEXT NOT NULL,
+        client TEXT NOT NULL,
+        model TEXT NOT NULL,
+        upstream TEXT NOT NULL,
+        alias TEXT NOT NULL DEFAULT '',
+        requests INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (hour, client, model, upstream, alias)
+    );
+    INSERT INTO usage_hourly_new (hour, client, model, upstream, requests, errors, prompt_tokens, completion_tokens,
+            cached_tokens, cache_write_tokens)
+        SELECT hour, client, model, upstream, requests, errors, prompt_tokens, completion_tokens, cached_tokens,
+            cache_write_tokens FROM usage_hourly;
+    DROP TABLE usage_hourly;
+    ALTER TABLE usage_hourly_new RENAME TO usage_hourly;
+    """,
 ]
 CHECKERS_CONVERTED = "checkers_converted"  # meta: each alias's checker model became a tagger (_convert_checkers)
 CHECKER_TAGS = (  # what a converted checker gives: exactly one of these
@@ -805,6 +851,7 @@ REQUEST_COLUMNS = (
     "edits",
     "answer_tags",
     "thinking",
+    "alias",
 )
 
 
@@ -821,9 +868,9 @@ def storable(value: object) -> object:
 _UPSERT = "INSERT INTO {table} (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
 # a finished request added to the daily or hourly usage totals
 _ADD_USAGE = (
-    "INSERT INTO {table} ({slot}, client, model, upstream, requests, errors, prompt_tokens, completion_tokens, "
-    "cached_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?) "
-    "ON CONFLICT({slot}, client, model, upstream) DO UPDATE SET requests = requests + 1, "
+    "INSERT INTO {table} ({slot}, client, model, upstream, alias, requests, errors, prompt_tokens, "
+    "completion_tokens, cached_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?) "
+    "ON CONFLICT({slot}, client, model, upstream, alias) DO UPDATE SET requests = requests + 1, "
     "errors = errors + excluded.errors, prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
     "completion_tokens = completion_tokens + excluded.completion_tokens, "
     "cached_tokens = cached_tokens + excluded.cached_tokens, "
@@ -1584,12 +1631,12 @@ class Store:
                 # its history too (Requests, Usage, monthly budgets); usage rows merge with any the name already has
                 db.execute("UPDATE requests SET client = ? WHERE client = ?", (new, old))
                 for table, slot in (("usage_daily", "day"), ("usage_hourly", "hour")):
-                    keys = (slot, "client", "model", "upstream")
+                    keys = (slot, "client", "model", "upstream", "alias")
                     counts = [r["name"] for r in db.execute(f"PRAGMA table_info({table})") if r["name"] not in keys]
                     db.execute(
                         f"INSERT INTO {table} ({', '.join(keys + tuple(counts))}) "  # noqa: S608
-                        f"SELECT {slot}, ?, model, upstream, {', '.join(counts)} FROM {table} WHERE client = ? "
-                        f"ON CONFLICT({slot}, client, model, upstream) DO UPDATE SET "
+                        f"SELECT {slot}, ?, model, upstream, alias, {', '.join(counts)} FROM {table} WHERE client = ? "
+                        f"ON CONFLICT({slot}, client, model, upstream, alias) DO UPDATE SET "
                         + ", ".join(f"{c} = {c} + excluded.{c}" for c in counts),
                         (new, old),
                     )
@@ -1679,6 +1726,8 @@ class Store:
             return
         placeholders = ", ".join("?" for _ in REQUEST_COLUMNS)
         rows = [{k: storable(v) for k, v in row.items()} for row in rows]  # one odd string mustn't lose them all
+        for row in rows:  # what it was made for: said by a call of QueueRouter's own, else what its app asked for
+            row["alias"] = row.get("alias") or row.get("model") or None
         with self.tx() as db:
             for row in rows:
                 if keep_rows:
@@ -1693,6 +1742,7 @@ class Store:
                     row.get("client") or "-",
                     row.get("target_model") or row.get("model") or "-",
                     row.get("upstream") or "-",
+                    row["alias"] or "-",
                     0 if row.get("outcome") == "done" else 1,
                     row.get("prompt_tokens") or 0,
                     row.get("completion_tokens") or 0,
@@ -1731,10 +1781,13 @@ class Store:
         if before is not None:
             clauses.append("ts <= ? AND (ts < ? OR id < ?)")
             params.extend((before[0], before[0], before[1]))
-        for column in ("client", "outcome", "model", "upstream"):
+        for column in ("client", "outcome", "upstream"):
             if value := filters.get(column):
                 clauses.append(f"{column} = ?")
                 params.append(value)
+        if value := filters.get("model"):  # asked for by its app, or a call QueueRouter made for such a request
+            clauses.append("(model = ? OR alias = ?)")
+            params.extend((value, value))
         for column, key in (("tags", "tag"), ("answer_tags", "answer_tag")):
             if tag := filters.get(key):
                 clauses.append(f"(',' || {column} || ',') LIKE ?")
@@ -1826,7 +1879,8 @@ class Store:
         )
 
     def usage_between(self, start: float, end: float) -> list[sqlite3.Row]:
-        """Usage per hour, client, model and upstream from ``start`` to ``end`` (UTC seconds, ``end`` not included;
+        """Usage per hour, client, model, upstream and what it was for (``alias``: the alias or model its app asked
+        for, '' before 0.81) from ``start`` to ``end`` (UTC seconds, ``end`` not included;
         cost is computed per model and upstream, then grouped). Days before hourly totals began
         (hourly_usage_from) have only daily ones: their rows have no ``hour``, and count the whole day."""
         first = self.hourly_usage_from()
@@ -1834,9 +1888,9 @@ class Store:
         days = [time.strftime("%Y-%m-%d", time.gmtime(t)) for t in (start, end - 1)]
         counts = "requests, errors, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens"
         return self.read(
-            f"SELECT hour, substr(hour, 1, 10) AS day, client, model, upstream, {counts} FROM usage_hourly "  # noqa: S608
-            "WHERE hour >= ? AND hour < ? AND hour >= ? UNION ALL "
-            f"SELECT NULL, day, client, model, upstream, {counts} FROM usage_daily "
+            f"SELECT hour, substr(hour, 1, 10) AS day, client, model, upstream, alias, {counts} "  # noqa: S608
+            "FROM usage_hourly WHERE hour >= ? AND hour < ? AND hour >= ? UNION ALL "
+            f"SELECT NULL, day, client, model, upstream, alias, {counts} FROM usage_daily "
             "WHERE day >= ? AND day <= ? AND day < ? ORDER BY day DESC, client, model, upstream",
             (*hours, first, *days, first),
         )

@@ -964,7 +964,7 @@ function liveRequests(root) {
     !want("outcome") &&
     !want("answer_tag") && // a running request's answers aren't tagged yet
     (!want("client") || r.client === want("client")) &&
-    (!want("model") || r.requested_model === want("model") || r.target_model === want("model")) &&
+    (!want("model") || [r.requested_model, r.target_model, r.alias].includes(want("model"))) &&
     (!want("upstream") || r.upstream === want("upstream")) &&
     (!want("tag") || (r.tags || "").split(",").includes(want("tag")));
   const running = new Map(); // id -> { tr, signature, r, tick: the cell that counts up }

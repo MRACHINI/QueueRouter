@@ -213,6 +213,7 @@ async def test_members_carry_the_apps_identity_and_their_role(make_stack):
         helpers = [row for row in rows if row["role"]]
         assert sorted(row["role"] for row in helpers) == ["council judge", "council member 1/2", "council member 2/2"]
         assert all(row["parent"] == council["id"] and row["user_agent"] == "opencode/2.1.4" for row in helpers)
+        assert all(row["alias"] == "team" for row in (council, *helpers))  # all under what the app asked for
         assert all("x-opencode-session-id" in (row["client_headers"] or "") for row in helpers)
         listed = (await c.get("/admin/api/requests")).json()["rows"]
         assert any(r["parent"] == council["id"] and r["role"] == "council member 1/2" for r in listed)

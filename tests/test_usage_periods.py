@@ -9,7 +9,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.admin import periods
-from app.store import _ADD_USAGE, HOURLY_USAGE, MIGRATIONS, Store
+from app.store import HOURLY_USAGE, MIGRATIONS, Store
 from tests.test_admin import OWNER, login
 
 NOW = datetime(2026, 11, 6, 14, 25, tzinfo=UTC).timestamp()
@@ -58,6 +58,16 @@ def test_a_custom_period():
     assert periods.resolve("24h", now=NOW).text(NOW) == "Since 2026-11-05 15:00 UTC"
 
 
+# how a finished request was added to the daily totals before they said what it was made for (0.81)
+OLD_ADD_USAGE = (
+    "INSERT INTO usage_daily (day, client, model, upstream, requests, errors, prompt_tokens, completion_tokens, "
+    "cached_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?) "
+    "ON CONFLICT(day, client, model, upstream) DO UPDATE SET requests = requests + 1, "
+    "errors = errors + excluded.errors, prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
+    "completion_tokens = completion_tokens + excluded.completion_tokens"
+)
+
+
 def old_store(tmp_path) -> Store:
     store = Store(str(tmp_path / "old.db"), Fernet(Fernet.generate_key()))
     for version, script in enumerate(MIGRATIONS[: HOURLY_USAGE - 1], 1):
@@ -77,7 +87,7 @@ def used(store, rid, ts, logged=True, outcome="done", council=None, tokens=10, c
     if outcome != "refused" and not council:
         day = time.strftime("%Y-%m-%d", time.gmtime(ts))
         counts = (client, "m", "up", 0 if outcome == "done" else 1, tokens, 1, 0, 0)
-        store._db.execute(_ADD_USAGE.format(table="usage_daily", slot="day"), (day, *counts))
+        store._db.execute(OLD_ADD_USAGE, (day, *counts))
 
 
 def test_the_upgrade_fills_hours_for_the_days_the_log_holds(tmp_path):
@@ -94,7 +104,7 @@ def test_the_upgrade_fills_hours_for_the_days_the_log_holds(tmp_path):
     store.migrate()
     assert store.schema_version() == len(MIGRATIONS)
     assert store.hourly_usage_from() == yesterday  # the day before didn't match: whole days up to there
-    hours = {(r["hour"], r["client"]): tuple(r)[4:] for r in store.query("SELECT * FROM usage_hourly")}
+    hours = {(r["hour"], r["client"]): tuple(r)[5:] for r in store.query("SELECT * FROM usage_hourly")}
     assert hours == {
         (f"{today}T00", "ali"): (1, 0, 10, 1, 0, 0),
         (f"{today}T00", "bilal"): (1, 1, 10, 1, 0, 0),
@@ -110,6 +120,36 @@ def test_the_upgrade_fills_hours_for_the_days_the_log_holds(tmp_path):
 
 def finished(rid, ts):
     return {"id": rid, "ts": ts, "client": "ali", "model": "m", "stream": 0, "retries": 0, "outcome": "done"}
+
+
+def test_usage_from_before_it_said_what_it_was_for_is_kept(tmp_path):
+    """The upgrade to 0.81 rebuilds the usage totals with what each was made for: older ones stay, with none; from
+    then on a request counts under what its app asked for, a call of QueueRouter's own under what it was made for."""
+    store = Store(str(tmp_path / "old.db"), Fernet(Fernet.generate_key()))
+    before = next(i for i, script in enumerate(MIGRATIONS) if "usage_daily_new" in script)
+    for version, script in enumerate(MIGRATIONS[:before], 1):
+        store._db.executescript(f"BEGIN;\n{script}\nPRAGMA user_version={version};\nCOMMIT;")
+    now = time.time()
+    day, hour = time.strftime("%Y-%m-%d", time.gmtime(now)), time.strftime("%Y-%m-%dT%H", time.gmtime(now))
+    store._db.execute(OLD_ADD_USAGE, (day, "ali", "m", "up", 0, 10, 1, 0, 0))
+    hourly = OLD_ADD_USAGE.replace("day", "hour").replace("usage_daily", "usage_hourly")
+    store._db.execute(hourly, (hour, "ali", "m", "up", 0, 10, 1, 0, 0))
+    store.migrate()
+    assert store.schema_version() == len(MIGRATIONS)
+    for table in ("usage_daily", "usage_hourly"):
+        rows = store.query(f"SELECT client, model, upstream, alias, requests, prompt_tokens FROM {table}")
+        assert [tuple(r) for r in rows] == [("ali", "m", "up", "", 1, 10)]
+    call = {**finished("call", now), "model": "tagger-model", "alias": "smart", "parent": "main"}
+    store.record_requests([{**finished("main", now), "model": "smart", "target_model": "m"}, call])
+    store.record_requests([{**finished("again", now), "model": "smart", "target_model": "m"}])
+    for table in ("usage_daily", "usage_hourly"):
+        rows = store.query(f"SELECT alias, model, requests FROM {table} ORDER BY alias, model")
+        assert [tuple(r) for r in rows] == [("", "m", 1), ("smart", "m", 2), ("smart", "tagger-model", 1)]
+    kept = store.query("SELECT id, alias FROM requests ORDER BY id")
+    assert [tuple(r) for r in kept] == [("again", "smart"), ("call", "smart"), ("main", "smart")]
+    # the Requests page's model filter: the requests that asked for it, and the calls made for them
+    assert {r["id"] for r in store.list_requests(model="smart")} == {"again", "call", "main"}
+    assert {r["id"] for r in store.list_requests(model="tagger-model")} == {"call"}
 
 
 def test_a_log_that_holds_everything_needs_no_whole_days(tmp_path):

@@ -312,3 +312,38 @@ async def test_taggers_need_a_fallback(make_stack):
         assert alias.tag_chain[0].lines[0].do == "fail"
         edit = (await c.get(f"/admin/aliases/{alias.id}")).text
         assert "Taggers, in order" in edit and 'name="s0_l0_tags" value="bad"' in edit
+
+
+async def test_everything_done_for_an_alias_counts_under_it(make_stack):
+    """An alias's own model, the tagger's call for its answer and the model it moved on to are all usage of the
+    alias; a model asked for by its own name counts under that name."""
+    from tests.conftest import eventually
+
+    stack = make_stack(bootstrap=OWNER)
+    store = stack.app.state.store
+    words(stack, ["bad ", "answer"])
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        await add_checked(c, store)
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat())
+        assert r.status_code == 200 and r.headers["x-queuerouter-model"] == "mock-model"
+        main, calls = await entries(stack)
+        assert {e["role"] for e in calls} == {"tagger: checker", "failed answer check"}
+        r = await c.post("/v1/chat/completions", headers=stack.headers, json=chat(model="mock-model"))
+        assert r.status_code == 200
+
+        def usage() -> dict:
+            rows = store.query("SELECT alias, model, SUM(requests) AS n FROM usage_daily GROUP BY 1, 2")
+            return {(row["alias"], row["model"]): row["n"] for row in rows}
+
+        expected = {("smart", "strict-model"): 1, ("smart", "mock-model"): 2, ("mock-model", "mock-model"): 1}
+        await eventually(lambda: usage() == expected, timeout=10)
+        assert usage() == expected
+        kept = {row["id"]: row["alias"] for row in store.query("SELECT id, alias FROM requests")}
+        assert [kept[e["id"]] for e in (main, *calls)] == ["smart"] * 3 and len(kept) == 4
+        # the Requests page's model filter shows an alias's requests with the calls made for them
+        rows = (await c.get("/admin/api/requests?model=smart")).json()["rows"]
+        assert {row["id"] for row in rows} == {main["id"], *(e["id"] for e in calls)}
+        body = (await c.get("/admin/usage/body")).text
+        assert "Cost per alias" in body and 'data-key="alias:smart"' in body and 'data-key="alias:mock-model"' in body
+        assert body.count('data-of="alias:smart"') == 2 and "Not recorded" not in body  # its two models

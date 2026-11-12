@@ -142,6 +142,8 @@ async def test_idle_update(make_stack, monkeypatch):
                 break
             await asyncio.sleep(0.1)
         assert any(r["priority"] == "low" and "compaction" in (r["tags"] or "") for r in rows)  # in the background
+        # each summary counts under the alias whose request it was written for, the idle one too
+        assert all(r["alias"] == "sum" for r in rows if "compaction" in (r["tags"] or ""))
         label, sent = await send(c, stack, 16)  # the next message finds the updated summary ready
         assert label.endswith("(reused)")
         assert sent["messages"][1]["content"].endswith(f"summary {len(stack.mock['summary_inputs'])}")

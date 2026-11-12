@@ -720,6 +720,7 @@ async def test_a_rewrite_is_a_call_of_its_own_and_kept(make_stack):
         assert stack.mock["rewrite_inputs"] == [PROMPT]  # once: the second from what was kept
         calls = [e for e in stack.app.state.stats.recent if e.get("role") == "prompt edit: tone"]
         assert len(calls) == 1 and calls[0]["parent"] and calls[0]["outcome"] == "done"
+        assert calls[0]["alias"] == "coder"  # counted under the alias it was made for
         # a model that fails: the prompt goes as it is, or the request is refused (a 500 is retried with backoff,
         # so the edit's time limit ends the wait: well under the test client's 30 s)
         csrf = csrf_of((await c.get(f"/admin/edits/{tone}")).text)
