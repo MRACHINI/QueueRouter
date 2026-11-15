@@ -27,6 +27,7 @@ other aliases: the request is forwarded to them, and each handles it its own way
       <div class="muted">{% if a.target_model in alias_names %}its providers: those of {{ a.target_model }}{% elif a.upstream_ids %}on {% for uid in a.upstream_ids %}{{ upstream_names.get(uid, uid) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}on any upstream{% endif %}</div>
       {% for n in shadowed.get(a.name, []) %}<div class="notice err small"><code>{{ n }}</code> is an alias and also a model a provider lists: here it means the alias. For the model, pick <code>{{ n }}@provider</code>.</div>{% endfor %}</td>
     <td data-label="Extras" class="small">
+      {% if a.fast %}<span class="badge" title="Its model goes to Synthetic in fast mode (counts double against the weekly quota)">fast</span>{% endif %}
       {% if a.compact != "off" %}<span class="badge" title="Conversations too big for the model are shrunk">{{ a.compact }}{% if a.compact_model %} with {{ a.compact_model }}{% endif %}</span>{% endif %}
       {% if a.virtual_context %}<span class="badge" title="Context size told to apps">{{ "{:,}".format(a.virtual_context) }} context</span>{% endif %}
       {% if a.council != "off" %}<span class="badge" title="Members: {{ a.council_members | map('model_label') | join(', ') }}">council {{ a.council }} ({{ a.council_members | length }}){% if a.council_search %} + web search{% endif %}</span>{% endif %}

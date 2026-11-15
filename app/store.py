@@ -40,6 +40,7 @@ from .answer_rules import (
 from .config import PRIORITIES, SECRET_TUNABLES, TUNABLES, ClientPolicy, Settings, parse_access_keys
 from .edits import Edit
 from .names import EVERY
+from .presets import FAST_PREFIX
 from .taggers import PICKS, Line, Tag, Tagger, chain_json, chain_of, without
 from .taggers import Step as TagStep
 
@@ -778,6 +779,11 @@ MIGRATIONS: list[str] = [
     DROP TABLE usage_hourly;
     ALTER TABLE usage_hourly_new RENAME TO usage_hourly;
     """,
+    # 50: an alias's fast mode (Synthetic's fast: prefix), and whether a request was sent that way
+    """
+    ALTER TABLE aliases ADD COLUMN fast INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE requests ADD COLUMN fast INTEGER;
+    """,
 ]
 CHECKERS_CONVERTED = "checkers_converted"  # meta: each alias's checker model became a tagger (_convert_checkers)
 CHECKER_TAGS = (  # what a converted checker gives: exactly one of these
@@ -852,6 +858,7 @@ REQUEST_COLUMNS = (
     "answer_tags",
     "thinking",
     "alias",
+    "fast",
 )
 
 
@@ -998,6 +1005,7 @@ class Alias:
     learn_model: str = ""  # the rule maker's model; blank = its first tagger's
     learn_pass: bool = False  # rules that pass answers may turn on by themselves too
     tag_chain: tuple[TagStep, ...] = ()  # its taggers, in order, and what it does with their tags (app/taggers.py)
+    fast: bool = False  # its model goes to Synthetic as fast:<model>; refused that way, it goes again as it is
 
     @property
     def checks(self) -> bool:
@@ -1738,9 +1746,10 @@ class Store:
                 if row.get("outcome") in ("refused", "forwarded") or row.get("council"):
                     continue  # turned away before any work, a council (its members and judge are usage), or forwarded
                     # to another alias (the request it was forwarded as is)
+                used = row.get("target_model") or row.get("model") or "-"
                 counts = (
                     row.get("client") or "-",
-                    row.get("target_model") or row.get("model") or "-",
+                    f"{FAST_PREFIX}{used}" if row.get("fast") else used,  # counted apart: it uses quota twice
                     row.get("upstream") or "-",
                     row["alias"] or "-",
                     0 if row.get("outcome") == "done" else 1,
@@ -2113,6 +2122,7 @@ class Store:
                 learn_model=r["learn_model"] or "",
                 learn_pass=bool(r["learn_pass"]),
                 tag_chain=chain_of(r["tag_chain"]),
+                fast=bool(r["fast"]),
             )
             for r in self.query("SELECT * FROM aliases ORDER BY name")
         ]
@@ -2153,6 +2163,7 @@ class Store:
         learn_model: str = "",
         learn_pass: bool = False,
         tag_chain: tuple[TagStep, ...] = (),
+        fast: bool = False,
     ) -> int:
         with self.tx() as db:
             cur = db.execute(
@@ -2192,9 +2203,9 @@ class Store:
             )
             db.execute(
                 "UPDATE aliases SET answer_rules = ?, check_kinds = ?, check_when = ?, spot_checks = ?, "
-                "learn_rules = ?, learn_model = ?, learn_pass = ?, tag_chain = ? WHERE id = ?",
+                "learn_rules = ?, learn_model = ?, learn_pass = ?, tag_chain = ?, fast = ? WHERE id = ?",
                 (json.dumps(list(answer_rules)), json.dumps(list(check_kinds)), check_when, spot_checks,
-                 learn_rules, learn_model, int(learn_pass), chain_json(tag_chain), cur.lastrowid),
+                 learn_rules, learn_model, int(learn_pass), chain_json(tag_chain), int(fast), cur.lastrowid),
             )  # fmt: skip
         self.audit(
             actor,
@@ -2239,6 +2250,7 @@ class Store:
             "learn_model",
             "learn_pass",
             "tag_chain",
+            "fast",
         }
         self._update("aliases", alias_id, allowed, fields)
         if fields.get("learn_rules") == "off":  # its rule maker is off: the answers kept for it go

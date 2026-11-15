@@ -29,6 +29,7 @@ import httpx
 
 from . import __version__
 from .names import EVERY, ModelNames
+from .presets import unfast
 
 log = logging.getLogger("queuerouter")
 
@@ -329,7 +330,8 @@ class _PriceBook:
     def costs(self, row) -> tuple[float, float, float] | None:
         """What a usage or request row cost: the model that answered, on the upstream that served it."""
         target = row["target_model"] if "target_model" in row.keys() else None
-        price = self.of(self.names.unpin(target or row["model"])[0], row["upstream"])
+        model, _ = unfast(target or row["model"])  # fast mode costs the same per token (it uses quota twice)
+        price = self.of(self.names.unpin(model)[0], row["upstream"])
         return token_costs(
             price, row["prompt_tokens"], row["completion_tokens"], row["cached_tokens"], row["cache_write_tokens"]
         )
@@ -400,9 +402,27 @@ def _empty_usage() -> dict:
         "cost_cached": 0.0,
         "cost_out": 0.0,
         "cost": 0.0,
+        "quota_cost": 0.0,  # what it counts against a weekly quota: Synthetic's fast mode counts double
         "priced": True,
         "unpriced_tokens": 0,
     }
+
+
+FAST_QUOTA = 2  # Synthetic: while fast, usage counts double against the weekly quota (the price per token is the same)
+
+
+def is_fast(row) -> bool:
+    """A request row sent in fast mode (its ``fast``), or a usage row of fast usage (kept as fast:<model>)."""
+    if "fast" in row.keys():
+        return bool(row["fast"])
+    return unfast(row["model"] or "")[1]
+
+
+def _label(names: ModelNames, model: str, upstream: str) -> str:
+    """A usage row's model as the tables show it: fast usage as the model with "(fast)"."""
+    base, fast = unfast(model)
+    label = names.label(base, upstream)
+    return f"{label} (fast)" if fast else label
 
 
 def _add_usage(out: dict, row, costs: tuple[float, float, float] | None) -> None:
@@ -417,6 +437,7 @@ def _add_usage(out: dict, row, costs: tuple[float, float, float] | None) -> None
         out["cost_cached"] += costs[1]
         out["cost_out"] += costs[2]
         out["cost"] += sum(costs)
+        out["quota_cost"] += sum(costs) * (FAST_QUOTA if is_fast(row) else 1)
 
 
 def _dearest(rows, name: str) -> list[dict]:
@@ -458,7 +479,7 @@ def summarize_usage(
         client = grouped.setdefault(
             (day, row["client"]), {"day": day, "client": row["client"], "models": {}, **_empty_usage()}
         )
-        fresh = {"model": model, "upstream": upstream, "label": names.label(model, upstream)}
+        fresh = {"model": model, "upstream": upstream, "label": _label(names, model, upstream)}
         _add_usage(client["models"].setdefault((upstream, model), {**fresh, **_empty_usage()}), row, costs)
         _add_usage(client, row, costs)
         _add_usage(totals, row, costs)
@@ -481,7 +502,7 @@ def model_costs(rows, overrides: dict, catalog: PriceCatalog, names: ModelNames 
     for row in rows:
         model, upstream = row["model"], row["upstream"]
         costs = book.costs(row)
-        fresh = {"model": model, "upstream": upstream, "label": names.label(model, upstream), "clients": {}}
+        fresh = {"model": model, "upstream": upstream, "label": _label(names, model, upstream), "clients": {}}
         used = grouped.setdefault((upstream, model), {**fresh, **_empty_usage()})
         client = used["clients"].setdefault(row["client"], {"client": row["client"], **_empty_usage()})
         _add_usage(client, row, costs)
@@ -505,7 +526,7 @@ def alias_costs(rows, overrides: dict, catalog: PriceCatalog, names: ModelNames 
         model, upstream = row["model"], row["upstream"]
         costs = book.costs(row)
         asked = grouped.setdefault(row["alias"], {"alias": row["alias"], "models": {}, **_empty_usage()})
-        fresh = {"model": model, "upstream": upstream, "label": names.label(model, upstream)}
+        fresh = {"model": model, "upstream": upstream, "label": _label(names, model, upstream)}
         _add_usage(asked["models"].setdefault((upstream, model), {**fresh, **_empty_usage()}), row, costs)
         _add_usage(asked, row, costs)
     out = _dearest(grouped.values(), "alias")

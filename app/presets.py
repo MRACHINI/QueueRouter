@@ -155,3 +155,18 @@ def plan_choice(value: str | None) -> tuple[str, Plan] | None:
     key, _, name = value.partition(":") if ":" in value else ("arliai", "", value)
     plan = plan_for(key, name)
     return (f"{PRESETS[key].label} {plan.name}", plan) if plan else None
+
+
+def is_synthetic(preset: str | None, base_url: str) -> bool:
+    """An upstream that is Synthetic: made from its preset, or at its address."""
+    return preset == "synthetic" or "synthetic.new" in base_url.lower()
+
+
+FAST_PREFIX = "fast:"  # Synthetic's fast mode: in front of a model's ID; its usage is kept under that name
+
+
+def unfast(model: str | None) -> tuple[str | None, bool]:
+    """(the model without Synthetic's fast: prefix, whether it had it); a request row may have no model (None)."""
+    if isinstance(model, str) and model.startswith(FAST_PREFIX):
+        return model[len(FAST_PREFIX) :], True
+    return model, False

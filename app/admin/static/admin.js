@@ -816,6 +816,7 @@ function liveRequests(root) {
     const marks = [];
     if (r.council) marks.push("council");
     if (r.compaction) marks.push("compacted");
+    if (r.fast) marks.push("fast");
     if (r.answer_check) marks.push(/→ failed|' failed it|^failed/.test(r.answer_check) ? "check failed" : "checked");
     for (const tag of (r.answer_tags || "").split(",")) if (tag) marks.push(`#${tag}`);
     if (r.via) marks.push(`via ${r.via}`);
@@ -854,6 +855,7 @@ function liveRequests(root) {
     if (d.tags) line("Tags", d.tags.split(",").map((t) => `#${t}`).join(" "));
     if (d.council) line("Council", d.council);
     if (d.compaction) line("Compacted", d.compaction);
+    if (d.fast) line("Fast mode", "sent to Synthetic as fast:… (counts double against the weekly quota)");
     if (d.fallback) line("Fell back", d.fallback);
     if (d.via) line("Forwarded", d.via);
     let edited = null;

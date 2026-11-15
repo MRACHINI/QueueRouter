@@ -87,6 +87,7 @@ from .params import (
     requested_output,
     too_long,
 )
+from .presets import FAST_PREFIX, is_synthetic, unfast
 from .pricing import (
     DEFAULT_MIX,
     MIX_DAYS,
@@ -248,6 +249,7 @@ class RequestLog:
             "ttft_ms": None,  # from arrival to the first byte of the answer (what the user waits for)
             "user_agent": None,  # the calling app, as it identifies itself
             "sent_user_agent": None,  # what the provider saw instead, when changed by a User-Agent rule
+            "fast": None,  # 1: sent to Synthetic as fast:<model> (an alias's fast mode)
             "compaction": None,  # e.g. "trim 812k -> 402k": the conversation was shrunk to fit (app/compaction.py)
             "council": None,  # e.g. "pick 2/3: GLM-4.7": what a model council did (app/council.py)
             "client_headers": None,  # what the app sent about itself (app/upstream.py client_identity)
@@ -336,6 +338,7 @@ class Admission:
     check: Check | None = None  # the alias checks plain-text answers (app/answer_check.py)
     hop: Hop | None = None  # after its own models, the request goes on to another alias (Forward)
     forward: Callable[[Hop, str, list], Awaitable[Response]] | None = None  # serves it there (see serve)
+    fast: bool = False  # this step goes to Synthetic in fast mode (Step.fast)
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
@@ -375,6 +378,7 @@ class Step:
     body: bytes
     compaction: str | None = None  # what compaction did to this step's request (shown on the Requests page)
     estimate: int | None = None  # estimated prompt tokens of ``body`` (compared with the provider's count)
+    fast: bool = False  # to Synthetic as fast:<model> (an alias's fast mode); the same model as it is follows it
 
 
 @dataclass
@@ -489,6 +493,11 @@ def create_app(
     def available(upstream_id: int) -> bool:
         target = snapshot.upstreams.get(upstream_id)
         return target is not None and target.usable and circuits.allows(upstream_id)
+
+    def synthetic_upstream(upstream_id: int) -> bool:
+        """It is Synthetic (where an alias's fast mode applies)."""
+        target = snapshot.upstreams.get(upstream_id)
+        return target is not None and is_synthetic(target.upstream.preset, target.upstream.base_url)
 
     quota_until: dict[tuple[int, str], float] = {}  # (upstream, model) -> monotonic time its quota may be back
 
@@ -681,6 +690,7 @@ def create_app(
     def cost_of(
         model: str, prompt: int, completion: int, cached: int, upstream: str | None = None, written: int = 0
     ) -> float:
+        model = unfast(model)[0] or ""  # fast usage (fast:<model>) costs what the model does
         upstream_id, name = snapshot.names.id_of(upstream), snapshot.names.name(model, upstream)
         price = resolve(model, price_overrides, prices, upstream_id, name)
         costs = token_cost(price, prompt, completion, cached, written)
@@ -1375,6 +1385,7 @@ def create_app(
                     "priority": f["priority"],
                     "requested_model": f["model"],
                     "alias": f.get("alias"),
+                    "fast": f.get("fast"),
                     "target_model": f["target_model"],
                     "tags": f["tags"],
                     "compaction": f["compaction"],
@@ -1845,8 +1856,10 @@ def create_app(
         hint = adm.headers.get("x-queuerouter-effort") if adm.path == "chat/completions" else None
         thinking = bool(body) and (b'"reasoning_effort"' in body or bool(hint))  # asked as this provider understands
         images = bool(body) and not native and b'"image_url"' in body  # Claude reads images; others may not
+        fast = adm.fast and not native and is_synthetic(target.upstream.preset, target.upstream.base_url)
+        sent_fast = False
         if body and (
-            native or target.upstream.params or thinking or images
+            native or target.upstream.params or thinking or images or fast
         ):  # this provider's own rules (e.g. fields it rejects)
             try:
                 payload = json.loads(body)
@@ -1867,7 +1880,12 @@ def create_app(
                     else:
                         style = thinking_mod.style_of(target.upstream.base_url, entry, target.upstream.preset)
                         thinking_mod.translate(payload, style)
+                model_id = payload.get("model")
+                if fast and isinstance(model_id, str) and model_id:  # Synthetic's fast mode, by the model's name
+                    payload["model"] = model_id if model_id.startswith(FAST_PREFIX) else FAST_PREFIX + model_id
+                    sent_fast = True
                 body = json.dumps(payload).encode()
+        adm.rlog.fields["fast"] = 1 if sent_fast else None  # set on every attempt: the step after it goes as it is
         headers = upstream_headers(adm.headers, target.api_key)
         if native:
             headers = claude_headers(headers, target.api_key)
@@ -2014,6 +2032,9 @@ def create_app(
                             message, hard, wait = describe_429(content)
                             hard = hard or status == OUT_OF_CREDIT_STATUS  # out of credit: it won't come back soon
                             adm.rlog.fields["error"] = f"{status} from {target.upstream.name}: {message}"[:500]
+                            if adm.rlog.fields["fast"]:  # sent fast: the model as it is goes next, not blocked
+                                yield Got(Replay(response, content, complete=True), target)
+                                return
                             if hard:  # quota used up: waiting won't help
                                 block_quota(target.id, model, wait)
                                 others = [
@@ -2100,6 +2121,11 @@ def create_app(
                             await response.aclose()  # all of it is read (or the read was stopped): Replay has it
                         note_error(adm.rlog, status, content, target)
                         response = Replay(response, content, complete=True)
+                        if adm.rlog.fields["fast"]:  # its fast mode failed, not the provider: no retries, and
+                            circuits.success(target.id)  # the model as it is goes next (chained)
+                            verdict = True
+                            yield Got(response, target)
+                            return
 
                     circuits.failure(target.id, reason)
                     verdict = True
@@ -2217,7 +2243,7 @@ def create_app(
                 adm.rlog.fields["target_model"] = step.model
                 adm.rlog.fields["compaction"] = step.compaction
                 adm.rlog.fields["estimate"] = step.estimate
-            step_adm = dataclasses.replace(adm, candidates=step.candidates, body=step.body)
+            step_adm = dataclasses.replace(adm, candidates=step.candidates, body=step.body, fast=step.fast)
             held = None  # a response read here before it's handed on: closed if we're cancelled meanwhile
             try:
                 async with contextlib.aclosing(attempts(step_adm)) as events:
@@ -2231,6 +2257,15 @@ def create_app(
                                 held = None
                                 await event.response.aclose()
                                 yield fall("context (provider)")
+                                moved_on = True
+                                break
+                        if step.fast and not last and isinstance(event, Got | Failed):
+                            status = event.status if isinstance(event, Failed) else event.response.status_code
+                            if status != 200:  # refused fast (or it failed): the same model as it is, whatever
+                                if isinstance(event, Got):  # the alias's triggers (they're for its fallbacks)
+                                    held = None
+                                    await event.response.aclose()
+                                yield fall(f"fast mode refused: HTTP {status}")
                                 moved_on = True
                                 break
                         if last or not isinstance(event, Got | Failed):
@@ -4880,6 +4915,8 @@ def create_app(
                 param_changes = apply_rules(payload, alias_rules, client_rules)
         steps: list[Step] = []
         too_long_for: tuple | None = None
+        # fast mode: the alias's own model (not its fallbacks), where Synthetic may serve it
+        fast_first = alias is not None and alias.fast and start == 0 and path != "embeddings"
         for i, (named, ticked) in enumerate(entries):
             step_model, pin = split_pin(named or None)  # "model@upstream": only that upstream ("": none named)
             only = pin or ticked
@@ -4963,7 +5000,10 @@ def create_app(
             unchanged = unchanged and compaction is None and not lowered and not prompt_changed
             step_body = body if unchanged else json.dumps(step_payload).encode()
             estimate = estimate_prompt_tokens(step_payload)
-            steps.append(Step(step_model, step_candidates, step_body, compaction, estimate))
+            made = Step(step_model, step_candidates, step_body, compaction, estimate)
+            if i == 0 and fast_first and any(synthetic_upstream(c.upstream_id) for c in step_candidates):
+                steps.append(dataclasses.replace(made, fast=True))  # then the same model as it is, if refused
+            steps.append(made)
         if not steps:
             if hop is not None and ("context" in triggers or not too_long_for):  # none of its own can take it
                 return await forward(hop, parent, place)

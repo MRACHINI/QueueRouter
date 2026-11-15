@@ -32,6 +32,13 @@ the same model, it is also listed as <code>model@provider</code>: that choice is
       <div class="row wrap">{% for u in upstreams %}
         <label class="check"><input type="checkbox" name="upstream_{{ u.id }}" value="{{ u.id }}" {% if u.id in a.upstream_ids %}checked{% endif %}> {{ u.name }}</label>
       {% endfor %}</div></fieldset>
+    <label class="check"><input type="checkbox" name="fast" {% if a.fast %}checked{% endif %}>
+      Fast mode (Synthetic)</label>
+    <small class="muted">The target model goes to Synthetic as <code>fast:</code> + its ID: more tokens per second, but each
+      request counts double against your plan's weekly quota (usage past the quota is billed at the normal price). Other
+      providers get it as it is, and so do the fallbacks. If Synthetic refuses it fast, the same model is asked again
+      the normal way before any fallback. The Requests page marks the requests sent fast, and the Usage page lists them
+      apart, as the model with "fast".</small>
     <label>Notes <input name="notes" value="{{ a.notes }}" maxlength="300" placeholder="optional"></label>
     {% if not new %}<label class="check"><input type="checkbox" name="enabled" {% if a.enabled %}checked{% endif %}> enabled</label>{% endif %}
   </fieldset>

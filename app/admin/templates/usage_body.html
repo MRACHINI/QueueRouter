@@ -7,6 +7,7 @@
 {%- endmacro %}
 {% macro total(r) -%}
 <td data-label="Total" class="num"><span>{% if r.cost or r.priced %}{{ usd(r.cost) }}{% else %}—{% endif %}{% if not r.priced %}<span class="muted" title="some tokens have no price">*</span>{% endif %}
+{%- if r.quota_cost > r.cost * 1.0001 %} <span class="muted small" title="Fast mode counts double against Synthetic's weekly quota: this is what it used of it">quota {{ usd(r.quota_cost) }}</span>{% endif %}
 {#- every row has the room for a share, so the costs line up -#}
 <span class="share">{% if r.share is defined and r.share is not none %}{% set pct = r.share * 100 %}<span title="its share of the row above">{% if 0 < pct < 1 %}&lt;1%{% else %}{{ pct | round | int }}%{% endif %}</span>{% endif %}</span></span></td>
 {%- endmacro %}
@@ -54,6 +55,10 @@
 included — <a href="/admin/models#pricing">set a price</a>.</p>
 {% endif %}
 <p class="small muted">Estimates at the official per-token API prices (models.dev), not what you pay ArliAI. In = tokens that weren't cached.{% if totals.cache_write_tokens %} {{ "{:,}".format(totals.cache_write_tokens) }} of them were written to Claude's prompt cache, at 1.25 × the input price.{% endif %} Click a row to see what it's made of.</p>
+{% if totals.quota_cost > totals.cost * 1.0001 %}
+<p class="small muted">Rows with "(fast)" were sent to Synthetic in fast mode: the same price per token, but they count
+double against a plan's weekly quota, so a row with them also says what it used of the quota ("quota $…").</p>
+{% endif %}
 
 <section class="charts">{% for chart in charts %}{{ chart | safe }}{% endfor %}</section>
 

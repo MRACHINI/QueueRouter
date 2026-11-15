@@ -65,7 +65,7 @@ from ..fallback import DEFAULT_TRIGGERS, TRIGGERS, loop_of
 from ..names import EVERY, ModelNames
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
-from ..presets import PRESETS, all_plans, plan_choice
+from ..presets import PRESETS, all_plans, plan_choice, unfast
 from ..pricing import (
     DEFAULT_MIX,
     MIX_DAYS,
@@ -131,7 +131,7 @@ LIVE_CHECK_S, LIVE_HEARTBEAT_S = 0.25, 5  # dashboard stream: look for changes /
 REQUEST_LIST_COLUMNS = (
     "id, ts, client, priority, model, target_model, upstream, status, outcome, retries, queue_ms, ttft_ms, "
     "upstream_ms, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, finish_reason, stopped, "
-    "tokens_per_s, compaction, council, role, parent, answer_check, answer_tags, via, edits IS NOT NULL AS edited"
+    "tokens_per_s, compaction, council, role, parent, answer_check, answer_tags, via, edits IS NOT NULL AS edited, fast"
 )
 REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "id",
@@ -163,6 +163,7 @@ REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "thinking",
     "via",
     "edits",
+    "fast",
 )
 HERE = os.path.dirname(__file__)
 
@@ -1810,7 +1811,8 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             if pinned or not any(m == bare for _, m in offered):
                 offered.add((pinned, bare))
         recent = store.used_models(days=PRICING_DAYS)  # older names only matter for old usage
-        pairs = offered | {(None if upstream == "-" else upstream, m) for upstream, m in recent}
+        # fast usage (fast:<model>) is priced as the model: not a line of its own
+        pairs = offered | {(None if upstream == "-" else upstream, unfast(m)[0]) for upstream, m in recent}
         pairs |= {(names.upstreams.get(upstream_id), m) for upstream_id, m in overrides}
         pricing = sorted(
             (
@@ -2088,6 +2090,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             "learn_rules": learn_rules,
             "learn_model": learn_model,
             "learn_pass": form.get("learn_pass") == "on",
+            "fast": form.get("fast") == "on",
             "target_model": target,
             "upstream_ids": upstream_ids,
             "notes": str(form.get("notes", ""))[:300],
@@ -2156,6 +2159,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             learn_rules=str(form.get("learn_rules", "off")),
             learn_model=str(form.get("learn_model", "")).strip(),
             learn_pass=form.get("learn_pass") == "on",
+            fast=form.get("fast") == "on",
             enabled=form.get("enabled") == "on" if existing else True,
         )
 
@@ -2222,7 +2226,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             council_search=False, council_search_max=3, council_search_results=5, council_fetch=False,
             orch_rounds=6, orch_tasks=8, orch_seconds=300, council_roles="", tag_chain=(), edits=(), enabled=True,
             answer_rules=(), check_kinds=DEFAULT_ANSWER_KINDS, check_when="undecided", spot_checks=SPOT_DEFAULT,
-            learn_rules="off", learn_model="", learn_pass=False,
+            learn_rules="off", learn_model="", learn_pass=False, fast=False,
         )  # fmt: skip
         return alias_page(request, session, empty)
 

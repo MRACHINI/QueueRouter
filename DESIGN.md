@@ -2238,6 +2238,23 @@ own name is listed under that name, so the table's total is the page's total. Re
 shows the calls made for the requests that asked for it (rows written before 0.81 have no `alias`: for them it
 filters as before).
 
+v0.82.0: an alias's fast mode (Synthetic). Synthetic serves a model faster when its ID is sent with a `fast:` prefix
+(`fast:hf:…`); while fast, usage counts double against a plan's weekly quota, and usage-based pricing past the quota
+is unchanged (its own words, November 2026). A "Fast mode" box on the alias (migration 50: `aliases.fast`) sends its
+target model that way: the alias, the model lists, prices, context sizes and thinking levels keep the plain ID, and
+the prefix is added only in the body that goes to an upstream that is Synthetic (its preset, or synthetic.new in its
+address); other upstreams of the alias, and its fallbacks, get the model as it is. It's a step of its own in the
+alias's chain (Step.fast), followed by the same model as it is: when Synthetic answers anything but 200 to the fast
+request (a model without fast mode, an error), that one is asked next whatever the alias's triggers (they're for its
+fallbacks), then the fallbacks as usual. A fast request that fails isn't retried and isn't held against the provider:
+a 5xx doesn't count toward its circuit, and a 429 or 402 doesn't block the model (found in the browser check: a 503
+to the fast request was retried five times and opened the circuit, so the request as it is waited a minute behind it).
+Spending limits and the price table read `fast:<model>` usage as the model. Apps choose fast mode by choosing the alias; harnesses' own fast switches
+(`service_tier`, Claude's `speed`) aren't read: none of them applies to an `hf:` model. The request row says it went
+fast (`requests.fast`, a "fast" mark on the Requests page), and its usage is kept as `fast:<model>`: priced as the
+model, listed as "<model> (fast)", and counted twice in `quota_cost`, which the Usage page shows next to a cost that
+has fast usage in it ("quota $…").
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
