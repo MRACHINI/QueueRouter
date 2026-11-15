@@ -89,13 +89,19 @@ class PublicIds:
     shared: dict[str, tuple[str, ...]] = field(default_factory=dict)  # an ID several providers offer -> the IDs to pick
     clashes: dict[tuple[str, str], str] = field(default_factory=dict)  # a name that can't be an ID -> what has it
     several: set[str] = field(default_factory=set)  # real IDs more than one provider offers
+    # (provider, real ID) -> its ID without @Provider, when that alone names it (one provider, no alias): with the
+    # provider in every ID (``always``) apps that knew it by that keep it, in requests and model lists
+    bare: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
-def public_ids(offered: Mapping[str, Iterable[str]], names: ModelNames, aliases: Iterable[str] = ()) -> PublicIds:
+def public_ids(
+    offered: Mapping[str, Iterable[str]], names: ModelNames, aliases: Iterable[str] = (), always: bool = False
+) -> PublicIds:
     """``offered``: {provider: the real IDs it offers}. A model's ID for apps is its custom name, else its real ID,
-    with ``@Provider`` when several providers offer one. On one provider a real ID wins over a name, and of models
-    given the same name the first by real ID keeps it: the others are known by their real ID (``clashes``). So is a
-    model named like an alias, which wins in requests."""
+    with ``@Provider`` when several providers offer one, or for every model (``always``: Settings, so a list can be
+    filtered by provider; it still answers to the ID without it). On one provider a real ID wins over a name, and of
+    models given the same name the first by real ID keeps it: the others are known by their real ID (``clashes``).
+    So is a model named like an alias, which wins in requests."""
     taken_by_alias = set(aliases)
     ids = PublicIds()
     base: dict[tuple[str, str], str] = {}
@@ -115,9 +121,13 @@ def public_ids(offered: Mapping[str, Iterable[str]], names: ModelNames, aliases:
     for (upstream, _), wanted in base.items():
         on.setdefault(wanted, []).append(upstream)
     for (upstream, model), wanted in base.items():  # an alias's name is the alias's: the model needs its provider
-        public = wanted if len(on[wanted]) == 1 and wanted not in taken_by_alias else f"{wanted}@{upstream}"
+        alone = len(on[wanted]) == 1 and wanted not in taken_by_alias
+        public = wanted if alone and not always else f"{wanted}@{upstream}"
         ids.of[(upstream, model)] = public
         ids.to[f"{wanted}@{upstream}"] = ids.to[public] = (model, upstream)
+        if alone:
+            ids.to[wanted] = (model, upstream)  # the same, with the provider in every ID or not
+            ids.bare[(upstream, model)] = wanted
     for wanted, upstreams in on.items():
         if len(upstreams) > 1:
             ids.shared[wanted] = tuple(sorted(f"{wanted}@{u}" for u in upstreams))

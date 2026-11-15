@@ -621,3 +621,62 @@ def test_resolve_keeps_a_reference_per_provider(catalog):
     price = resolve("m", overrides, catalog, 2)
     assert isinstance(price, Price) and price.input == 1
     assert resolve("m", overrides, catalog, 1) is None
+
+
+def test_ids_for_apps_with_the_provider_in_every_one():
+    """Settings > "Provider in every model ID": every provider model's ID ends in @Provider; the ID without it still
+    names it where that alone did (``to``, ``bare``), and an alias's name stays the alias's."""
+    names = ModelNames(
+        {1: "Synthetic", 2: "Refuseless"},
+        {(1, "hf:zai/GLM-5"): "GLM 5", (1, "flash"): "Flash", (2, "flash-fast"): "Flash", (2, "abl"): "Abl"},
+    )
+    offered = {"Synthetic": ["hf:zai/GLM-5", "flash", "glm"], "Refuseless": ["flash-fast", "abl", "smart"]}
+    ids = public_ids(offered, names, ["smart"], always=True)
+    assert ids.of[("Synthetic", "hf:zai/GLM-5")] == "GLM-5@Synthetic"
+    assert ids.of[("Synthetic", "glm")] == "glm@Synthetic"
+    assert ids.of[("Refuseless", "abl")] == "Abl@Refuseless"
+    for known in ("Abl", "Abl@Refuseless"):
+        assert ids.to[known] == ("abl", "Refuseless")
+    assert ids.bare[("Refuseless", "abl")] == "Abl" and ids.bare[("Synthetic", "glm")] == "glm"
+    # as before: a name two providers have, and a real ID an alias has
+    assert ids.of[("Synthetic", "flash")] == "Flash@Synthetic" and "Flash" not in ids.to
+    assert ("Synthetic", "flash") not in ids.bare and ids.shared["Flash"] == ("Flash@Refuseless", "Flash@Synthetic")
+    assert ids.of[("Refuseless", "smart")] == "smart@Refuseless" and "smart" not in ids.to
+    assert ("Refuseless", "smart") not in ids.bare
+    assert public_ids(offered, names, ["smart"]).of[("Refuseless", "abl")] == "Abl"  # off: as before
+
+
+async def test_the_provider_in_every_id_keeps_what_apps_knew(make_stack, make_mock):
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["extra_models"] = ["solo-model"]
+    store = stack.app.state.store
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        _, ids = await two_providers(c, stack, make_mock)  # both offer mock-model; solo-model is upstream's only
+        store.set_model_name(ids["upstream"], "solo-model", "t", "Solo")
+        store.create_alias("smart", "solo-model", (), "t")
+        stack.app.state.reload()
+
+        async def listed() -> list[str]:
+            return sorted(m["id"] for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"])
+
+        def ask(model):
+            return c.post("/v1/chat/completions", headers=stack.headers, json=chat("hi", model=model))
+
+        assert await listed() == ["Solo", "mock-model@second", "mock-model@upstream", "smart"]
+        store.set_tunables({"ids_with_provider": True}, "t")
+        stack.app.state.reload()
+        assert await listed() == ["Solo@upstream", "mock-model@second", "mock-model@upstream", "smart"]
+        assert "Solo@upstream" in (await c.get("/admin/models")).text  # its ID for apps on the Models page
+        for model in ("Solo", "Solo@upstream", "smart"):  # the ID it had still works, and the alias keeps its name
+            assert (await ask(model)).status_code == 200, model
+            assert json.loads(stack.mock["last_body"])["model"] == "solo-model"
+        # a group's list that names the ID it had (or the new one) lets the model in under either
+        client = store.list_clients()[0]
+        for allowed in ("Solo", "Solo@upstream"):
+            group = store.create_group(f"only-{allowed}", "t", ClientPolicy(allowed_models=(allowed,)))
+            store.update_client(client.id, "t", group_id=group)
+            stack.app.state.reload()
+            assert await listed() == ["Solo@upstream"], allowed
+            for model in ("Solo", "Solo@upstream"):
+                assert (await ask(model)).status_code == 200, (allowed, model)
+            assert (await ask("mock-model@second")).status_code == 403

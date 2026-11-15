@@ -2265,6 +2265,15 @@ an app's "off" counts as "none" for every provider (vLLM's chat-template switch 
 offers "off" for each Synthetic model with levels: they come from another provider's list (the reference), whose
 "can it be off" says nothing about Synthetic.
 
+v0.83.0: the provider in every model ID (Settings > Upstream, off unless turned on). A model one provider offers
+was known to apps by its name alone (`GLM-5.3-Uncensored`), one several offer by its name with `@Provider`, so an
+app's model list filtered by provider ("7api") missed the first kind. With the setting on, every provider model's
+ID for apps ends in `@Provider` (/v1/models, opencode's list, the Models page); aliases keep their names (QueueRouter's
+own, their models maybe on several providers). What apps knew keeps working: the ID without the provider still
+names the model where it alone did (`PublicIds.bare`, and `to` for requests), and a client's or group's model list
+that names either form lets the model in under both. Apps that saved a model may need it picked again from their
+list. Turning it on or off works out every ID again (the app IDs' memo counts the setting).
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

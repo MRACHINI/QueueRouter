@@ -1136,6 +1136,8 @@ def create_app(
         requests: the model then needs its provider). A model doesn't bring the aliases that send to it."""
         if not allowed or public in allowed or f"{real}@{upstream}" in allowed:
             return True
+        if app_ids().bare.get((upstream, real)) in allowed:  # its ID before the provider was in every ID
+            return True
         return real in allowed and real not in snapshot.aliases
 
     def policy_refusal(client: ClientKey, model: str | None, allowed_by: set[str | None]) -> JSONResponse | None:
@@ -1271,7 +1273,8 @@ def create_app(
         models offered, a name or an alias changes. A provider whose list isn't in (just started, or failing) counts
         the models named there: the names are stored, so a name still reaches it as the real ID."""
         targets = [t for t in snapshot.upstreams.values() if t.usable]
-        state = tuple((t.id, catalogs.version(t.id), catalogs.filters.get(t.id)) for t in targets)
+        lists = tuple((t.id, catalogs.version(t.id), catalogs.filters.get(t.id)) for t in targets)
+        state = (cfg().ids_with_provider, lists)  # the setting changes every ID too
         if app_ids_memo[0] is not snapshot or app_ids_memo[1] != state:
 
             def offered_by(target: Target) -> Iterable[str]:
@@ -1281,7 +1284,8 @@ def create_app(
                 return [m for uid, m in snapshot.names.custom if uid == target.id and catalogs.offered(target.id, m)]
 
             offered = {t.upstream.name: offered_by(t) for t in targets}
-            app_ids_memo[:] = [snapshot, state, public_ids(offered, snapshot.names, snapshot.aliases)]
+            always = cfg().ids_with_provider
+            app_ids_memo[:] = [snapshot, state, public_ids(offered, snapshot.names, snapshot.aliases, always)]
         return app_ids_memo[2]
 
     def app_id(model: str, upstream: str) -> str:
@@ -4761,6 +4765,9 @@ def create_app(
             allowed_by = {alias.name}
         else:
             allowed_by = {model, asked} | ({bare_target} if bare_target not in snapshot.aliases else set())
+            if ids and asked in ids.to:  # its ID with the provider and without (Settings: provider in every ID)
+                pair = ids.to[asked][::-1]
+                allowed_by |= {ids.of.get(pair), ids.bare.get(pair)} - {None}
         # QueueRouter's own requests (council members, judge, summaries) serve a request already admitted: the
         # client's model list and queue limits apply to that request, not to the models working on it
         if not internal and not via and (refusal := policy_refusal(client, asked or model, allowed_by)):

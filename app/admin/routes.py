@@ -264,6 +264,14 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Answer 404 (with the closest names) for a model no upstream lists, instead of sending it on. "
         "Turn off for providers whose model list is incomplete.",
     ),
+    "ids_with_provider": (
+        "Upstream",
+        "Provider in every model ID",
+        "Every provider model's ID for apps ends in @Provider (e.g. GLM-5.3-Uncensored@7api.st), not only those "
+        "several providers offer, so an app's model list can be filtered by provider. Aliases keep their names. "
+        "Requests by the ID without it still work, and so do client and group model lists that name it; apps that "
+        "saved a model (opencode, Claude Code) may need it picked again from their list.",
+    ),
     "compaction_idle_update": (
         "Compaction",
         "Update summaries while idle",
