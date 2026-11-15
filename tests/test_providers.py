@@ -32,16 +32,19 @@ def test_refuseless_and_synthetic_levels():
     assert thinking.style_of("http://proxy:8080/v1", None, "custom") == "unknown"
     found = thinking.from_refuseless(ABLITERATED)
     assert thinking.for_style("refuseless", found) == (("none", "none"), ("low", "low"), ("high", "high"))
-    assert thinking.for_style("synthetic", (("none", "low", "high", "max"), None)) == (("low", "low"), ("high", "high"))
-    assert thinking.for_style("synthetic", (("none", "high"), None)) == ()  # one level and no off: nothing to pick
-    for asked, sent in (("none", "off"), ("medium", "low"), ("xhigh", "high"), ("max", "max"), ("minimal", "low")):
+    off_low_high = (("none", "none"), ("low", "low"), ("high", "high"))
+    assert thinking.for_style("synthetic", (("none", "low", "high", "max"), None)) == off_low_high
+    assert thinking.for_style("synthetic", (("low", "high"), None)) == off_low_high  # off there too: "none" works
+    assert thinking.for_style("synthetic", (("high",), None)) == (("none", "none"), ("high", "high"))
+    assert thinking.for_style("synthetic", (("none",), None)) == ()
+    # "none" turns thinking off on both, sent as it is (0.78 sent "off" and nothing: tested live, both left it on)
+    refuseless = (("none", "none"), ("off", "none"), ("medium", "low"), ("xhigh", "high"), ("max", "max"))
+    for asked, sent in (*refuseless, ("minimal", "low")):
         payload = {"reasoning_effort": asked}
         assert thinking.translate(payload, "refuseless") and payload == {"reasoning_effort": sent}
-    for asked, sent in (("max", "high"), ("minimal", "low"), ("medium", "medium")):
+    for asked, sent in (("none", "none"), ("OFF", "none"), ("max", "high"), ("minimal", "low"), ("medium", "medium")):
         payload = {"reasoning_effort": asked}
         assert thinking.translate(payload, "synthetic") and payload == {"reasoning_effort": sent}
-    payload = {"reasoning_effort": "none"}
-    assert thinking.translate(payload, "synthetic") and payload == {}  # no off switch: its default
     assert thinking.takes_images({"vision": False}) is False and thinking.takes_images(ABLITERATED) is True
 
 
@@ -83,7 +86,7 @@ async def test_a_refuseless_model_list_and_its_levels(make_stack):
             body = {"model": "abl-model", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": asked}
             assert (await c.post("/v1/chat/completions", headers=stack.headers, json=body)).status_code == 200
             sent.append(json.loads(stack.mock["last_body"]).get("reasoning_effort"))
-        assert sent == ["high", "off", "low", "high"]  # its own levels: "max" is its highest
+        assert sent == ["high", "none", "low", "high"]  # its own levels: "max" is its highest; off as "none"
         rows = [e for e in stack.app.state.stats.recent if e.get("model") == "abl-model"]
         assert rows[0]["thinking"] == "max → high (the nearest abl-model has on upstream)"
         assert rows[-1]["thinking"] is None  # a level it has: unchanged
@@ -141,3 +144,21 @@ async def test_out_of_credit_moves_to_another_upstream(make_stack, make_mock):
         rows = [e for e in stack.app.state.stats.recent if e.get("model") == model and not e.get("parent")]
         assert rows[0]["error"].startswith("402 from upstream")
         assert rows[1]["error"] is None  # it's skipped now, as a used-up quota is: not asked again
+
+
+async def test_thinking_off_reaches_synthetic_and_refuseless_as_none(make_stack):
+    """Both turn thinking off with "none" (tested live): sent as it is, an app's "off" too (0.78 sent nothing to
+    Synthetic and "off" to Refuseless, and both kept thinking)."""
+    stack = make_stack(bootstrap=OWNER)
+    store = stack.app.state.store
+    upstream = store.list_upstreams()[0]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        for preset in ("synthetic", "refuseless"):
+            store.update_upstream(upstream.id, "t", preset=preset)
+            stack.app.state.reload()
+            for asked in ("none", "off"):
+                ask = [{"role": "user", "content": "hi"}]
+                body = {"model": "mock-model", "messages": ask, "reasoning_effort": asked}
+                r = await c.post("/v1/chat/completions", headers=stack.headers, json=body)
+                assert r.status_code == 200, r.text
+                assert stack.mock["chat_bodies"][-1]["reasoning_effort"] == "none", (preset, asked)

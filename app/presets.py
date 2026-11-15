@@ -62,7 +62,7 @@ PRESETS: dict[str, Preset] = {
             "https://api.synthetic.new/openai/v1",
             4,
             plans=SYNTHETIC_PLANS,
-            note="Models are named hf:… (e.g. hf:zai-org/GLM-4.7). Thinking levels: low, medium, high (no off). "
+            note="Models are named hf:… (e.g. hf:zai-org/GLM-4.7). Thinking levels: off, low, medium, high. "
             "Parallel requests aren't published: 4 is a start; lower it if it answers 429. Usage past a plan's "
             "weekly quota is billed at API prices.",
         ),

@@ -2249,11 +2249,21 @@ request (a model without fast mode, an error), that one is asked next whatever t
 fallbacks), then the fallbacks as usual. A fast request that fails isn't retried and isn't held against the provider:
 a 5xx doesn't count toward its circuit, and a 429 or 402 doesn't block the model (found in the browser check: a 503
 to the fast request was retried five times and opened the circuit, so the request as it is waited a minute behind it).
-Spending limits and the price table read `fast:<model>` usage as the model. Apps choose fast mode by choosing the alias; harnesses' own fast switches
-(`service_tier`, Claude's `speed`) aren't read: none of them applies to an `hf:` model. The request row says it went
+Spending limits and the price table read `fast:<model>` usage as the model. Apps choose fast mode by choosing the
+alias; harnesses' own fast switches (`service_tier`, Claude's `speed`) aren't read: none of them applies to an `hf:`
+model. The request row says it went
 fast (`requests.fast`, a "fast" mark on the Requests page), and its usage is kept as `fast:<model>`: priced as the
 model, listed as "<model> (fast)", and counted twice in `quota_cost`, which the Usage page shows next to a cost that
 has fast usage in it ("quota $…").
+
+v0.82.1: thinking off reaches Synthetic and Refuseless again. 0.78 went by their docs and model lists: Synthetic
+"has no off switch", so `reasoning_effort: "none"` was dropped, and Refuseless lists its off level as "off", so
+"none" was sent as "off". Tested live against both (2026-11-15, the user's other session): "none" sent straight to
+either turns thinking off (Synthetic's prompt 26 tokens shorter); sent nothing, or through QueueRouter, the model
+thinks. Before 0.78 the field passed as it was, which is why it worked until then. Now "none" goes to both as it is,
+an app's "off" counts as "none" for every provider (vLLM's chat-template switch included), and opencode's selector
+offers "off" for each Synthetic model with levels: they come from another provider's list (the reference), whose
+"can it be off" says nothing about Synthetic.
 
 ### Later (agreed, not scheduled)
 

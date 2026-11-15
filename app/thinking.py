@@ -12,9 +12,11 @@ Where they come from, first that knows:
 opencode sends the chosen level as ``reasoning_effort``. Providers differ, so it's translated per upstream:
 OpenRouter takes ``reasoning: {effort}``; vLLM servers (ArliAI) switch thinking through the chat template and
 know only low / medium / high; OpenAI-style APIs take ``reasoning_effort`` as it is; Refuseless takes its own
-levels (``off``, ``low``, ``high``, ``max``; any other is refused); Synthetic takes low / medium / high and has no
-off switch; Claude's own API (the Anthropic preset) takes its levels as ``output_config.effort`` (app/claude.py),
-which its model list states. A level the model doesn't have (an app's own, one an alias's rule forces, Claude
+levels (``none``, ``low``, ``high``, ``max``; its list calls the first ``off``, but only ``none`` turns thinking
+off; any other is refused); Synthetic takes ``none`` / low / medium / high (``none`` isn't in its docs, but turns
+thinking off: both tested live 2026-11-15, after 0.78 had sent ``off`` and nothing, which left it on); Claude's
+own API (the Anthropic preset) takes its levels as ``output_config.effort`` (app/claude.py), which its model list
+states. A level the model doesn't have (an app's own, one an alias's rule forces, Claude
 Code's effort) becomes the ``nearest`` it has, from below: "max" is the model's highest, whatever that is.
 
 The reference list also carries Artificial Analysis scores: the strength order uses them when there's no key.
@@ -39,8 +41,8 @@ REFERENCE_URL = "https://openrouter.ai/api/v1/models"
 REFRESH_S = 86_400
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")  # what opencode can send, in order
 VLLM_EFFORTS = ("low", "medium", "high")  # what vLLM accepts as reasoning_effort
-SYNTHETIC_EFFORTS = ("low", "medium", "high")  # what Synthetic documents (no off switch)
-REFUSELESS_EFFORTS = ("none", "low", "high", "max")  # Refuseless's own (sent as off / low / high / max)
+SYNTHETIC_EFFORTS = ("none", "low", "medium", "high")  # what Synthetic takes (its docs leave out none: it's off)
+REFUSELESS_EFFORTS = ("none", "low", "high", "max")  # Refuseless's own, sent as they are ("off" is ignored there)
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")  # Claude's output_config.effort
 TOGGLE = (("off", "none"), ("thinking", "high"))  # an on / off model: two variants
 
@@ -167,9 +169,11 @@ def for_style(style: str, found: tuple[tuple[str, ...], str | None]) -> tuple[tu
         if len(middle) <= 1:
             return TOGGLE
         return (("none", "none"), *levels(middle))
-    if style == "synthetic":  # levels only as Synthetic knows them, and no off switch
-        middle = tuple(e for e in SYNTHETIC_EFFORTS if e in efforts or e == "high" and {"xhigh", "max"} & set(efforts))
-        return levels(middle) if len(middle) > 1 else ()
+    if style == "synthetic":  # levels only as Synthetic knows them, and off: its "none" turns any model's thinking off
+        # (the levels come from another provider's list, the reference: whether it can be off there says nothing here)
+        bigger = bool({"xhigh", "max"} & set(efforts))  # sent as its highest, high
+        middle = tuple(e for e in SYNTHETIC_EFFORTS[1:] if e in efforts or e == "high" and bigger)
+        return (("none", "none"), *levels(middle)) if middle else ()
     if style == "refuseless":  # its own levels (its model list states them)
         return levels(tuple(e for e in efforts if e in REFUSELESS_EFFORTS))
     if efforts == ("none", "high"):
@@ -185,18 +189,12 @@ def translate(payload: dict, style: str) -> bool:
     if not isinstance(effort, str) or style in ("openai", "unknown", "fixed"):
         return False
     effort = effort.lower()
+    effort = "none" if effort == "off" else effort  # an app's "off" is thinking off everywhere
     if style == "none":
         payload.pop("reasoning_effort")
         return True
-    if style == "refuseless":  # off / low / high / max; any other is refused
-        level = nearest(REFUSELESS_EFFORTS, effort)
-        if level is None:
-            payload.pop("reasoning_effort")
-        else:
-            payload["reasoning_effort"] = "off" if level == "none" else level
-        return True
-    if style == "synthetic":  # low / medium / high; no off switch: "none" asks for nothing (its default)
-        level = nearest(SYNTHETIC_EFFORTS, effort) if effort != "none" else None
+    if style in ("refuseless", "synthetic"):  # their own levels, "none" (off) among them; any other is refused
+        level = nearest(REFUSELESS_EFFORTS if style == "refuseless" else SYNTHETIC_EFFORTS, effort)
         if level is None:
             payload.pop("reasoning_effort")
         else:
