@@ -2274,6 +2274,12 @@ names the model where it alone did (`PublicIds.bare`, and `to` for requests), an
 that names either form lets the model in under both. Apps that saved a model may need it picked again from their
 list. Turning it on or off works out every ID again (the app IDs' memo counts the setting).
 
+v0.83.1: every model in /v1/models has its context in `context_length`. Providers name it differently (lutheos
+lists `context_window` only), and QueueRouter passed on the provider's field: oh-my-pi reads nothing but
+`context_length` from an OpenAI-style list and took 128k for lutheos's 1M DeepSeek. `sized` now adds
+`context_length` from whichever field the provider used (opencode's CONTEXT_KEYS order), keeping the provider's own
+field too; a model with a custom name and an alias get it the same way.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

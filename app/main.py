@@ -1212,11 +1212,15 @@ def create_app(
 
     def sized(model: str, target: Target, entry: dict | None) -> dict | None:
         """``entry`` (a model list item, None when not listed) with the sizes QueueRouter knows beyond it: yours and
-        the learned ones (context_sizes), and the output size in use as ``max_output_tokens`` (output_source)."""
+        the learned ones (context_sizes), and the output size in use as ``max_output_tokens`` (output_source). Its
+        context is in ``context_length`` too, whatever field its provider used (lutheos: ``context_window`` only):
+        some apps read nothing else (oh-my-pi, which then takes 128k)."""
         merged = context_sizes.apply(model, target.id, entry)
         output, _ = output_source(model, target, entry)
         if output is not None and (merged or {}).get("max_output_tokens") != output:  # the key every reader knows
             merged = {**(merged or {"id": model}), "max_output_tokens": output}
+        if merged and "context_length" not in merged and (known := model_limits(merged, ())) is not None:
+            merged = {**merged, "context_length": known["context"]}
         return merged
 
     def candidates_for(model: str | None, only: tuple[int, ...] = (), raw: bool = False) -> tuple[Candidate, ...]:

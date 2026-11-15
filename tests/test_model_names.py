@@ -303,6 +303,7 @@ async def test_apps_know_models_by_their_names(make_stack, make_mock):
             "created": 0,
             "owned_by": "queuerouter",
             "max_model_len": 65_536,
+            "context_length": 65_536,  # the size in the field every app reads, as well
             "reasoning": {"supported_efforts": ["low", "high"], "default_effort": "low"},
             "architecture": {"input_modalities": ["text", "image"]},
             "queuerouter": {"type": "model"},
@@ -680,3 +681,24 @@ async def test_the_provider_in_every_id_keeps_what_apps_knew(make_stack, make_mo
             for model in ("Solo", "Solo@upstream"):
                 assert (await ask(model)).status_code == 200, (allowed, model)
             assert (await ask("mock-model@second")).status_code == 403
+
+
+async def test_every_listed_size_is_in_context_length_too(make_stack):
+    """A provider that states a model's context in another field (lutheos: context_window only) still has it listed
+    as context_length, the one field some apps read (oh-my-pi took 128k without it), named or not, and its alias."""
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["extra_model_entries"] = [
+        {"id": "window-model", "object": "model", "context_window": 1_000_000},
+        {"id": "named-model", "object": "model", "max_model_len": 262_144},
+    ]
+    store = stack.app.state.store
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await c.get("/v1/models", headers=stack.headers)
+        store.set_model_name(store.list_upstreams()[0].id, "named-model", "t", "Named")
+        store.create_alias("wide", "window-model", (), "t")
+        stack.app.state.reload()
+        listed = {m["id"]: m for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]}
+    assert listed["window-model"]["context_length"] == 1_000_000
+    assert listed["window-model"]["context_window"] == 1_000_000  # the provider's own field stays
+    assert listed["Named"]["context_length"] == 262_144
+    assert listed["wide"]["context_length"] == 1_000_000
