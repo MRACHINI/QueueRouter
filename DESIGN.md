@@ -2280,6 +2280,15 @@ lists `context_window` only), and QueueRouter passed on the provider's field: oh
 `context_length` from whichever field the provider used (opencode's CONTEXT_KEYS order), keeping the provider's own
 field too; a model with a custom name and an alias get it the same way.
 
+v0.84.0: a model whose thinking levels QueueRouter knows says so in /v1/models. oh-my-pi reads only `reasoning` /
+`supports_reasoning` (true / false) from an OpenAI-style list and sends no level to a model without them, so its
+selector did nothing through QueueRouter (Meridian's Claude models: low to Ultra all answered at the default, where
+Meridian directly honoured them). `thinks` adds both as true to any provider's model with a level other than off
+(yours, its list, the reference: `thinking_for`), named or not, and to an alias with its first model's levels (not a
+council); a provider's own value stays. oh-my-pi then checks once per model which levels it takes (a handful of
+small requests) and sends the one picked. Claude's own form of levels (`capabilities.effort`) is now read from any
+provider's list, so Meridian as a Custom upstream has its levels too (a level it lacks, like minimal, is fitted).
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

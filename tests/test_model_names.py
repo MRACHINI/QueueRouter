@@ -305,6 +305,7 @@ async def test_apps_know_models_by_their_names(make_stack, make_mock):
             "max_model_len": 65_536,
             "context_length": 65_536,  # the size in the field every app reads, as well
             "reasoning": {"supported_efforts": ["low", "high"], "default_effort": "low"},
+            "supports_reasoning": True,  # what apps that read only true / false see (oh-my-pi)
             "architecture": {"input_modalities": ["text", "image"]},
             "queuerouter": {"type": "model"},
         }
@@ -702,3 +703,41 @@ async def test_every_listed_size_is_in_context_length_too(make_stack):
     assert listed["window-model"]["context_window"] == 1_000_000  # the provider's own field stays
     assert listed["Named"]["context_length"] == 262_144
     assert listed["wide"]["context_length"] == 1_000_000
+
+
+MERIDIAN_EFFORT = {  # Meridian's list: Claude's own capabilities form, no reasoning flag
+    "effort": {level: {"supported": True} for level in ("low", "medium", "high", "xhigh", "max")} | {"supported": True}
+}
+
+
+async def test_models_with_known_levels_say_they_can_think(make_stack):
+    """oh-my-pi sends no level to a model its list doesn't mark as thinking (reasoning / supports_reasoning): a model
+    whose levels QueueRouter knows is marked, named or not, and an alias to it; Meridian's Claude-style levels are
+    read on any upstream, and a level they lack is fitted to them."""
+    stack = make_stack(bootstrap=OWNER, models_cache_s=0)
+    stack.mock["extra_model_entries"] = [
+        {"id": "meridian-model", "object": "model", "context_window": 1_000_000, "capabilities": MERIDIAN_EFFORT},
+        {"id": "named-thinker", "object": "model", "capabilities": MERIDIAN_EFFORT},
+        {"id": "flagged-model", "object": "model", "reasoning": False, "capabilities": MERIDIAN_EFFORT},
+        {"id": "plain-model", "object": "model"},
+    ]
+    store = stack.app.state.store
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await c.get("/v1/models", headers=stack.headers)
+        store.set_model_name(store.list_upstreams()[0].id, "named-thinker", "t", "Thinker")
+        store.create_alias("deep", "meridian-model", (), "t")
+        store.create_alias("flat", "plain-model", (), "t")
+        stack.app.state.reload()
+        listed = {m["id"]: m for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]}
+        hello = [{"role": "user", "content": "hi"}]
+        body = {"model": "meridian-model", "messages": hello, "reasoning_effort": "minimal"}
+        assert (await c.post("/v1/chat/completions", headers=stack.headers, json=body)).status_code == 200
+        sent = json.loads(stack.mock["last_body"])["reasoning_effort"]
+    assert listed["meridian-model"]["reasoning"] is True and listed["meridian-model"]["supports_reasoning"] is True
+    assert listed["Thinker"]["supports_reasoning"] is True  # its own entry's reasoning block stays as it is
+    assert listed["Thinker"]["reasoning"]["supported_efforts"] == ["low", "medium", "high", "xhigh", "max"]
+    assert listed["flagged-model"]["reasoning"] is False  # the provider's own value stays
+    assert listed["deep"]["reasoning"] is True and listed["deep"]["supports_reasoning"] is True
+    assert "reasoning" not in listed["plain-model"] and "supports_reasoning" not in listed["plain-model"]
+    assert "reasoning" not in listed["flat"]
+    assert sent == "low"  # Meridian's lowest: it drops a level it doesn't take

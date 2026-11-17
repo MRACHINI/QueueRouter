@@ -1668,8 +1668,10 @@ def create_app(
                 found = thinking_mod.from_claude(entry)
             elif style == "refuseless":  # its own list states each model's levels
                 found = thinking_mod.from_refuseless(entry)
-            else:
-                found = thinking_mod.from_block(entry.get("reasoning"), entry.get("supported_parameters") or ())
+            else:  # an OpenRouter-style block, else Claude's own form (Meridian lists its Claude models that way)
+                found = thinking_mod.from_block(
+                    entry.get("reasoning"), entry.get("supported_parameters") or ()
+                ) or thinking_mod.from_claude(entry)
             source = target.upstream.name
             if found is None or found == ("none", "high"):  # nothing, or only on / off: the reference may know more
                 ref = reference.thinking(snapshot.names.name(model_id, target.upstream.name))
@@ -3004,27 +3006,33 @@ def create_app(
         merged: dict[str, dict] = {}
         inner: dict[str, str] = {}  # "model@upstream" or an alias's name -> the ID in the list
         everything: dict[str, dict] = {}  # hidden models too: an alias may point at one
+        offering: dict[str, list[tuple[Target, dict]]] = {}  # each model's upstreams, hidden too (aliases' levels)
         for target in targets:
             upstream = target.upstream.name
             for model in catalogs.models(target.id, raw=True):
                 real = model["id"]
                 entry = sized(real, target, model)
                 everything.setdefault(real, entry)
+                offering.setdefault(real, []).append((target, model))
                 public = ids.of.get((upstream, real))
                 if public is None or not model_allowed(allowed, real, upstream, public):
                     continue  # hidden there, or not this client's
+                pair = [(target, model)]
+                levels = thinking_for(real, pair, manual_thinking)
                 if (target.id, real) in snapshot.names.custom:
-                    pair = [(target, model)]
-                    levels = thinking_for(real, pair, manual_thinking)
-                    merged[public] = own_entry(public, entry, levels, reads_images(real, pair))
+                    merged[public] = thinks(own_entry(public, entry, levels, reads_images(real, pair)), levels)
                 else:
-                    merged[public] = {**entry, "id": public}
+                    merged[public] = thinks({**entry, "id": public}, levels)
                 inner[f"{real}@{upstream}"] = public
         if not merged and all(catalogs.ids(t.id) is None for t in targets):
             return error_response("no upstream returned a model list", 502, "upstream_error")
         for alias in snapshot.aliases.values():
             if not allowed or alias.name in allowed:
-                merged[alias.name] = alias_entry(alias, everything.get(first_model(alias.name)[0] or ""))
+                bare, pins = first_model(alias.name)
+                pairs = [(t, e) for t, e in offering.get(bare or "", []) if not pins or t.id in pins]
+                plain = alias.council == "off"  # a council's members and judge are asked as they are
+                levels = thinking_for(bare, pairs, manual_thinking) if plain and bare and pairs else None
+                merged[alias.name] = thinks(alias_entry(alias, everything.get(bare or "")), levels)
                 inner[alias.name] = alias.name
         scored = await asyncio.to_thread(store.list_model_scores)
         overrides = await asyncio.to_thread(store.list_model_prices)
@@ -5449,6 +5457,16 @@ def alias_entry(alias, target: dict | None) -> dict:
         entry["context_length"] = alias.virtual_context
     entry["queuerouter"] = {"type": "alias"}
     return entry
+
+
+def thinks(entry: dict, thinking: thinking_mod.Thinking | None) -> dict:
+    """A /v1/models entry that says its model can think, where QueueRouter knows levels for it (yours, its provider's
+    list, the reference): ``reasoning`` and ``supports_reasoning`` true, the fields some apps read and nothing else
+    (oh-my-pi sends no level to a model without them: Meridian's list has neither). A provider's own value stays."""
+    if thinking is None or all(value == "none" for _, value in thinking.variants):
+        return entry
+    flags = {key: True for key in ("reasoning", "supports_reasoning") if key not in entry}
+    return {**entry, **flags} if flags else entry
 
 
 def own_entry(public: str, entry: dict, thinking: thinking_mod.Thinking | None, images: bool) -> dict:
