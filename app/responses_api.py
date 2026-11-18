@@ -124,6 +124,13 @@ def _tool(tool: dict) -> dict:
     return {"type": "function", "function": function}
 
 
+def _effort(payload: dict) -> str | None:
+    """The thinking level asked for: ``reasoning.effort``, chat completions' ``reasoning_effort`` there."""
+    reasoning = payload.get("reasoning")
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    return effort if isinstance(effort, str) and effort else None
+
+
 def to_chat(payload: dict, history: list[dict]) -> tuple[dict, list[dict]]:
     """Responses request -> (chat completion request, this turn's input messages)."""
     if not isinstance(payload, dict):
@@ -139,6 +146,8 @@ def to_chat(payload: dict, history: list[dict]) -> tuple[dict, list[dict]]:
     for name in ("temperature", "top_p", "parallel_tool_calls", "user"):
         if payload.get(name) is not None:
             chat[name] = payload[name]
+    if effort := _effort(payload):  # the thinking level (oh-my-pi's selector on a Responses provider)
+        chat["reasoning_effort"] = effort
     if payload.get("tools"):
         chat["tools"] = [_tool(t) for t in payload["tools"]]
     choice = payload.get("tool_choice")
@@ -200,7 +209,7 @@ def envelope(payload: dict, response_id: str, model: str, status: str, output: l
         "output": output,
         "parallel_tool_calls": payload.get("parallel_tool_calls", True),
         "previous_response_id": payload.get("previous_response_id"),
-        "reasoning": {"effort": None, "summary": None},
+        "reasoning": {"effort": _effort(payload), "summary": None},
         "store": payload.get("store", True),
         "temperature": payload.get("temperature"),
         "text": {"format": fmt},

@@ -396,6 +396,21 @@ async def test_responses_text_and_previous_response(make_stack):
         await client.responses.create(model="mock-model", input="y", previous_response_id=other.id)
 
 
+async def test_responses_pass_the_thinking_level_on(make_stack):
+    """reasoning.effort is the request's reasoning_effort, fitted to the model's levels like any other."""
+    stack = make_stack(models_cache_s=0)
+    reasoning = {"supported_efforts": ["low", "medium", "high"]}
+    stack.mock["extra_model_entries"] = [{"id": "thinker", "object": "model", "reasoning": reasoning}]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await c.get("/v1/models", headers=stack.headers)
+        for effort, expected in (("low", "low"), ("high", "high"), ("xhigh", "high"), (None, None)):
+            body = {"model": "thinker", "input": "hi", **({"reasoning": {"effort": effort}} if effort else {})}
+            r = await c.post("/v1/responses", headers=stack.headers, json=body)
+            assert r.status_code == 200, r.text
+            assert sent(stack).get("reasoning_effort") == expected, effort
+            assert r.json()["reasoning"]["effort"] == effort
+
+
 async def test_responses_function_calls(make_stack):
     stack = make_stack()
     client = openai.AsyncOpenAI(base_url=f"{stack.url}/v1", api_key=ACCESS_KEY, max_retries=0)

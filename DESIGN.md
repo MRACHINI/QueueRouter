@@ -2298,6 +2298,11 @@ for (QueueRouter passes the app's User-Agent on). "none" still sends no thinking
 model whose list entry says it has no adaptive thinking gets the effort alone. With thinking on, the sampling
 settings it refuses (temperature other than 1, top_p below 0.95, top_k) are left out; the preset strips them anyway.
 
+v0.84.2: /v1/responses passes the thinking level on. Its `reasoning.effort` was dropped when the request was turned
+into a chat completion, so an app on a Responses provider (oh-my-pi's selector, for one) always got the model's
+default, while the same level as chat completions' `reasoning_effort` worked. It is now that request's
+`reasoning_effort`, fitted to the model's levels like any other, and the response says which effort was asked.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
