@@ -45,6 +45,7 @@ CLAUDE_FIELDS = {
     "stream",
     "cache_control",
     "output_config",
+    "thinking",
 }
 CLAUDE_NO_SYSTEM_MESSAGES = {"claude-sonnet-5", "claude-haiku-4-5", "claude-opus-4-7"}  # in ``messages``
 CLAUDE_NO_FORCED_TOOLS = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"}  # tool_choice any / tool
@@ -562,6 +563,11 @@ def _claude_refusal(body: dict) -> str | None:
         return "max_tokens: Field required"
     if "temperature" in body and body["temperature"] > 1:
         return "temperature: Input should be less than or equal to 1"
+    if body.get("thinking") not in (None, {"type": "adaptive"}, {"type": "disabled"}):
+        return "thinking: type should be adaptive or disabled"
+    if body.get("thinking", {}).get("type") == "adaptive":
+        if body.get("temperature", 1) != 1 or "top_k" in body or body.get("top_p", 1) < 0.95:
+            return "temperature may only be set to 1, and top_k not at all, when thinking is enabled"
     for tool in body.get("tools") or []:
         if set(tool) - {"name", "description", "input_schema"} or tool["input_schema"].get("type") != "object":
             return "tools.0: a tool is a name, a description and an object input_schema"

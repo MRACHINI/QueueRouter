@@ -2289,6 +2289,15 @@ council); a provider's own value stays. oh-my-pi then checks once per model whic
 small requests) and sends the one picked. Claude's own form of levels (`capabilities.effort`) is now read from any
 provider's list, so Meridian as a Custom upstream has its levels too (a level it lacks, like minimal, is fitted).
 
+v0.84.1: a thinking level on an Anthropic-preset upstream turns adaptive thinking on. The level went out as
+`output_config.effort` alone, and without `thinking: {type: "adaptive"}` Opus and Sonnet don't think (Fable and
+Mythos always do), so the level had little to set: through QueueRouter to Meridian, low and max came out alike
+(1101 and 623 tokens for the same question), where oh-my-pi straight to Meridian sends thinking itself. Meridian
+runs Claude Code and takes thinking from the request; with none it uses the setting of the app it takes the request
+for (QueueRouter passes the app's User-Agent on). "none" still sends no thinking (the model's own default), and a
+model whose list entry says it has no adaptive thinking gets the effort alone. With thinking on, the sampling
+settings it refuses (temperature other than 1, top_p below 0.95, top_k) are left out; the preset strips them anyway.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

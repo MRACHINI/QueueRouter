@@ -12,7 +12,10 @@ prompt: a write costs 1.25 times the input price (app/pricing.py), which only pa
 Thinking is neither shown nor passed back. opencode keeps no thinking blocks, blocks in a history that opencode or
 QueueRouter shortened would fail their signature check on Claude 5.1 and later (a 400 on newer accounts), and with
 adaptive thinking a turn without them is valid: the model just can't see its earlier reasoning, as on the
-OpenAI-compatible endpoint. A thinking level asked for (``reasoning_effort``) is Claude's ``output_config.effort``.
+OpenAI-compatible endpoint. A thinking level asked for (``reasoning_effort``) is Claude's ``output_config.effort``,
+with adaptive thinking turned on: without it Opus and Sonnet don't think at all (Fable and Mythos always do), so the
+level had nothing to set, and Meridian, which runs Claude Code, takes thinking from the request the same way. "none"
+leaves thinking as the model has it.
 
 System and developer messages before the conversation are its system prompt. Later ones stay where they are, as
 Claude's own ``role: "system"`` messages on the models that take them (Opus 4.8, Sonnet 5.5, Haiku 5.5 and later):
@@ -294,6 +297,22 @@ def _effort(wanted, entry: dict | None, model) -> str | None:
     return below[-1] if below else have[0]
 
 
+def _adaptive(wanted: str, entry: dict | None) -> bool:
+    """Whether a level asked for turns adaptive thinking on: any but "none", unless the model's list entry says it has
+    no adaptive thinking (only models that take an effort get here)."""
+    if wanted.lower() == "none":
+        return False
+    capabilities = (entry or {}).get("capabilities")
+    thinking = capabilities.get("thinking") if isinstance(capabilities, dict) else None
+    if not isinstance(thinking, dict):
+        return True
+    if thinking.get("supported") is False:
+        return False
+    types = thinking.get("types")
+    adaptive = types.get("adaptive") if isinstance(types, dict) else None
+    return not (isinstance(adaptive, dict) and adaptive.get("supported") is False)
+
+
 def _body(payload: dict, entry: dict | None) -> dict:
     model = payload.get("model")
     system, messages = _messages(payload.get("messages") or [], model)
@@ -340,6 +359,14 @@ def _body(payload: dict, entry: dict | None) -> dict:
     config: dict = {}
     if effort := _effort(payload.get("reasoning_effort"), entry, model):
         config["effort"] = effort
+        if _adaptive(payload.get("reasoning_effort"), entry):
+            body["thinking"] = {"type": "adaptive"}
+            # what thinking allows: temperature 1, top_p from 0.95, no top_k (anything else is a 400)
+            if body.get("temperature", 1) != 1:
+                del body["temperature"]
+            if not isinstance(body.get("top_p", 1), int | float) or body.get("top_p", 1) < 0.95:
+                del body["top_p"]
+            body.pop("top_k", None)
     answer_format = payload.get("response_format")
     schema = answer_format.get("json_schema") if isinstance(answer_format, dict) else None
     if isinstance(schema, dict) and schema.get("strict") is True and isinstance(schema.get("schema"), dict):

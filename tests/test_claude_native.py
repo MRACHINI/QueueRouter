@@ -116,7 +116,9 @@ def test_a_conversation_in_claudes_format():
         "stop_sequences",
         "temperature",
         "output_config",
+        "thinking",
     }
+    assert body["thinking"] == {"type": "adaptive"}  # a level asked for: without it Opus doesn't think
     assert body["system"] == "first" and body["cache_control"] == {"type": "ephemeral"}
     assert body["max_tokens"] == 500 and body["stop_sequences"] == ["END"] and body["temperature"] == 1
     assert body["output_config"] == {"effort": "high"}
@@ -346,9 +348,30 @@ EFFORT = {"supported": True, **{e: {"supported": e != "xhigh"} for e in claude.E
 def test_a_thinking_level_is_claudes_effort(wanted, model, entry, expected):
     body = claude.request(user(model=model, reasoning_effort=wanted), entry)
     assert body.get("output_config", {}).get("effort") == expected
+    thinks = expected is not None and wanted != "none"  # "none": thinking as the model has it
+    assert body.get("thinking") == ({"type": "adaptive"} if thinks else None)
     schema = {"type": "json_schema", "json_schema": {"name": "a", "schema": {"type": "object"}, "strict": True}}
     both = claude.request(user(reasoning_effort="low", response_format=schema))["output_config"]
     assert both == {"effort": "low", "format": {"type": "json_schema", "schema": {"type": "object"}}}
+
+
+def test_thinking_turned_on_only_with_what_it_allows():
+    """Adaptive thinking goes with a level, unless the model's list entry says it has none, and takes the sampling
+    settings thinking refuses with it."""
+    sampling = {"temperature": 0.5, "top_p": 0.5, "top_k": 40}
+    body = claude.request(user(reasoning_effort="high", **sampling))
+    assert body["thinking"] == {"type": "adaptive"}
+    assert not {"temperature", "top_p", "top_k"} & set(body)
+    allowed = claude.request(user(reasoning_effort="high", temperature=1, top_p=0.95))
+    assert allowed["temperature"] == 1 and allowed["top_p"] == 0.95
+    plain = claude.request(user(**sampling))  # no level: nothing changes
+    assert "thinking" not in plain and {k: plain[k] for k in sampling} == sampling
+    for thinking in ({"supported": False}, {"supported": True, "types": {"adaptive": {"supported": False}}}):
+        entry = {"capabilities": {"thinking": thinking}}
+        body = claude.request(user(reasoning_effort="high", **sampling), entry)
+        assert body["output_config"] == {"effort": "high"} and "thinking" not in body and body["top_k"] == 40
+    listed = {"capabilities": {"thinking": {"supported": True, "types": {"adaptive": {"supported": True}}}}}
+    assert claude.request(user(reasoning_effort="low"), listed)["thinking"] == {"type": "adaptive"}
 
 
 def test_parts_in_the_responses_apis_form():
@@ -693,6 +716,7 @@ async def test_claude_takes_the_conversation_as_shaped(make_stack):
         ],
     }
     assert sent["output_config"] == {"effort": "high"}  # xhigh it lacks: the nearest below
+    assert sent["thinking"] == {"type": "adaptive"}
     models = config["provider"]["queuerouter"]["models"]
     model = models.get(f"{MODEL}@upstream") or models[MODEL]
     assert model["thinking"]["variants"] == [["low", "low"], ["medium", "medium"], ["high", "high"], ["max", "max"]]
