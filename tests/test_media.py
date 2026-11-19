@@ -312,3 +312,66 @@ async def test_models_a_provider_doesnt_list_can_be_added(make_stack):
         assert sent["model"] == "happyhorse-1.1-i2v"
         assert sent["input"]["media"] == [{"type": "first_frame", "url": "https://x/a.png"}]
     assert media.price_text("happyhorse-1.1-i2v", "video") == "480p $0.07/s, 720p $0.14/s, 1080p $0.18/s; 3 to 15 s"
+
+
+def test_video_media_as_each_model_takes_it():
+    """Wan 3.0: frames, or any mix of reference images, videos and sound (reference_audio), not both; its sound off;
+    a length it picks. Wan 2.7 T2V: its sound as input.audio_url. Wan 2.7 I2V: driving_audio."""
+
+    def refs(*items):
+        return [{"type": kind, kind: {"url": url}} for kind, url in items]
+
+    body = media.video_request(
+        {
+            "model": "wan3.0-video",
+            "prompt": "Image 1 dances to Audio 1 like Video 1",
+            "duration": -1,
+            "generate_audio": False,
+            "input_references": refs(
+                ("image_url", "https://x/i"), ("video_url", "https://x/v"), ("audio_url", "https://x/a")
+            ),
+        }
+    )
+    assert body["input"]["media"] == [
+        {"type": "reference_image", "url": "https://x/i"},
+        {"type": "reference_video", "url": "https://x/v"},
+        {"type": "reference_audio", "url": "https://x/a"},
+    ]
+    assert body["parameters"]["duration"] == -1 and body["parameters"]["audio"] is False
+    try:
+        media.video_request(
+            {
+                "model": "wan3.0-video",
+                "prompt": "x",
+                "frame_images": [{"image_url": "https://x/f", "frame_type": "first_frame"}],
+                "input_references": refs(("image_url", "https://x/i")),
+            }
+        )
+        raise AssertionError("a frame and references were taken together")
+    except media.Unsupported:
+        pass
+    t2v = media.video_request(
+        {"model": "wan2.7-t2v", "prompt": "x", "input_references": refs(("audio_url", "https://x/a"))}
+    )
+    assert t2v["input"] == {"prompt": "x", "audio_url": "https://x/a"} and "audio" not in t2v["parameters"]
+    i2v = media.video_request(
+        {
+            "model": "wan2.7-i2v",
+            "prompt": "x",
+            "frame_images": [{"image_url": "https://x/f"}],
+            "input_references": refs(("audio_url", "https://x/a")),
+        }
+    )
+    assert i2v["input"]["media"] == [
+        {"type": "first_frame", "url": "https://x/f"},
+        {"type": "driving_audio", "url": "https://x/a"},
+    ]
+    assert "duration" not in media.video_request({"model": "wan2.7-t2v", "prompt": "x", "duration": -1})["parameters"]
+    found = media.inline_media(
+        {
+            "frame_images": [{"image_url": "data:image/png;base64,AAAA"}],
+            "input_references": refs(("audio_url", "data:audio/mpeg;base64,BBBB")),
+        }
+    )
+    assert [url for _, url in found] == ["data:image/png;base64,AAAA", "data:audio/mpeg;base64,BBBB"]
+    assert media.decode_data_url("data:audio/mpeg;base64,QUJD") == (b"ABC", "audio/mpeg")

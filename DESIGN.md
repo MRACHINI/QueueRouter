@@ -2392,6 +2392,17 @@ lists t2v, i2v and r2v), so they couldn't be used. Each upstream now has "Extra 
 isn't added twice), so they're offered like the others: /v1/models (an image or video model recognised by name),
 the Models page, choosing what it offers, aliases, and /mcp/media. The Qwen preset's note says so.
 
+v0.87.2: Wan 3.0's four inputs, as Alibaba's Wan 3.0 guide gives them (help.aliyun.com/en/model-studio/
+wan3-video-generation-guide): `first_frame` / `last_frame`, or any mix of `reference_image` (10), `reference_video`
+(5, 15 s in all; also what it edits or extends when the prompt says so) and `reference_audio` (5, 15 s in all), not
+frames and references together (refused before it's sent); `parameters.audio: false` for a silent video (sound is on
+by default: `generate_audio: false`); `duration: -1` lets it pick. Sound was sent as `driving_audio` (Wan 2.7 I2V's
+name), now per model: Wan 3.0 `reference_audio`, a text-to-video model `input.audio_url` (Wan 2.5 to 2.7), image-to-
+video `driving_audio`. Qwen's examples take media only as public links, so a data: URL in a video request for Qwen
+(inline images, clips, sound) is kept as one of QueueRouter's own copies first (`host_inline`, kind "input", kept like
+made media) and sent as its /media link, which Qwen fetches; through /v1/videos and the MCP tool alike. The MCP
+`generate_video` tool gains `last_frame`, `reference_videos`, `audio` (e.g. text_to_speech's link) and `sound`.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

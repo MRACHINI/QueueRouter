@@ -3557,20 +3557,46 @@ def create_app(
         for field in ("aspect_ratio", "seed"):
             if args.get(field) is not None:
                 body[field] = args[field]
-        if first := links(args.get("first_frame")):
-            body["frame_images"] = [{"type": "image_url", "image_url": {"url": first[0]}, "frame_type": "first_frame"}]
-        if references := links(args.get("reference_images")):
-            body["input_references"] = [{"type": "image_url", "image_url": {"url": url}} for url in references]
+        frames = [
+            {"type": "image_url", "image_url": {"url": url[0]}, "frame_type": role}
+            for role in ("first_frame", "last_frame")
+            if (url := links(args.get(role)))
+        ]
+        if frames:
+            body["frame_images"] = frames
+        kinds = (("reference_images", "image_url"), ("reference_videos", "video_url"), ("audio", "audio_url"))
+        references = [{"type": kind, kind: {"url": url}} for field, kind in kinds for url in links(args.get(field))]
+        if references:
+            body["input_references"] = references
+        if args.get("sound") is False:
+            body["generate_audio"] = False
+        if served_on_qwen(model):  # Qwen takes media as links: inline ones become QueueRouter's
+            body = await host_inline(request, client, body)
         status, content, _ = await serve_as(request, client, "videos", body)
         if status >= 400:
             return mcp_mod.text(f"The video {failure(status, content)}", True)
         job_id = json.loads(content).get("id")
-        estimate = media_mod.video_cost(real, seconds, resolution)
+        estimate = media_mod.video_cost(real, seconds, resolution) if seconds > 0 else None
         about = f", about ${estimate:.2f}" if estimate is not None else ""
+        length = "a video of the length it picks" if seconds == -1 else f"a {seconds} s video"
         return mcp_mod.text(
-            f"Started a {seconds} s {resolution} video with {model}{about}. job_id: {job_id}\n"
+            f"Started {length} at {resolution} with {model}{about}. job_id: {job_id}\n"
             "It takes one to three minutes: call check_video with this job_id in about 30 seconds."
         )
+
+    async def host_inline(request: Request, client: ClientKey, payload: dict) -> dict:
+        """A video request with its data: URLs (inline images, videos, sound) replaced by QueueRouter's own links,
+        which Qwen can fetch: its video API takes media as public links. Kept like made media (media_keep_days)."""
+        found: dict[str, str] = {}
+        for _, url in media_mod.inline_media(payload):
+            if url in found or (decoded := media_mod.decode_data_url(url)) is None:
+                continue
+            data, mime = decoded
+            file_id = f"input-{uuid.uuid4().hex}"
+            await asyncio.to_thread(store.add_media_file, {"id": file_id, "client": client.name, "kind": "input"})
+            await save_media(file_id, mime, data)  # written before the request goes: Qwen fetches it next
+            found[url] = media_link(request, file_id)
+        return media_mod.replace_media(payload, found) if found else payload
 
     async def mcp_check_video(request: Request, client: ClientKey, job_id: str) -> dict:
         progress = await video_progress(job_id, request, client)
@@ -5254,6 +5280,13 @@ def create_app(
             return await submit_job(
                 client, {"request": payload, "endpoint": f"/v1/{path}", "priority": wanted, "tags": tags}
             )
+        if path == media_mod.VIDEO_PATH and b"data:" in body:  # inline media for Qwen: hosted, and sent as links
+            try:
+                payload = json.loads(body)
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict) and served_on_qwen(payload.get("model")):
+                body = json.dumps(await host_inline(request, client, payload)).encode()
         if path == media_mod.TRANSCRIBE_PATH and (
             (fields := media_mod.form_fields(body, request.headers.get("content-type", ""))) is not None
             and served_on_qwen(fields.get("model"))

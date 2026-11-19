@@ -330,8 +330,11 @@ def video_request(payload: dict) -> dict:
     """An OpenRouter video request as the body of Qwen's video API: the prompt, its images, videos and sound as
     ``input.media`` (each marked with what it is for the model), ``parameters`` as Qwen names them."""
     model = str(payload.get("model") or "")
+    name = model.lower().rsplit("/", 1)[-1]
     prompt = payload.get("prompt")
-    edits = "videoedit" in model or "video-edit" in model
+    edits = "videoedit" in name or "video-edit" in name
+    wan3 = name.startswith("wan3")  # all in one: frames, or any mix of reference images, videos and sound
+    audio_url = None  # a text-to-video model's own sound: input.audio_url (Wan 2.5 to 2.7)
     media: list[dict] = []
     for frame in payload.get("frame_images") or []:
         role = frame.get("frame_type") if isinstance(frame, dict) else None
@@ -342,15 +345,25 @@ def video_request(payload: dict) -> dict:
         if kind_ == "video_url":
             urls, role = _urls(ref.get("video_url")), "video" if edits else "reference_video"
         elif kind_ == "audio_url":
-            urls, role = _urls(ref.get("audio_url")), "driving_audio"
+            urls = _urls(ref.get("audio_url"))
+            if not wan3 and "t2v" in name:  # its one sound track, not a media item
+                audio_url = urls[0] if urls else audio_url
+                continue
+            role = "reference_audio" if wan3 else "driving_audio"  # Wan 2.7 I2V: sound it follows
         else:
             urls, role = _urls(ref), "reference_image"
         media += [{"type": role, "url": url} for url in urls]
+    framed = any(m["type"] in ("first_frame", "last_frame") for m in media)
+    if wan3 and framed and any(m["type"].startswith("reference_") for m in media):
+        raise Unsupported("Wan 3.0 takes a first or last frame, or reference images, videos and sound, not both")
     if not (isinstance(prompt, str) and prompt.strip()) and not media:
         raise Unsupported("a prompt or an image to start from is required")
     parameters: dict = {"watermark": bool(payload.get("watermark", False))}  # Qwen's default would add one
-    if isinstance(duration := payload.get("duration"), int | float) and duration > 0:
+    duration = payload.get("duration")
+    if isinstance(duration, int | float) and (duration > 0 or (wan3 and duration == -1)):  # -1: Wan 3.0 picks
         parameters["duration"] = int(duration)
+    if wan3 and payload.get("generate_audio") is False:  # its sound is on by default
+        parameters["audio"] = False
     if isinstance(payload.get("seed"), int):
         parameters["seed"] = payload["seed"]
     if payload.get("prompt_extend") is not None:
@@ -374,7 +387,44 @@ def video_request(payload: dict) -> dict:
         content["prompt"] = prompt
     if media:
         content["media"] = media
+    if audio_url:
+        content["audio_url"] = audio_url
     return {"model": model, "input": content, "parameters": parameters}
+
+
+def inline_media(payload: dict) -> list[tuple[str, str]]:
+    """The data: URLs in a video request (its frames and references), with where each is: Qwen takes media as public
+    links, so QueueRouter hosts these and sends their links (``replace_media``)."""
+    found = []
+    for frame in payload.get("frame_images") or []:
+        found += [("frame", url) for url in _urls(frame) if url.startswith("data:")]
+    for ref in payload.get("input_references") or []:
+        kind_ = ref.get("type") if isinstance(ref, dict) else None
+        inner = ref.get(kind_) if kind_ in ("video_url", "audio_url") else ref
+        found += [("reference", url) for url in _urls(inner) if url.startswith("data:")]
+    return found
+
+
+def replace_media(value, links: dict[str, str]):
+    """``value`` (a request, or part of one) with each data: URL in ``links`` replaced by its link."""
+    if isinstance(value, str):
+        return links.get(value, value)
+    if isinstance(value, list):
+        return [replace_media(item, links) for item in value]
+    if isinstance(value, dict):
+        return {key: replace_media(item, links) for key, item in value.items()}
+    return value
+
+
+def decode_data_url(url: str) -> tuple[bytes, str] | None:
+    """A data: URL's bytes and type, or None when it isn't a base64 one."""
+    found = re.match(r"data:([\w.+-]+/[\w.+-]+)?(?:;[^,]*)?;base64,(.*)", url, re.S)
+    if not found:
+        return None
+    try:
+        return base64.b64decode(found[2]), found[1] or "application/octet-stream"
+    except ValueError:
+        return None
 
 
 def video_cost(model: str, seconds, height, audio: bool = False) -> float | None:

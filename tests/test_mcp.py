@@ -3,6 +3,7 @@ a header or in the address, and its tools going through the same pipeline as /v1
 download links that send to the provider's file while it lasts and to QueueRouter's own copy after."""
 
 import asyncio
+import base64
 import re
 
 import httpx
@@ -97,7 +98,7 @@ async def test_images_and_videos_through_mcp(make_stack):
 
         # a video: started, followed, then a link that sends to the provider's file, later to QueueRouter's copy
         started = said(await tool("generate_video", prompt="a red ball", duration=2, resolution="480p"))
-        assert "Started a 2 s 480p video with wan3.0-video, about $0.07." in started
+        assert "Started a 2 s video at 480p with wan3.0-video, about $0.07." in started
         job_id = re.search(r"job_id: (\S+)", started)[1]
         assert stack.mock["qwen_video_requests"][-1]["parameters"]["resolution"] == "480P"
         assert "Still in progress" in said(await tool("check_video", job_id=job_id))
@@ -120,3 +121,36 @@ async def test_images_and_videos_through_mcp(make_stack):
         failed = (await tool("check_video", job_id="video-unknown"))["result"]
         assert failed["isError"] and "not found" in failed["content"][0]["text"]
         assert (await tool("generate_image", prompt=" "))["result"]["isError"]
+
+
+async def test_a_video_from_inline_media(make_stack):
+    """Inline images and sound in a video request become QueueRouter's own links (Qwen takes media as links), which
+    serve the files; the MCP tool takes a last frame, reference videos, sound and a silent video too."""
+    stack = make_stack(models_cache_s=0)
+    qwen(stack, "wan3.0-video")
+    keyed = f"/mcp/media/{ACCESS_KEY}"
+    png = "data:image/png;base64," + base64.b64encode(b"\x89PNGframe").decode()
+    mp3 = "data:audio/mpeg;base64," + base64.b64encode(b"ID3song").decode()
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await c.get("/v1/models", headers=stack.headers)
+        args = {"prompt": "Image 1 sings Audio 1", "reference_images": [png], "audio": [mp3], "sound": False}
+        r = await c.post(keyed, json=call("tools/call", {"name": "generate_video", "arguments": args}))
+        assert not r.json()["result"]["isError"], r.text
+        sent = stack.mock["qwen_video_requests"][-1]
+        image, audio = sent["input"]["media"]
+        assert image["type"] == "reference_image" and audio["type"] == "reference_audio"
+        assert "/media/" in image["url"] and "/media/" in audio["url"] and sent["parameters"]["audio"] is False
+        assert (await c.get(image["url"])).content == b"\x89PNGframe"
+        assert (await c.get(audio["url"])).content == b"ID3song"
+
+        # the same through the API (OpenRouter's form)
+        body = {
+            "model": "wan3.0-video",
+            "prompt": "go",
+            "frame_images": [{"type": "image_url", "image_url": {"url": png}, "frame_type": "first_frame"}],
+        }
+        r = await c.post("/v1/videos", headers=stack.headers, json=body)
+        assert r.status_code == 200, r.text
+        frame = stack.mock["qwen_video_requests"][-1]["input"]["media"][0]
+        assert frame["type"] == "first_frame" and "/media/" in frame["url"]
+        assert (await c.get(frame["url"])).content == b"\x89PNGframe"

@@ -59,25 +59,43 @@ TOOLS = [
     {
         "name": "generate_video",
         "title": "Start a video",
-        "description": "Start making a video from a prompt, optionally from a first frame or reference images. Returns "
-        "a job_id at once; the video takes one to three minutes: follow it with check_video.",
+        "description": "Start making a video from a prompt, optionally from a first (and last) frame, or from "
+        "reference images, videos and sound (Wan 3.0 takes any mix of those, and edits or extends a reference video "
+        "when the prompt says so; name them in the prompt as Image 1, Video 1, Audio 1). Returns a job_id at once; "
+        "the video takes one to three minutes: follow it with check_video.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "prompt": {**_STRING, "description": "What happens: subject, action, camera, lighting, mood."},
                 "model": {**_STRING, "description": "A video model's id from list_media_models (default: the first)."},
-                "duration": {"type": "integer", "minimum": 2, "description": "Seconds (Wan 3.0: 2 to 30; default 5)."},
+                "duration": {
+                    "type": "integer",
+                    "minimum": -1,
+                    "description": "Seconds (Wan 3.0: 2 to 30, or -1 to let it pick; HappyHorse: 3 to 15; default 5).",
+                },
                 "resolution": {**_STRING, "enum": ["480p", "720p", "1080p"], "description": "Default 720p."},
                 "aspect_ratio": {**_STRING, "enum": ["16:9", "9:16", "1:1", "4:3", "3:4"]},
                 "first_frame": {
                     **_STRING,
                     "description": "The video starts from this image: an https link or data: URL.",
                 },
+                "last_frame": {**_STRING, "description": "The video ends on this image (with a first frame)."},
                 "reference_images": {
                     "type": "array",
                     "items": _STRING,
                     "description": "Who or what should appear (people, products, style): https links or data: URLs.",
                 },
+                "reference_videos": {
+                    "type": "array",
+                    "items": _STRING,
+                    "description": "Clips to follow, edit or extend (Wan 3.0: up to 5, 15 s in all).",
+                },
+                "audio": {
+                    "type": "array",
+                    "items": _STRING,
+                    "description": "Sound to use: a song, a voice-over (text_to_speech's link), up to 15 s in all.",
+                },
+                "sound": {"type": "boolean", "description": "false: a silent video (Wan 3.0 adds sound by default)."},
                 "seed": {"type": "integer"},
             },
             "required": ["prompt"],
