@@ -92,8 +92,9 @@ it. Empty the field and Save to go back to the ID.</p>
 
 <h2 id="contexts">Context sizes</h2>
 <p class="muted small">How many tokens each model accepts. QueueRouter checks requests against it before queuing,
-and opencode is told it (so it compacts in time). It comes from the provider's model list; when a provider doesn't
-say, QueueRouter <strong>learns</strong> it from the provider's own "too long" error. Set it here by hand to fill a gap
+and opencode is told it (so it compacts in time). It comes from, first known first: yours, <em>learned</em> (the
+provider's own "too long" error), its list, models.dev (that provider's own figure, else the model maker's, else the
+median of the providers selling it). Set it here by hand to fill a gap
 or correct a wrong value: on a row for that provider only, in this form for every provider that offers the model (a row's own
 value wins; a plan's context cap still applies on top).</p>
 <p class="muted small"><strong>Output</strong> is the longest answer: opencode is told it, and a bigger answer size an
@@ -119,7 +120,8 @@ median of the providers selling it); else <em>default</em>, 16,384 or half the c
     {% for c in contexts %}
     <tr>
       <td data-label="Model" class="mono small wrap-any">{{ c.label }}{% if c.every %} <span class="badge">every provider</span>{% endif %}</td>
-      <td data-label="In use">{{ "{:,}".format(c.context) if c.context else ("—" if c.every else "unknown") }}</td>
+      <td data-label="In use">{{ "{:,}".format(c.context) if c.context else ("—" if c.every else "unknown") }}
+        {% if c.context and c.context_source %}<span class="small muted">{{ c.context_source }}</span>{% endif %}</td>
       <td data-label="Output">{% if c.every %}—{% elif c.output %}{{ "{:,}".format(c.output) }}
         <span class="small muted">{{ c.output_source }}</span>{% else %}unknown{% endif %}</td>
       <td data-label="Details" class="small">

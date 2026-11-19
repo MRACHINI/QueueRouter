@@ -108,11 +108,37 @@ def test_models_dev_output_sizes():
     assert catalog.output("unknown-model") is None
 
 
+def test_models_dev_contexts_and_whose_figure_counts():
+    """Contexts the same way as output sizes; a maker's figure counts only for its own models (Mistral also lists
+    DeepSeek's, with a smaller output), and a custom name models.dev doesn't know falls back to the ID."""
+    raw = {
+        **SIZES,
+        "mistral": {"models": {"deepseek-v9-flash": {"limit": {"context": 131_072, "output": 128_000}}}},
+        "deepseek": {"models": {"deepseek-v9-flash": {"limit": {"context": 1_048_576, "output": 393_216}}}},
+        "reseller": {"models": {"deepseek-v9-flash-1017": {"limit": {"context": 1_048_576, "output": 262_144}}}},
+        "alibaba": {"models": {"qwen9-max": {"limit": {"context": 983_616, "output": 131_072}}}},
+        "mistral-only": {"models": {"mistral-x": {"limit": {"context": 256_000, "output": 64_000}}}},
+    }
+    catalog = catalog_with(raw)
+    assert catalog.contexts["deepseek/deepseek-v9-flash"] == 1_048_576
+    assert catalog.output("deepseek-v9-flash-1017") == (393_216, "deepseek")  # not Mistral's
+    assert catalog.context("deepseek-v9-flash-1017") == (1_048_576, "deepseek")
+    assert catalog.context("deepseek-v9-flash-1017", "reseller") == (1_048_576, "reseller")  # its own provider
+    assert catalog.context("glm-9") == (1_000_000, "zai")
+    assert catalog.context("qwen9-max", None, name="Qwen9 MAX") == (983_616, "alibaba")
+    assert catalog.context("qwen9-max", None, name="My favourite") == (983_616, "alibaba")  # an unknown name
+    assert catalog.output("mistral-x") == (64_000, "median of 1 provider")  # no maker's own: as before
+    assert catalog.context("unknown-model") is None
+
+
 def test_an_older_catalog_file_is_fetched_again(tmp_path):
     path = tmp_path / "prices.json"
     path.write_text(json.dumps({"fetched_at": time.time(), "prices": PriceCatalog.slim(SIZES)}))
     old = PriceCatalog(str(path))
     assert old.load_file() and old.stale and old.outputs == {}  # no sizes in it yet: fetched again soon
+    sizes = {k: v for k, v in PriceCatalog.slim_sizes(SIZES).items() if k != "contexts"}
+    path.write_text(json.dumps({"fetched_at": time.time(), "prices": PriceCatalog.slim(SIZES), "sizes": sizes}))
+    assert old.load_file() and old.stale and old.contexts == {}  # no contexts yet: fetched again soon too
     fresh = catalog_with(SIZES)
     fresh.path = str(path)
     fresh._save()
@@ -179,6 +205,15 @@ async def test_output_sizes_from_the_list_and_from_models_dev(make_stack):
         assert r.status_code == 200 and json.loads(stack.mock["last_body"])["max_tokens"] == 30_000
         listed = {m["id"]: m for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]}
         assert listed["mock-model"]["max_output_tokens"] == 30_000  # for apps reading /v1/models too
+        # a context its list doesn't state: models.dev's; one it states: its own
+        stack.mock["extra_model_entries"] = [{"id": "bare-model", "object": "model"}]
+        raw["mockprov"]["models"]["bare-model"] = {"limit": {"context": 200_000}}
+        raw["mockprov"]["models"]["mock-model"]["limit"]["context"] = 100_000
+        stack.app.state.prices.use(PriceCatalog.slim(raw), time.time(), PriceCatalog.slim_sizes(raw))
+        listed = {m["id"]: m for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]}
+        assert listed["bare-model"]["context_length"] == 200_000
+        assert listed["mock-model"]["context_length"] == 262_144
+        assert (await opencode(c, stack))["bare-model"]["limit"]["context"] == 200_000
 
         await login(c, stack.url)
         page = (await c.get("/admin/models")).text

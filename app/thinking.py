@@ -155,6 +155,10 @@ def style_of(base_url: str, entry: dict | None, preset: str | None = None) -> st
         return "vllm"
     if "api.openai.com" in url or "generativelanguage.googleapis.com" in url or "api.groq.com" in url:
         return "openai"
+    if "qwencloudapi.com" in url:
+        # Qwen Cloud: reasoning_effort as it is, "none" turning thinking off (tested live 2026-11: Qwen4 Max and
+        # DeepSeek V4.1 Flash, none -> no reasoning_content, high -> some); its model list states no levels
+        return "openai"
     return PRESET_STYLES.get(preset or "", "unknown")
 
 

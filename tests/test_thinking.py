@@ -34,6 +34,13 @@ def test_levels_from_model_lists():
     assert thinking.style_of("https://openrouter.ai/api/v1", None) == "openrouter"
     assert thinking.style_of("https://api.anthropic.com/v1", None) == "none"
     assert thinking.style_of("http://10.0.0.5:8000/v1", {"engine": "vllm"}) == "vllm"
+    # Qwen Cloud: reasoning_effort as it is ("none": off), both its addresses (tested live)
+    for url in (
+        "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
+        "https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1",
+    ):
+        assert thinking.style_of(url, None) == "openai"
+    assert not thinking.translate({"reasoning_effort": "none"}, "openai")  # sent as it is
 
 
 def test_claudes_own_levels():

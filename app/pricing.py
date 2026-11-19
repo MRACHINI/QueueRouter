@@ -60,6 +60,28 @@ OFFICIAL = (
     "perplexity",
 )
 _DATE_SUFFIX = re.compile(r"[-_:](\d{4}|\d{6}|\d{8}|\d{4}-\d{2}-\d{2})$")
+# Whose model a name is, for the sizes: a maker counts as official only for its own models (Mistral also serves
+# DeepSeek's, with its own limits). Its name or one of its families in the model's name; none named: any maker.
+CREATORS = {
+    "deepseek": ("deepseek",),
+    "openai": ("gpt", "openai", "codex"),
+    "anthropic": ("claude",),
+    "google": ("gemini", "gemma"),
+    "mistral": ("mistral", "codestral", "devstral", "magistral", "ministral", "pixtral"),
+    "xai": ("grok",),
+    "zai": ("glm",),
+    "zhipuai": ("glm",),
+    "moonshotai": ("kimi", "moonshot"),
+    "alibaba": ("qwen", "qwq", "wan"),
+    "minimax": ("minimax",),
+    "cohere": ("command", "cohere"),
+    "ai21": ("jamba",),
+    "meta": ("llama",),
+    "llama": ("llama",),
+    "nvidia": ("nemotron", "nvidia"),
+    "inception": ("mercury",),
+    "perplexity": ("sonar",),
+}
 # Providers models.dev lists without an API address (apps use their own SDKs), by the host of their API.
 OWN_API_HOSTS = {
     "api.anthropic.com": "anthropic",
@@ -97,6 +119,13 @@ def candidate_keys(model_id: str) -> list[str]:
     return keys
 
 
+def creators(keys: list[str]) -> tuple[str, ...]:
+    """The makers whose own figure counts for a model with these lookup keys (``candidate_keys``): those its name
+    names, else any official maker."""
+    named = tuple(maker for maker, families in CREATORS.items() if any(f in k for f in families for k in keys))
+    return named or OFFICIAL
+
+
 def _usable(cost: list[float]) -> bool:
     return cost[0] > 0 or cost[1] > 0  # coding/token "plans" list everything at 0
 
@@ -110,6 +139,8 @@ class PriceCatalog:
         self.index: dict[str, list[str]] = {}
         self.outputs: dict[str, int] = {}  # "provider/model" -> the longest answer, where below its context
         self.output_index: dict[str, list[str]] = {}
+        self.contexts: dict[str, int] = {}  # "provider/model" -> its context
+        self.context_index: dict[str, list[str]] = {}
         self.apis: dict[str, str] = {}  # provider -> its OpenAI-compatible address
         self._found: dict[tuple, Any] = {}  # output() and provider_of(), worked out once per catalog
         self.fetched_at = 0.0
@@ -135,9 +166,10 @@ class PriceCatalog:
 
     @staticmethod
     def slim_sizes(raw: dict) -> dict:
-        """Output sizes (only those below the model's context: one as big as the context says nothing) and the
-        providers' API addresses."""
+        """Output sizes (only those below the model's context: one as big as the context says nothing), contexts,
+        and the providers' API addresses."""
         outputs: dict[str, int] = {}
+        contexts: dict[str, int] = {}
         apis: dict[str, str] = {}
         for provider_id, provider in raw.items():
             if isinstance(provider.get("api"), str):
@@ -147,7 +179,9 @@ class PriceCatalog:
                 output, context = limit.get("output"), limit.get("context")
                 if isinstance(output, int) and output > 0 and not (isinstance(context, int) and output >= context):
                     outputs[f"{provider_id}/{model_id}"] = output
-        return {"outputs": outputs, "apis": apis}
+                if isinstance(context, int) and context >= 1024:
+                    contexts[f"{provider_id}/{model_id}"] = context
+        return {"outputs": outputs, "contexts": contexts, "apis": apis}
 
     def use(self, prices: dict[str, list[float]], fetched_at: float, sizes: dict | None = None) -> None:
         self.prices, self.fetched_at = prices, fetched_at
@@ -157,10 +191,11 @@ class PriceCatalog:
         self.index = index
         if sizes is not None:
             self.outputs, self.apis = dict(sizes.get("outputs") or {}), dict(sizes.get("apis") or {})
-            output_index: dict[str, list[str]] = {}
-            for ref in self.outputs:
-                output_index.setdefault(_norm(ref.split("/", 1)[1]), []).append(ref)
-            self.output_index = output_index
+            self.contexts = dict(sizes.get("contexts") or {})
+            self.output_index, self.context_index = {}, {}
+            for refs, index_of in ((self.outputs, self.output_index), (self.contexts, self.context_index)):
+                for ref in refs:
+                    index_of.setdefault(_norm(ref.split("/", 1)[1]), []).append(ref)
         self._found = {}
 
     def load_file(self) -> bool:
@@ -169,8 +204,8 @@ class PriceCatalog:
         try:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
-            # a file from before output sizes were kept: used, and fetched again soon (counts as stale)
-            fetched_at = float(data["fetched_at"]) if "sizes" in data else 0.0
+            # a file from before output sizes, or contexts, were kept: used, and fetched again soon (counts as stale)
+            fetched_at = float(data["fetched_at"]) if "contexts" in (data.get("sizes") or {}) else 0.0
             self.use(data["prices"], fetched_at, data.get("sizes"))
             return True
         except (OSError, ValueError, KeyError) as exc:
@@ -202,7 +237,7 @@ class PriceCatalog:
         directory = os.path.dirname(self.path) or "."
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".prices-", suffix=".json")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            sizes = {"outputs": self.outputs, "apis": self.apis}
+            sizes = {"outputs": self.outputs, "contexts": self.contexts, "apis": self.apis}
             json.dump({"fetched_at": self.fetched_at, "prices": self.prices, "sizes": sizes}, f)
         os.replace(tmp, self.path)
 
@@ -262,28 +297,42 @@ class PriceCatalog:
         """The longest answer models.dev gives for a model, and whose figure it is: that provider's own for the
         model, else (by its custom ``name`` if it has one) the creator's, else the median of the providers stating
         one. None when models.dev has none."""
-        key = ("output", model_id, provider, name)
+        return self._size("output", model_id, provider, name)
+
+    def context(self, model_id: str, provider: str | None = None, name: str | None = None) -> tuple[int, str] | None:
+        """A model's context as models.dev gives it, found the same way as ``output``."""
+        return self._size("context", model_id, provider, name)
+
+    def _size(self, kind: str, model_id: str, provider: str | None, name: str | None) -> tuple[int, str] | None:
+        key = (kind, model_id, provider, name)
         if key not in self._found:
-            self._found[key] = self._output(model_id, provider, name)
+            outputs = kind == "output"
+            sizes, index = (self.outputs, self.output_index) if outputs else (self.contexts, self.context_index)
+            self._found[key] = self._find_size(sizes, index, model_id, provider, name)
         return self._found[key]
 
-    def _output(self, model_id: str, provider: str | None, name: str | None) -> tuple[int, str] | None:
+    @staticmethod
+    def _find_size(
+        sizes: dict[str, int], index: dict[str, list[str]], model_id: str, provider: str | None, name: str | None
+    ) -> tuple[int, str] | None:
         if provider:
-            if (own := self.outputs.get(f"{provider}/{model_id}")) is not None:
+            if (own := sizes.get(f"{provider}/{model_id}")) is not None:
                 return own, provider
             for k in candidate_keys(model_id):
-                mine = [r for r in self.output_index.get(k, []) if r.split("/", 1)[0] == provider]
+                mine = [r for r in index.get(k, []) if r.split("/", 1)[0] == provider]
                 if mine:
-                    return self.outputs[min(mine, key=len)], provider
-        variants = [self.output_index.get(k, []) for k in candidate_keys(name or model_id)]
-        for maker in OFFICIAL:
+                    return sizes[min(mine, key=len)], provider
+        # by its custom name first, then its ID (a name models.dev doesn't know says nothing about the model)
+        keys = list(dict.fromkeys([*(candidate_keys(name) if name else []), *candidate_keys(model_id)]))
+        variants = [index.get(k, []) for k in keys]
+        for maker in creators(keys):  # a maker's own figure, for its own models only
             for refs in variants:
                 official = [r for r in refs if r.split("/", 1)[0] == maker]
                 if official:
-                    return self.outputs[min(official, key=len)], maker
+                    return sizes[min(official, key=len)], maker
         for refs in variants:
             if refs:
-                size = int(statistics.median(self.outputs[r] for r in refs))
+                size = int(statistics.median(sizes[r] for r in refs))
                 return size, f"median of {len(refs)} provider{'s' if len(refs) > 1 else ''}"
         return None
 

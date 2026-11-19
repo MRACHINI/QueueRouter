@@ -2303,6 +2303,17 @@ into a chat completion, so an app on a Responses provider (oh-my-pi's selector, 
 default, while the same level as chat completions' `reasoning_effort` worked. It is now that request's
 `reasoning_effort`, fitted to the model's levels like any other, and the response says which effort was asked.
 
+v0.84.3: Qwen Cloud's models get thinking levels and contexts. Its model list states only id / object / owner, so
+QueueRouter knew neither. Thinking: an address on `qwencloudapi.com` is now an OpenAI-style API (`reasoning_effort`
+as it is), so the reference's levels are offered; tested live with the user's key: Qwen4 Max and DeepSeek V4.1 Flash
+1017 both answer `none` with no reasoning_content and `high` with some. Context: models.dev's contexts are kept with
+its output sizes and used, after yours, the learned one and the provider's list, found the way output sizes are
+(that provider's own figure, else the maker's, else the median); the Models page says where each context comes from.
+Both sizes now count a maker's figure only for its own models (by its name or families in the model's name:
+`deepseek`, `qwen`, `glm`, `claude`...; none named: any maker, as before): Mistral also lists DeepSeek V4.1 Flash, with
+a 128,000 output, and was taken as DeepSeek's. A custom name models.dev doesn't know falls back to the model's ID.
+Prices keep their old rule.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

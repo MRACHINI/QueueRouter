@@ -1210,12 +1210,33 @@ def create_app(
             return found[0], f"models.dev: {found[1]}"
         return None, ""
 
+    def context_source(model: str, target: Target, entry: dict | None) -> tuple[int | None, str]:
+        """The context ``model`` has on ``target`` and where that comes from, first known first: yours (the Models
+        page), learned from the provider's "too long" error, its model list, models.dev (Qwen Cloud's list states
+        none)."""
+        key = (target.id, model)
+        manual = context_sizes.manual_for(model, target.id)
+        if manual and manual.context:
+            return manual.context, "yours"
+        if key in context_sizes.learned:
+            return context_sizes.learned[key], "learned"
+        if (listed := model_limits(entry, ())) is not None:
+            return listed["context"], "its list"
+        provider = prices.provider_of(target.upstream.base_url)
+        if found := prices.context(model, provider, snapshot.names.custom.get(key)):
+            return found[0], f"models.dev: {found[1]}"
+        return None, ""
+
     def sized(model: str, target: Target, entry: dict | None) -> dict | None:
         """``entry`` (a model list item, None when not listed) with the sizes QueueRouter knows beyond it: yours and
-        the learned ones (context_sizes), and the output size in use as ``max_output_tokens`` (output_source). Its
-        context is in ``context_length`` too, whatever field its provider used (lutheos: ``context_window`` only):
-        some apps read nothing else (oh-my-pi, which then takes 128k)."""
+        the learned ones (context_sizes), else models.dev's context (context_source), and the output size in use as
+        ``max_output_tokens`` (output_source). Its context is in ``context_length`` too, whatever field its provider
+        used (lutheos: ``context_window`` only): some apps read nothing else (oh-my-pi, which then takes 128k)."""
         merged = context_sizes.apply(model, target.id, entry)
+        if model_limits(merged, ()) is None:
+            context, _ = context_source(model, target, entry)
+            if context is not None:
+                merged = {**(merged or {"id": model}), "context_length": context}
         output, _ = output_source(model, target, entry)
         if output is not None and (merged or {}).get("max_output_tokens") != output:  # the key every reader knows
             merged = {**(merged or {"id": model}), "max_output_tokens": output}
@@ -1548,6 +1569,7 @@ def create_app(
             caps = [target.pool.context_cap] if target else []
             used = model_limits(sized(model_id, target, entry), caps) if target else None
             output, source = output_source(model_id, target, entry) if target else (None, "")
+            _, from_where = context_source(model_id, target, entry) if target else (None, "")
             rows.append(
                 {
                     "model": model_id,
@@ -1559,6 +1581,7 @@ def create_app(
                     "cap": target.pool.context_cap if target else None,
                     "manual": context_sizes.manual.get((upstream_id, model_id)),
                     "context": used["context"] if used else None,
+                    "context_source": from_where,
                     "output": used["output"] if used else output,  # what opencode is told (unknown: the default)
                     "output_source": source if output is not None else "default",
                     "every": target is None,
