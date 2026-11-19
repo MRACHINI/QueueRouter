@@ -2385,6 +2385,13 @@ to 1 MB, a link, the cost) and `transcribe`. Also: Qwen-Image says its size as w
 2K Qwen-Image image was priced at 1K and listed without its size; HappyHorse 1.1 I2V and R2V (the Token Plan's
 image-to-video and reference-to-video models) are priced like T2V, and HappyHorse videos take 3 to 15 seconds.
 
+v0.87.1: models a provider serves but doesn't list. An upstream offered exactly its model list (minus what's hidden),
+and Qwen Cloud's Token Plan list names `wan3.0-video` but none of the HappyHorse 1.1 models the plan has (its console
+lists t2v, i2v and r2v), so they couldn't be used. Each upstream now has "Extra models" (Upstreams page; migration 56,
+`upstreams.extra_models`, comma-separated): `Catalogs.extras` adds them to its list as it's read (one it lists already
+isn't added twice), so they're offered like the others: /v1/models (an image or video model recognised by name),
+the Models page, choosing what it offers, aliases, and /mcp/media. The Qwen preset's note says so.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

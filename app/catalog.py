@@ -54,6 +54,14 @@ class Catalogs:
         # Which models each upstream offers (Upstreams page): {upstream_id: (offer_new, models)}, where
         # models are the hidden ones when offer_new, else the only ones offered. Absent = all offered.
         self.filters: dict[int, tuple[bool, frozenset[str]]] = {}
+        # Models an upstream serves that its list leaves out (Upstreams page, "Extra models"): added to its list
+        self.extras: dict[int, tuple[str, ...]] = {}
+
+    def _listed(self, upstream_id: int, entry: _Entry) -> list[dict]:
+        """Its list, with the extra models it doesn't name."""
+        have = {m["id"] for m in entry.models}
+        added = [m for m in self.extras.get(upstream_id, ()) if m not in have]
+        return entry.models + [{"id": m, "object": "model", "owned_by": "added on QueueRouter"} for m in added]
 
     def offered(self, upstream_id: int, model: str) -> bool:
         rule = self.filters.get(upstream_id)
@@ -68,7 +76,7 @@ class Catalogs:
         entry = self._entries.get(upstream_id)
         if not (entry and entry.ok):
             return None
-        return {m["id"] for m in entry.models if raw or self.offered(upstream_id, m["id"])}
+        return {m["id"] for m in self._listed(upstream_id, entry) if raw or self.offered(upstream_id, m["id"])}
 
     def failed(self, upstream_id: int) -> bool:
         """Its list couldn't be fetched (and none was ever): not merely not asked for yet."""
@@ -79,7 +87,7 @@ class Catalogs:
         entry = self._entries.get(upstream_id)
         if not (entry and entry.ok):
             return []
-        return [m for m in entry.models if raw or self.offered(upstream_id, m["id"])]
+        return [m for m in self._listed(upstream_id, entry) if raw or self.offered(upstream_id, m["id"])]
 
     def stale(self, upstream_id: int, max_age_s: float) -> bool:
         """Due for a refresh. A list we never got is retried soon, not after ``max_age_s``."""

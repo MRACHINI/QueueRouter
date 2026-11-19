@@ -599,6 +599,11 @@ def create_app(
         catalogs.filters = {
             t.id: rule for t in snapshot.upstreams.values() if (rule := parse_filter(t.upstream.model_filter))
         }
+        catalogs.extras = {
+            t.id: tuple(m.strip() for m in t.upstream.extra_models.split(",") if m.strip())
+            for t in snapshot.upstreams.values()
+            if t.upstream.extra_models
+        }
 
     def reload() -> None:
         """Re-read configuration from the database and apply it live."""

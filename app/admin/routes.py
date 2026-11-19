@@ -1537,6 +1537,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 "params": _rules_text(form),
                 "max_retries": _opt(form, "max_retries", int, 0),
                 **_ua_fields(form),
+                "extra_models": _extra_models(form),
             }
             base_url = str(form.get("base_url", "")).strip().rstrip("/")
             if base_url:
@@ -2829,6 +2830,14 @@ def _pretty(text: str) -> str:
         return json.dumps(json.loads(text), indent=2, ensure_ascii=False)
     except ValueError:
         return text
+
+
+def _extra_models(form: dict) -> str:
+    """Model ids an upstream serves beyond its list: comma, space or line separated, stored comma-separated."""
+    ids = [m for m in re.split(r"[\s,]+", str(form.get("extra_models", ""))) if m]
+    if any(len(m) > 200 for m in ids) or len(ids) > 200:
+        raise ValueError("extra_models")
+    return ", ".join(dict.fromkeys(ids))
 
 
 def _ua_fields(form: dict) -> dict:

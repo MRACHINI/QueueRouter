@@ -112,7 +112,8 @@ PRESETS: dict[str, Preset] = {
             "key uses https://token-plan.maas.qwencloudapi.com/compatible-mode/v1. Thinking levels go as "
             "reasoning_effort. Image requests (/v1/images/generations and /v1/images/edits) go to Qwen's own image "
             "API, priced per image; videos (/v1/videos, OpenRouter's form) to its video tasks, priced per second; "
-            "speech (/v1/audio/speech, /v1/audio/transcriptions) to its speech APIs.",
+            "speech (/v1/audio/speech, /v1/audio/transcriptions) to its speech APIs. Its model list leaves out "
+            "some models a plan has (the Token Plan's HappyHorse video models): add them under Extra models.",
         ),
         Preset(
             "nvidia",

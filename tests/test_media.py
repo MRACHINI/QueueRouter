@@ -279,3 +279,36 @@ def test_qwen_images_size_from_its_two_sides():
     sent = httpx.Response(200, json=answer, request=httpx.Request("POST", "https://qwen.test/api"))
     got = asyncio.run(media.image_answer(sent, None, payload))
     assert json.loads(got.content)["usage"] == {"images": 1, "size": "2048*2048", "cost": 0.075}
+
+
+async def test_models_a_provider_doesnt_list_can_be_added(make_stack):
+    """Qwen's Token Plan list leaves out its HappyHorse video models: added on the Upstreams page, they're offered
+    like the listed ones (and recognised as video, with their prices)."""
+    from tests.test_admin import csrf_of
+
+    stack = make_stack(models_cache_s=0, bootstrap=OWNER)
+    qwen(stack, "wan3.0-video")
+    store = stack.app.state.store
+    upstream = store.list_upstreams()[0]
+    async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
+        await login(c, stack.url)
+        csrf = csrf_of((await c.get("/admin/upstreams")).text)
+        form = {"csrf": csrf, "weight": "1", "enabled": "on", "ua_mode": "keep"}
+        form["extra_models"] = "happyhorse-1.1-i2v, happyhorse-1.1-r2v\nwan3.0-video"
+        r = await c.post(f"/admin/upstreams/{upstream.id}", data=form)
+        assert r.status_code in (302, 303), r.text
+        assert store.list_upstreams()[0].extra_models == "happyhorse-1.1-i2v, happyhorse-1.1-r2v, wan3.0-video"
+        listed = {m["id"]: m for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]}
+        assert listed["happyhorse-1.1-i2v"]["output_modalities"] == ["video"]
+        assert "happyhorse-1.1-r2v" in listed and "wan3.0-video" in listed
+        assert list(listed).count("wan3.0-video") == 1  # listed already: not twice
+        video = await c.post(
+            "/v1/videos",
+            headers=stack.headers,
+            json={"model": "happyhorse-1.1-i2v", "prompt": "go", "frame_images": [{"image_url": "https://x/a.png"}]},
+        )
+        assert video.status_code == 200, video.text
+        sent = stack.mock["qwen_video_requests"][-1]
+        assert sent["model"] == "happyhorse-1.1-i2v"
+        assert sent["input"]["media"] == [{"type": "first_frame", "url": "https://x/a.png"}]
+    assert media.price_text("happyhorse-1.1-i2v", "video") == "480p $0.07/s, 720p $0.14/s, 1080p $0.18/s; 3 to 15 s"

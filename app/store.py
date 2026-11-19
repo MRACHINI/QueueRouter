@@ -847,6 +847,11 @@ MIGRATIONS: list[str] = [
     ALTER TABLE usage_hourly ADD COLUMN speech_characters INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE usage_hourly ADD COLUMN audio_seconds REAL NOT NULL DEFAULT 0;
     """,
+    # 56: models an upstream serves that its own list leaves out (Qwen Cloud's Token Plan lists no HappyHorse video
+    # model): added to what QueueRouter offers there, by id
+    """
+    ALTER TABLE upstreams ADD COLUMN extra_models TEXT NOT NULL DEFAULT '';
+    """,
 ]
 CHECKERS_CONVERTED = "checkers_converted"  # meta: each alias's checker model became a tagger (_convert_checkers)
 CHECKER_TAGS = (  # what a converted checker gives: exactly one of these
@@ -996,6 +1001,7 @@ class Upstream:
     ua_mode: str = "keep"  # outgoing User-Agent default for requests here: keep | remove | template
     ua_template: str = ""
     model_filter: str = ""  # which models it offers (see Catalogs.filters); "" = all
+    extra_models: str = ""  # models it serves that its list leaves out, comma-separated (Catalogs.extras)
 
 
 @dataclass(frozen=True)
@@ -1519,6 +1525,7 @@ class Store:
                 r["ua_mode"] or "keep",
                 r["ua_template"] or "",
                 r["model_filter"] or "",
+                r["extra_models"] or "",
             )
             for r in self.query("SELECT * FROM upstreams ORDER BY id")
         ]
@@ -1612,6 +1619,7 @@ class Store:
         allowed = {
             "name",
             "model_filter",
+            "extra_models",
             "preset",
             "base_url",
             "api_key_enc",

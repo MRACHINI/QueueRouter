@@ -97,6 +97,9 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
         <input name="ua_template" value="{{ u.ua_template }}" placeholder="User-Agent template, e.g. {original} via queuerouter/{version}" aria-label="User-Agent template" class="grow">
         <label class="span-all small">Parameter rules for this provider <small class="muted">e.g. {"strip": ["store"]} for fields it rejects</small>
           <textarea name="params" rows="1" class="rules" placeholder='{"strip": ["store"]}'>{{ u.params }}</textarea></label>
+        <label class="span-all small">Extra models <small class="muted">ones it serves that its model list leaves out,
+          comma-separated (e.g. Qwen Cloud's happyhorse-1.1-t2v): offered like the listed ones</small>
+          <input name="extra_models" value="{{ u.extra_models }}" placeholder="model-id, another-model-id" aria-label="Extra models"></label>
         <button type="submit" class="secondary">Save</button>
       </form>
     </td>
