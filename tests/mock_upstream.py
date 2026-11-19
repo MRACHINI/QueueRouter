@@ -29,7 +29,7 @@ import re
 import time
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 CLAUDE_FIELDS = {
     "model",
@@ -89,6 +89,67 @@ def create_mock(limit: int = 2) -> FastAPI:
         extra = [{"id": m, "object": "model"} for m in state.get("extra_models", [])]  # no size reported
         extra += state.get("extra_model_entries", [])  # whole entries, e.g. {"id", "reasoning": true, "engine"}
         return {"object": "list", "data": [{"id": "mock-model", "object": "model", "max_model_len": 262144}, *extra]}
+
+    @app.post("/api/v1/services/aigc/multimodal-generation/generation")
+    async def qwen_images(request: Request):
+        """Qwen Cloud's own image API (Qwen-Image, Wan 2.7), synchronous, as tested live: one user message with
+        the prompt and any input images, ``parameters``; the images' links in the message's content."""
+        body = json.loads(await request.body())
+        state.setdefault("qwen_image_requests", []).append(body)
+        state["last_headers"] = {k.lower(): v for k, v in request.headers.items()}
+        if state.get("qwen_image_status"):
+            status = state["qwen_image_status"]
+            return JSONResponse({"code": "Throttling", "message": "forced", "request_id": "r"}, status_code=status)
+        content = body["input"]["messages"][0]["content"]
+        if not isinstance(body.get("model"), str) or not content or "text" not in content[0]:
+            return JSONResponse({"code": "InvalidParameter", "message": "bad input"}, status_code=400)
+        n = body.get("parameters", {}).get("n", 1)
+        size = body.get("parameters", {}).get("size", "1024*1024")
+        base = str(request.base_url).rstrip("/")
+        images = [{"type": "image", "image": f"{base}/files/image-{i}.png?Expires=1"} for i in range(n)]
+        return {
+            "request_id": "req-1",
+            "output": {"choices": [{"message": {"role": "assistant", "content": images}, "finish_reason": "stop"}]},
+            "usage": {"image_count": n, "input_tokens": 29, "output_tokens": 2, "size": size},
+        }
+
+    @app.post("/api/v1/services/aigc/video-generation/video-synthesis")
+    async def qwen_video(request: Request):
+        """Qwen Cloud's video API: tasks only (X-DashScope-Async), as tested live."""
+        body = json.loads(await request.body())
+        state.setdefault("qwen_video_requests", []).append(body)
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        state["last_headers"] = headers
+        if headers.get("x-dashscope-async") != "enable":
+            refusal = {"code": "AccessDenied", "message": "current user api does not support synchronous calls"}
+            return JSONResponse(refusal, status_code=403)
+        task_id = f"task-{len(state['qwen_video_requests'])}"
+        state.setdefault("video_polls", {})[task_id] = 0
+        return {"request_id": "r", "output": {"task_id": task_id, "task_status": "PENDING"}}
+
+    @app.get("/api/v1/tasks/{task_id}")
+    async def qwen_task(task_id: str, request: Request):
+        """A task: running on the first two looks, then done (or failed, with state["video_fail"])."""
+        polls = state.setdefault("video_polls", {})
+        if task_id not in polls:
+            return {"request_id": "r", "output": {"task_id": task_id, "task_status": "UNKNOWN"}}
+        polls[task_id] += 1
+        if polls[task_id] <= 2:
+            return {"request_id": "r", "output": {"task_id": task_id, "task_status": "RUNNING"}}
+        if state.get("video_fail"):
+            output = {"task_id": task_id, "task_status": "FAILED", "code": "DataInspectionFailed", "message": "refused"}
+            return {"request_id": "r", "output": output}
+        base = str(request.base_url).rstrip("/")
+        output = {"task_id": task_id, "task_status": "SUCCEEDED", "video_url": f"{base}/files/video.mp4?Expires=1"}
+        usage = {"duration": 5.0, "output_video_duration": 5.0, "SR": 720, "ratio": "16:9", "video_count": 1}
+        return {"request_id": "r", "output": output, "usage": usage}
+
+    @app.get("/files/{name}")
+    async def qwen_file(name: str):
+        """An image or a video Qwen made, at its temporary link."""
+        if name.endswith(".mp4"):
+            return Response(content=b"\x00\x00\x00\x18ftypmp42" + name.encode(), media_type="video/mp4")
+        return Response(content=b"\x89PNG\r\n\x1a\n" + name.encode(), media_type="image/png")
 
     @app.get("/v1/credits")
     async def credits(request: Request):

@@ -2314,6 +2314,35 @@ Both sizes now count a maker's figure only for its own models (by its name or fa
 a 128,000 output, and was taken as DeepSeek's. A custom name models.dev doesn't know falls back to the model's ID.
 Prices keep their old rule.
 
+v0.85.0: images on Qwen Cloud (app/media.py). QueueRouter already passed any /v1 path on, but Qwen's token-plan
+address has no OpenAI-style `/images/generations` (a bodiless 404, tested). A request to `/v1/images/generations` or
+`/v1/images/edits` for an upstream on Qwen (its new preset, or its address) now goes through the normal pipeline
+(queue, limits, retries, fallbacks, Requests page) to Qwen's own image API, the synchronous one Qwen-Image and Wan 2.7
+share (`/api/v1/services/aigc/multimodal-generation/generation`, tested live with the user's key): the prompt and
+any input images (OpenAI's `image` / `images`, oh-my-pi's `input_references`; links or data: URLs) as one user
+message, `n` / `size` (1024x1024 -> 1024*1024; 2K as it is) / `seed` / `negative_prompt` / `prompt_extend` as
+`parameters`, `watermark` off unless asked. The answer is OpenAI's `data`: Qwen's temporary links (24 h), or with
+`response_format: b64_json` (what oh-my-pi asks) the images themselves, fetched; a multipart edit is refused (Qwen
+takes images as links). Priced per image from Qwen's model pages (Qwen-Image 3.0 Pro $0.04 1K / $0.075 2K plus
+$0.003 an input image, Wan 2.7 Image $0.03, Pro $0.075): the answer's `usage.cost` (oh-my-pi shows it) and the
+request's `media_cost` (migration 51: on requests and both usage tables), which `_PriceBook.costs` counts as the
+request's cost instead of tokens. /v1/models marks image and video models with `output_modalities` (from the
+provider's list, else the name): oh-my-pi gives a model whose only output is images to its image tool; it routes
+no video model of a custom provider, so video serves other apps (and agents that write the request themselves).
+
+Video, in the same release, in OpenRouter's asynchronous form (what oh-my-pi's video client speaks, and other apps):
+`POST /v1/videos` goes through the pipeline to Qwen's video API as a task (`X-DashScope-Async: enable`, tested live:
+wan3.0-video, 5 s at 480P in ~73 s): the prompt, `frame_images` (first / last frame; Vidu's image) and
+`input_references` (reference images or videos, an edit's video, driving audio) as `input.media`, `resolution` /
+`aspect_ratio` / `duration` / `seed` as `parameters` (pixels as `size` for PixVerse and Wan 2.6 and older). Its task
+becomes a job of QueueRouter's (`media_jobs`, migration 52: whose it is, which upstream, which task; a week), answered
+as OpenRouter's job. `GET /v1/videos/{id}` asks Qwen (`tasks/{task_id}`) and answers in the same form; the first time
+it's done the video is priced from the seconds and resolution Qwen reports (`settle_media_job`: once) and written as
+a request with its `media_cost` (the polls themselves aren't); a failed one costs nothing. `GET
+/v1/videos/{id}/content` passes the MP4 on from Qwen's link (a day); `GET /v1/videos/models` lists the video models.
+Only the job's client sees it. Prices per second from Qwen's model pages (Wan 3.0, Prime, Wan 2.7, VACE, HappyHorse,
+PixVerse with and without sound, Vidu); a model without one is unpriced.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

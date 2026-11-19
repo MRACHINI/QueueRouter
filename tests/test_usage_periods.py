@@ -104,7 +104,7 @@ def test_the_upgrade_fills_hours_for_the_days_the_log_holds(tmp_path):
     store.migrate()
     assert store.schema_version() == len(MIGRATIONS)
     assert store.hourly_usage_from() == yesterday  # the day before didn't match: whole days up to there
-    hours = {(r["hour"], r["client"]): tuple(r)[5:] for r in store.query("SELECT * FROM usage_hourly")}
+    hours = {(r["hour"], r["client"]): tuple(r)[5:11] for r in store.query("SELECT * FROM usage_hourly")}
     assert hours == {
         (f"{today}T00", "ali"): (1, 0, 10, 1, 0, 0),
         (f"{today}T00", "bilal"): (1, 1, 10, 1, 0, 0),

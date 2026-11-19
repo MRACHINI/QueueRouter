@@ -784,6 +784,30 @@ MIGRATIONS: list[str] = [
     ALTER TABLE aliases ADD COLUMN fast INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE requests ADD COLUMN fast INTEGER;
     """,
+    # 51: what an image or a video cost (USD), priced per image or second when it was made (app/media.py), next to
+    # the tokens that price everything else
+    """
+    ALTER TABLE requests ADD COLUMN media_cost REAL;
+    ALTER TABLE usage_daily ADD COLUMN media_cost REAL NOT NULL DEFAULT 0;
+    ALTER TABLE usage_hourly ADD COLUMN media_cost REAL NOT NULL DEFAULT 0;
+    """,
+    # 52: video jobs (app/media.py): QueueRouter's id for one, the provider's task behind it, whose it is, and once
+    # it's done, what it cost (priced once, when it's first seen done)
+    """
+    CREATE TABLE media_jobs (
+        id TEXT PRIMARY KEY,
+        client TEXT NOT NULL,
+        upstream_id INTEGER NOT NULL,
+        model TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        alias TEXT,
+        audio INTEGER NOT NULL DEFAULT 0,
+        created REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        cost REAL
+    );
+    CREATE INDEX media_jobs_created ON media_jobs (created);
+    """,
 ]
 CHECKERS_CONVERTED = "checkers_converted"  # meta: each alias's checker model became a tagger (_convert_checkers)
 CHECKER_TAGS = (  # what a converted checker gives: exactly one of these
@@ -802,6 +826,7 @@ CLIENT_DATA_TABLES = (
     "stored_responses",
     "request_content",
     "compaction_summaries",
+    "media_jobs",
 )
 
 CHOICE_COLUMNS = ("client", "outcome", "model", "upstream", "tags", "answer_tags")  # the Requests page's filters
@@ -859,6 +884,7 @@ REQUEST_COLUMNS = (
     "thinking",
     "alias",
     "fast",
+    "media_cost",
 )
 
 
@@ -876,12 +902,13 @@ _UPSERT = "INSERT INTO {table} (key, value) VALUES (?, ?) ON CONFLICT(key) DO UP
 # a finished request added to the daily or hourly usage totals
 _ADD_USAGE = (
     "INSERT INTO {table} ({slot}, client, model, upstream, alias, requests, errors, prompt_tokens, "
-    "completion_tokens, cached_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?) "
+    "completion_tokens, cached_tokens, cache_write_tokens, media_cost) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?) "
     "ON CONFLICT({slot}, client, model, upstream, alias) DO UPDATE SET requests = requests + 1, "
     "errors = errors + excluded.errors, prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
     "completion_tokens = completion_tokens + excluded.completion_tokens, "
     "cached_tokens = cached_tokens + excluded.cached_tokens, "
-    "cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens"
+    "cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens, "
+    "media_cost = media_cost + excluded.media_cost"
 )
 HOUR_FORMAT = "%Y-%m-%dT%H"  # usage_hourly's hours (UTC)
 
@@ -1757,6 +1784,7 @@ class Store:
                     row.get("completion_tokens") or 0,
                     row.get("cached_tokens") or 0,
                     row.get("cache_write_tokens") or 0,
+                    row.get("media_cost") or 0,
                 )
                 when = time.gmtime(row["ts"])
                 for table, slot, fmt in (("usage_daily", "day", "%Y-%m-%d"), ("usage_hourly", "hour", HOUR_FORMAT)):
@@ -1818,7 +1846,7 @@ class Store:
         times = [r["ts"] for r in parents]
         return self.read(
             "SELECT parent, model, target_model, upstream, prompt_tokens, completion_tokens, cached_tokens, "
-            "cache_write_tokens FROM requests "
+            "cache_write_tokens, media_cost FROM requests "
             f"WHERE ts BETWEEN ? AND ? AND parent IN ({marks})",  # noqa: S608
             (min(times) - CALLS_WITHIN_S, max(times) + CALLS_WITHIN_S, *(r["id"] for r in parents)),
         )
@@ -1882,7 +1910,7 @@ class Store:
         return self.query(
             "SELECT client, model, upstream, SUM(requests) AS requests, SUM(prompt_tokens) AS prompt_tokens, "
             "SUM(completion_tokens) AS completion_tokens, SUM(cached_tokens) AS cached_tokens, "
-            "SUM(cache_write_tokens) AS cache_write_tokens "
+            "SUM(cache_write_tokens) AS cache_write_tokens, SUM(media_cost) AS media_cost "
             "FROM usage_daily WHERE day >= ? AND day < ? GROUP BY client, model, upstream",
             (f"{month}-01", f"{month}-32"),
         )
@@ -1895,7 +1923,7 @@ class Store:
         first = self.hourly_usage_from()
         hours = [time.strftime(HOUR_FORMAT, time.gmtime(t)) for t in (start, end)]
         days = [time.strftime("%Y-%m-%d", time.gmtime(t)) for t in (start, end - 1)]
-        counts = "requests, errors, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens"
+        counts = "requests, errors, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, media_cost"
         return self.read(
             f"SELECT hour, substr(hour, 1, 10) AS day, client, model, upstream, alias, {counts} "  # noqa: S608
             "FROM usage_hourly WHERE hour >= ? AND hour < ? AND hour >= ? UNION ALL "
@@ -3560,6 +3588,48 @@ class Store:
     def prune_responses(self, keep_days: float) -> None:
         with self.tx() as db:
             db.execute("DELETE FROM stored_responses WHERE created < ?", (time.time() - keep_days * 86_400,))
+            # video jobs: the provider keeps a task and its video a day; a week covers a late look at the cost
+            db.execute("DELETE FROM media_jobs WHERE created < ?", (time.time() - 7 * 86_400,))
+
+    # -- video jobs (app/media.py) ------------------------------------------------------
+
+    def add_media_job(self, job: dict) -> None:
+        with self.tx() as db:
+            db.execute(
+                "INSERT INTO media_jobs (id, client, upstream_id, model, task_id, alias, audio, created) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job["id"],
+                    job["client"],
+                    job["upstream_id"],
+                    job["model"],
+                    job["task_id"],
+                    job.get("alias"),
+                    1 if job.get("audio") else 0,
+                    time.time(),
+                ),
+            )
+
+    def media_job(self, job_id: str, client: str) -> sqlite3.Row | None:
+        """A video job of ``client``'s, or None (unknown, pruned or another client's)."""
+        rows = self.query("SELECT * FROM media_jobs WHERE id = ? AND client = ?", (job_id, client))
+        return rows[0] if rows else None
+
+    def settle_media_job(self, job_id: str, status: str, cost: float | None) -> bool:
+        """A job seen finished (completed, failed...): True the first time only, so it's priced once."""
+        with self.tx() as db:
+            done = db.execute(
+                "UPDATE media_jobs SET status = ?, cost = ? WHERE id = ? AND status IN ('pending', 'in_progress')",
+                (status, cost, job_id),
+            )
+            return done.rowcount == 1
+
+    def mark_media_job(self, job_id: str, status: str) -> None:
+        with self.tx() as db:
+            db.execute(
+                "UPDATE media_jobs SET status = ? WHERE id = ? AND status IN ('pending', 'in_progress')",
+                (status, job_id),
+            )
 
     # -- admin users and sessions --------------------------------------------------------
 

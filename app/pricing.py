@@ -377,7 +377,11 @@ class _PriceBook:
         return self.prices[key]
 
     def costs(self, row) -> tuple[float, float, float] | None:
-        """What a usage or request row cost: the model that answered, on the upstream that served it."""
+        """What a usage or request row cost: the model that answered, on the upstream that served it. Images and videos
+        are priced per image or second when they're made (``media_cost``, app/media.py), not per token."""
+        media = row["media_cost"] if "media_cost" in row.keys() else None
+        if media:
+            return 0.0, 0.0, float(media)
         target = row["target_model"] if "target_model" in row.keys() else None
         model, _ = unfast(target or row["model"])  # fast mode costs the same per token (it uses quota twice)
         price = self.of(self.names.unpin(model)[0], row["upstream"])
@@ -611,6 +615,7 @@ def request_costs(rows, calls, overrides: dict, catalog: PriceCatalog, names: Mo
         for part in made or [row]:
             _add_usage(used, {**dict(part), "requests": 0, "errors": 0}, book.costs(part))
         tokens = used["prompt_tokens"] or used["completion_tokens"]
+        media = sum(float(p["media_cost"] or 0) for p in made or [row] if "media_cost" in p.keys())
         out.append(
             {
                 **dict(row),
@@ -623,7 +628,7 @@ def request_costs(rows, calls, overrides: dict, catalog: PriceCatalog, names: Mo
                 "cost_in": used["cost_in"],
                 "cost_cached": used["cost_cached"],
                 "cost_out": used["cost_out"],
-                "cost": used["cost"] if tokens else None,
+                "cost": used["cost"] if tokens or media else None,
                 "priced": used["priced"],
             }
         )

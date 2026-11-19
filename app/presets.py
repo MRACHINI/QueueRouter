@@ -104,6 +104,16 @@ PRESETS: dict[str, Preset] = {
             "doesn't send yet).",
         ),
         Preset(
+            "qwen",
+            "Qwen Cloud",
+            "https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1",
+            5,
+            note="Key from home.qwencloud.com/api-keys; keys are per region (this address: Singapore). A Token Plan "
+            "key uses https://token-plan.maas.qwencloudapi.com/compatible-mode/v1. Thinking levels go as "
+            "reasoning_effort. Image requests (/v1/images/generations and /v1/images/edits) go to Qwen's own image "
+            "API, priced per image; videos (/v1/videos, OpenRouter's form) to its video tasks, priced per second.",
+        ),
+        Preset(
             "nvidia",
             "NVIDIA (build.nvidia.com)",
             "https://integrate.api.nvidia.com/v1",

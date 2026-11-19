@@ -29,6 +29,7 @@ from dataclasses import dataclass
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 
 from . import (
     __version__,
@@ -49,6 +50,7 @@ from . import council as council_mod
 from . import cron as cron_mod
 from . import edits as edits_mod
 from . import jobs as jobs_mod
+from . import media as media_mod
 from . import rule_maker as rule_maker_mod
 from . import taggers as taggers_mod
 from . import thinking as thinking_mod
@@ -250,6 +252,7 @@ class RequestLog:
             "user_agent": None,  # the calling app, as it identifies itself
             "sent_user_agent": None,  # what the provider saw instead, when changed by a User-Agent rule
             "fast": None,  # 1: sent to Synthetic as fast:<model> (an alias's fast mode)
+            "media_cost": None,  # USD: what an image or video it made cost (app/media.py), per image or second
             "compaction": None,  # e.g. "trim 812k -> 402k": the conversation was shrunk to fit (app/compaction.py)
             "council": None,  # e.g. "pick 2/3: GLM-4.7": what a model council did (app/council.py)
             "client_headers": None,  # what the app sent about itself (app/upstream.py client_identity)
@@ -1879,20 +1882,69 @@ def create_app(
     def speaks_claude(adm: Admission, target: Target) -> bool:
         return adm.path == "chat/completions" and claude.native(target.upstream)
 
+    def draws_on_qwen(adm: Admission, target: Target) -> bool:
+        """An image request for an upstream on Qwen Cloud: it goes to Qwen's own image API (app/media.py)."""
+        return adm.path in media_mod.IMAGE_PATHS and media_mod.qwen(target.upstream)
+
+    def films_on_qwen(adm: Admission, target: Target) -> bool:
+        """A video request (OpenRouter's /v1/videos) for an upstream on Qwen Cloud: a task of its video API."""
+        return adm.path == media_mod.VIDEO_PATH and media_mod.qwen(target.upstream)
+
+    async def video_started(adm: Admission, target: Target, response: httpx.Response) -> httpx.Response:
+        """Qwen's new task as a job of QueueRouter's: kept with whose it is (polls and the video go to the same
+        upstream, for that client only), answered in OpenRouter's form."""
+        try:
+            content = await response.aread()
+        finally:
+            await response.aclose()
+        if response.status_code != 200:
+            return media_mod.error_answer(response, content)
+        output = media_mod.task_of(content).get("output") or {}
+        task_id = output.get("task_id") if isinstance(output, dict) else None
+        if not isinstance(task_id, str) or not task_id:
+            return media_mod.error_answer(httpx.Response(502, request=response.request), content)
+        payload = json.loads(adm.body)
+        job_id = f"video-{uuid.uuid4().hex}"
+        job = {
+            "id": job_id,
+            "client": adm.client,
+            "upstream_id": target.id,
+            "model": str(payload.get("model") or ""),
+            "task_id": task_id,
+            "alias": adm.rlog.fields.get("alias") or adm.rlog.fields.get("model"),
+            "audio": payload.get("generate_audio") is True,
+        }
+        await asyncio.to_thread(store.add_media_job, job)
+        status = media_mod.STATUSES.get(str(output.get("task_status")), "pending")
+        answer = media_mod.job(job_id, status, bootstrap.public_url or "")  # its address, if PUBLIC_URL is set
+        return httpx.Response(200, json=answer, request=response.request)
+
     def build_request(adm: Admission, target: Target) -> httpx.Request:
         s = cfg()
         native = speaks_claude(adm, target)
+        drawn, filmed = draws_on_qwen(adm, target), films_on_qwen(adm, target)
         path = "messages" if native else adm.path
         url = f"{target.upstream.base_url}/{path}" + (f"?{adm.query}" if adm.query else "")
+        if drawn or filmed:
+            endpoint = media_mod.IMAGE_ENDPOINT if drawn else media_mod.VIDEO_ENDPOINT
+            url = f"{media_mod.api_root(target.upstream.base_url)}/{endpoint}"
         body = adm.body
         # how hard to think, not one of the model's levels (Claude Code's effort, from /v1/messages): the nearest one
         hint = adm.headers.get("x-queuerouter-effort") if adm.path == "chat/completions" else None
         thinking = bool(body) and (b'"reasoning_effort"' in body or bool(hint))  # asked as this provider understands
-        images = bool(body) and not native and b'"image_url"' in body  # Claude reads images; others may not
+        # Claude reads images; others may not (an image or video request's images are what it's made from)
+        images = bool(body) and not native and not drawn and not filmed and b'"image_url"' in body
         fast = adm.fast and not native and is_synthetic(target.upstream.preset, target.upstream.base_url)
         sent_fast = False
+        if drawn or filmed:
+            try:
+                sent = json.loads(body or b"")
+            except ValueError:
+                sent = None
+            if not isinstance(sent, dict):  # e.g. OpenAI's multipart edits: Qwen takes the images as links
+                raise media_mod.Unsupported("send image and video requests to this provider as JSON (images as links)")
         if body and (
-            native or target.upstream.params or thinking or images or fast
+            native or drawn or filmed or target.upstream.params or thinking or images or fast
         ):  # this provider's own rules (e.g. fields it rejects)
             try:
                 payload = json.loads(body)
@@ -1900,7 +1952,11 @@ def create_app(
                 payload = None
             if isinstance(payload, dict):
                 apply_rules(payload, rules_of(target.upstream.params), {})
-                if native or thinking or images:
+                if drawn:
+                    payload = media_mod.image_request(payload)
+                elif filmed:
+                    payload = media_mod.video_request(payload)
+                elif native or thinking or images:
                     entry = next(
                         (m for m in catalogs.models(target.id, raw=True) if m.get("id") == payload.get("model")), None
                     )
@@ -1922,6 +1978,8 @@ def create_app(
         headers = upstream_headers(adm.headers, target.api_key)
         if native:
             headers = claude_headers(headers, target.api_key)
+        if filmed:  # Qwen makes videos as tasks only
+            headers["X-DashScope-Async"] = "enable"
         original_ua = next((v for k, v in headers.items() if k.lower() == "user-agent"), "")
         user_agent = outgoing_user_agent(
             (adm.policy.ua_mode, adm.policy.ua_template),
@@ -2041,12 +2099,16 @@ def create_app(
                         response = await sending
                         if speaks_claude(adm, target):
                             response = claude.answer(response)
+                        elif draws_on_qwen(adm, target):  # its images as OpenAI's answer, fetched if asked as base64
+                            response = await media_mod.image_answer(response, app.state.client, json.loads(adm.body))
+                        elif films_on_qwen(adm, target):  # its task, as a job of QueueRouter's (OpenRouter's form)
+                            response = await video_started(adm, target, response)
                         if adm.rlog.fields["stream"]:  # a non-streamed answer's headers come with all of it
                             adm.rlog.fields["headers_ms"] = round((time.monotonic() - adm.rlog.sent_at) * 1000)
                     except TimeoutError:
                         yield Failed(504, "request exceeded this key's total time limit", "request_timeout")
                         return
-                    except anthropic_api.Unsupported as exc:
+                    except (anthropic_api.Unsupported, media_mod.Unsupported) as exc:
                         yield Failed(400, str(exc), "invalid_request")
                         return
                     except (
@@ -3043,9 +3105,10 @@ def create_app(
                 pair = [(target, model)]
                 levels = thinking_for(real, pair, manual_thinking)
                 if (target.id, real) in snapshot.names.custom:
-                    merged[public] = thinks(own_entry(public, entry, levels, reads_images(real, pair)), levels)
+                    named = own_entry(public, entry, levels, reads_images(real, pair))
+                    merged[public] = media_mod.marked(thinks(named, levels), real)
                 else:
-                    merged[public] = thinks({**entry, "id": public}, levels)
+                    merged[public] = media_mod.marked(thinks({**entry, "id": public}, levels), real)  # images: oh-my-pi
                 inner[f"{real}@{upstream}"] = public
         if not merged and all(catalogs.ids(t.id) is None for t in targets):
             return error_response("no upstream returned a model list", 502, "upstream_error")
@@ -3094,6 +3157,110 @@ def create_app(
         if found is None:
             return error_response(f"The model '{model_id}' does not exist", 404, "model_not_found")
         return found
+
+    # -- video jobs (app/media.py): started by POST /v1/videos through the normal pipeline, followed here ---------
+
+    @app.get("/v1/videos/models")
+    async def video_models(request: Request):
+        """The models that make videos, as OpenRouter lists them (``/videos/models``)."""
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        if unavailable := not_configured():
+            return unavailable
+        data = await model_entries(client)
+        if isinstance(data, Response):
+            return data
+        return {"object": "list", "data": [m for m in data if m.get("output_modalities") == ["video"]]}
+
+    async def video_task(job) -> tuple[Target | None, dict, Response | None]:
+        """A job's provider and Qwen's latest word on its task, or the error to answer instead."""
+        target = snapshot.upstreams.get(job["upstream_id"])
+        if target is None:
+            return None, {}, error_response("the provider of this video was removed", 410, "provider_removed")
+        url = f"{media_mod.api_root(target.upstream.base_url)}/{media_mod.TASKS}/{job['task_id']}"
+        headers = {"Authorization": f"Bearer {target.api_key}", "Accept": "application/json"}
+        try:
+            response = await app.state.client.get(url, headers=headers, timeout=60)
+        except httpx.HTTPError as exc:
+            return target, {}, error_response(f"upstream error: {type(exc).__name__}", 502, "upstream_error")
+        if response.status_code != 200:
+            answer = media_mod.error_answer(response, response.content)
+            return target, {}, Response(answer.content, answer.status_code, media_type="application/json")
+        return target, media_mod.task_of(response.content), None
+
+    def video_made(request: Request, client: ClientKey, job, target: Target, cost: float | None) -> None:
+        """A finished video on the Requests and Usage pages, priced once (the job was settled just now)."""
+        ip = client_ip(request, bootstrap.trusted_proxies)
+        rlog = RequestLog(f"qr-{uuid.uuid4().hex[:12]}", "GET", f"/v1/videos/{job['id']}", ip)
+        rlog.fields.update(
+            client=client.name,
+            model=job["alias"] or job["model"],
+            target_model=job["model"],
+            upstream=target.upstream.name,
+            media_cost=cost,
+            user_agent=(request.headers.get("user-agent") or "")[:300] or None,
+        )
+        rlog.finish(stats, outcome="done", status=200)
+
+    @app.get("/v1/videos/{job_id}")
+    async def video_status(job_id: str, request: Request):
+        """How a video job is going (OpenRouter's form); once done, where the video is and what it cost."""
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        job = await asyncio.to_thread(store.media_job, job_id, client.name)
+        if job is None:
+            return error_response(f"video job '{job_id}' not found", 404, "not_found")
+        target, task, failed = await video_task(job)
+        if failed is not None:
+            return failed
+        output = task.get("output") if isinstance(task.get("output"), dict) else {}
+        status = media_mod.STATUSES.get(str(output.get("task_status")), "in_progress")
+        cost = job["cost"]
+        if status == "completed":
+            cost = media_mod.task_cost(job["model"], task, bool(job["audio"]))
+            if await asyncio.to_thread(store.settle_media_job, job_id, status, cost):
+                video_made(request, client, job, target, cost)
+        elif status in media_mod.FINISHED:
+            await asyncio.to_thread(store.settle_media_job, job_id, status, None)  # nothing made: nothing to pay
+        elif status != job["status"]:
+            await asyncio.to_thread(store.mark_media_job, job_id, status)
+        error = output.get("message") if status in ("failed", "expired") else None
+        return media_mod.job(job_id, status, public_base(request), cost, str(error) if error else None)
+
+    @app.get("/v1/videos/{job_id}/content")
+    async def video_content(job_id: str, request: Request):
+        """The finished video itself, passed on from the provider's temporary link (a day)."""
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        job = await asyncio.to_thread(store.media_job, job_id, client.name)
+        if job is None:
+            return error_response(f"video job '{job_id}' not found", 404, "not_found")
+        _, task, failed = await video_task(job)
+        if failed is not None:
+            return failed
+        output = task.get("output") if isinstance(task.get("output"), dict) else {}
+        link = output.get("video_url")
+        if output.get("task_status") != "SUCCEEDED" or not isinstance(link, str):
+            return error_response("the video isn't ready", 409, "not_ready")
+        if urllib.parse.urlsplit(link).scheme not in ("http", "https"):
+            return error_response("the provider gave no usable link", 502, "upstream_error")
+        try:
+            response = await app.state.client.send(app.state.client.build_request("GET", link), stream=True)
+        except httpx.HTTPError as exc:
+            return error_response(f"upstream error: {type(exc).__name__}", 502, "upstream_error")
+        if response.status_code != 200:
+            await response.aclose()
+            return error_response(f"the video's link answered {response.status_code}", 502, "upstream_error")
+        kept = {k: v for k, v in response.headers.items() if k.lower() == "content-length"}
+        return StreamingResponse(
+            response.aiter_raw(),
+            media_type=response.headers.get("content-type", "video/mp4"),
+            headers=kept,
+            background=BackgroundTask(response.aclose),
+        )
 
     async def _never_disconnects() -> dict:
         await asyncio.Event().wait()
@@ -5228,6 +5395,8 @@ def create_app(
                                 cache_write_tokens=written,
                                 finish_reason=finish_reason_from_body(content),
                             )
+                            if adm.path in media_mod.IMAGE_PATHS:  # priced per image (its usage.cost), not per token
+                                rlog.fields["media_cost"] = media_mod.cost_of(content)
                         headers = response_headers(response.headers)
                         headers.update(adm.hints)
                         headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])

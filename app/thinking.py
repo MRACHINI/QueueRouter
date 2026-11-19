@@ -131,6 +131,7 @@ PRESET_STYLES = {  # an upstream's provider (app/presets.py), for an address tha
     "groq": "openai",
     "refuseless": "refuseless",
     "synthetic": "synthetic",
+    "qwen": "openai",
 }
 
 
