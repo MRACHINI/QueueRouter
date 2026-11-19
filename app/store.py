@@ -821,6 +821,22 @@ MIGRATIONS: list[str] = [
     ALTER TABLE usage_hourly ADD COLUMN videos INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE usage_hourly ADD COLUMN video_seconds REAL NOT NULL DEFAULT 0;
     """,
+    # 54: made images and videos behind QueueRouter's download links (/media/...): the provider's own link while it
+    # lasts, else QueueRouter's copy (a file in <data>/media), kept media_keep_days and up to media_max_mb
+    """
+    CREATE TABLE media_files (
+        id TEXT PRIMARY KEY,
+        client TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        file TEXT,
+        mime TEXT,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        provider_url TEXT,
+        provider_until REAL,
+        created REAL NOT NULL
+    );
+    CREATE INDEX media_files_created ON media_files (created);
+    """,
 ]
 CHECKERS_CONVERTED = "checkers_converted"  # meta: each alias's checker model became a tagger (_convert_checkers)
 CHECKER_TAGS = (  # what a converted checker gives: exactly one of these
@@ -3648,6 +3664,51 @@ class Store:
                 (status, cost, job_id),
             )
             return done.rowcount == 1
+
+    def add_media_file(self, row: dict) -> None:
+        """A made image or video behind a download link (its file may come later: ``keep_media_file``)."""
+        with self.tx() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO media_files (id, client, kind, file, mime, bytes, provider_url, provider_until, "
+                "created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["id"],
+                    row["client"],
+                    row["kind"],
+                    row.get("file"),
+                    row.get("mime"),
+                    row.get("bytes") or 0,
+                    row.get("provider_url"),
+                    row.get("provider_until"),
+                    time.time(),
+                ),
+            )
+
+    def keep_media_file(self, file_id: str, file: str, mime: str, size: int) -> None:
+        with self.tx() as db:
+            db.execute("UPDATE media_files SET file = ?, mime = ?, bytes = ? WHERE id = ?", (file, mime, size, file_id))
+
+    def media_file(self, file_id: str) -> sqlite3.Row | None:
+        rows = self.query("SELECT * FROM media_files WHERE id = ?", (file_id,))
+        return rows[0] if rows else None
+
+    def stale_media_files(self, keep_days: float, max_bytes: int) -> list[sqlite3.Row]:
+        """Copies to delete: older than ``keep_days``, then the oldest while all of them are over ``max_bytes``."""
+        rows = self.query("SELECT id, file, bytes, created FROM media_files ORDER BY created")
+        cutoff = time.time() - keep_days * 86_400
+        old = [r for r in rows if r["created"] < cutoff]
+        kept = [r for r in rows if r["created"] >= cutoff]
+        total = sum(r["bytes"] for r in kept)
+        for row in kept:
+            if total <= max_bytes:
+                break
+            old.append(row)
+            total -= row["bytes"]
+        return old
+
+    def drop_media_files(self, ids: list[str]) -> None:
+        with self.tx() as db:
+            db.executemany("DELETE FROM media_files WHERE id = ?", [(i,) for i in ids])
 
     def mark_media_job(self, job_id: str, status: str) -> None:
         with self.tx() as db:

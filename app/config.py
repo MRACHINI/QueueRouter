@@ -255,6 +255,8 @@ TUNABLES: dict[str, type] = {
     "backup_keep_days": int,
     "max_jobs_in_flight": int,
     "job_retention_days": int,
+    "media_keep_days": int,
+    "media_max_mb": int,
     "content_log_days": int,
     "content_log_max_kb": int,
     "structured_repair": bool,
@@ -331,6 +333,8 @@ class Settings:
     backup_keep_days: int = 7  # daily automatic database copies in /data/backups (0 = off)
     max_jobs_in_flight: int = 1  # async jobs / batch requests running at once (live requests keep the rest)
     job_retention_days: int = 7  # finished jobs, batches and their files are deleted after this
+    media_keep_days: int = 7  # copies of made images and videos (links /media/...) kept this long
+    media_max_mb: int = 2000  # and at most this much of them: the oldest go first
     content_log_days: int = 7  # logged prompts/replies (clients with content logging on) kept this long
     content_log_max_kb: int = 256  # per request and per reply; longer ones are cut
     structured_repair: bool = True  # fix broken JSON replies (JSON mode, tool-call arguments)

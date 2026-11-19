@@ -250,6 +250,16 @@ SETTING_HELP: dict[str, tuple[str, str, str]] = {
         "Keep finished jobs (days)",
         "Finished jobs, batches and their result files are deleted after this.",
     ),
+    "media_keep_days": (
+        "Jobs",
+        "Keep made images and videos (days)",
+        "QueueRouter's copies, behind the download links its MCP tools give (a provider keeps its own about a day).",
+    ),
+    "media_max_mb": (
+        "Jobs",
+        "Images and videos kept, at most (MB)",
+        "Over this, the oldest copies are deleted first.",
+    ),
     "content_log_days": (
         "Usage",
         "Keep logged content (days)",

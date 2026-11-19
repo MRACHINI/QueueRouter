@@ -2350,6 +2350,24 @@ finished task's `usage` (`output_video_duration` / `duration`, `SR`). The usage 
 finished video counts, its start doesn't) and `video_seconds`. The Requests page shows them in a request's details
 ("Made"); the Usage page a tile and an "Images and videos" table per model when the period has any.
 
+v0.86.0: QueueRouter's own MCP server for images and videos, `/mcp/media` (app/mcp.py), like Higgsfield's connector
+(mcp.higgsfield.ai/mcp: OAuth via Clerk, its tools behind the sign-in) but on what QueueRouter already does. MCP's
+streamable HTTP the plain-JSON way, with no new dependency: each POST one JSON-RPC message answered with one JSON
+response (a notification: 202), no server stream (GET 405), no sessions. Signing in: the client key as a Bearer header
+(Claude Code, oh-my-pi, opencode) or in the address, `/mcp/media/<key>`, for connectors that take only an address
+(the Claude app); OAuth is for later. One group for images and videos together (they're chained: an image, then a
+video from it); narrower groups only if wanted. Tools: `list_media_models` (the client's image and video models with
+prices per image or per second at each resolution, and a video's lengths), `generate_image` (the images in the answer
+itself up to 1 MB each, so the app shows them, plus a link each and the cost), `generate_video` (starts it: a job_id
+and the estimated cost) and `check_video` (still running, failed at no cost, or done: length, resolution, cost and a
+link). Every call goes through the normal pipeline as that client (`serve_as`, like the job runner: queue, limits,
+Requests page from the app's address and User-Agent, units and costs). Links: `/media/<token>`, the file's id encrypted
+with QueueRouter's key (Fernet, expiring with the copies): a redirect to the provider's file while it lasts (23 h of
+Qwen's day), then QueueRouter's own copy in <data>/media (migration 54, `media_files`): images an MCP tool made, and
+every finished video (whichever API saw it done first), kept `media_keep_days` (7) and at most `media_max_mb` (2,000),
+the oldest first, in the daily maintenance. `/v1/videos/{id}/content` serves the copy too once there is one. `/mcp`
+bodies get the `MAX_BODY_MB` limit (input images may come inline).
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

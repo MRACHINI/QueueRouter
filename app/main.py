@@ -4,6 +4,7 @@ concurrency limits."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import collections
 import contextlib
 import dataclasses
@@ -25,10 +26,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iter
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
+from cryptography.fernet import InvalidToken
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from . import (
@@ -50,6 +53,7 @@ from . import council as council_mod
 from . import cron as cron_mod
 from . import edits as edits_mod
 from . import jobs as jobs_mod
+from . import mcp as mcp_mod
 from . import media as media_mod
 from . import rule_maker as rule_maker_mod
 from . import taggers as taggers_mod
@@ -963,6 +967,7 @@ def create_app(
                         await asyncio.to_thread(store.prune_requests, cfg().request_log_days)
                     await asyncio.to_thread(store.prune_notifications)
                     await asyncio.to_thread(store.prune_responses, responses_api.STORE_DAYS)
+                    await asyncio.to_thread(prune_media)
                     await asyncio.to_thread(store.prune_jobs, cfg().job_retention_days)
                     await asyncio.to_thread(store.prune_content, cfg().content_log_days)
                     await asyncio.to_thread(store.prune_summaries, cfg().compaction_keep_days)
@@ -1077,15 +1082,16 @@ def create_app(
 
     # -- helpers ---------------------------------------------------------------------------
 
-    def authenticate(request: Request) -> tuple[ClientKey | None, JSONResponse | None]:
-        """The calling client, or an error response to return instead."""
+    def authenticate(request: Request, key: str | None = None) -> tuple[ClientKey | None, JSONResponse | None]:
+        """The calling client, or an error response to return instead. ``key``: one given another way than in the
+        request's headers (in the address: /mcp/media/<key>)."""
         ip = client_ip(request, bootstrap.trusted_proxies)
         user_agent = request.headers.get("user-agent", "")
         if remaining := guard.is_blocked(ip):
             guard.refused(ip, user_agent)
             retry_after = {"Retry-After": str(int(remaining) + 1)}
             return None, error_response("too many failed authentication attempts", 429, "auth_blocked", **retry_after)
-        key = presented_key(request)
+        key = key or presented_key(request)
         client = find_client(key, snapshot.clients, cfg().allow_no_auth, snapshot.any_clients)
         if client is None:
             key_refused(request, ip, key, guard.fail(ip, user_agent))
@@ -1827,7 +1833,7 @@ def create_app(
             return MAX_UPLOAD_BYTES
         if path.startswith("/admin"):
             return ADMIN_MAX_BODY
-        if path == "/v1/files":
+        if path == "/v1/files" or path.startswith("/mcp"):  # MCP: input images may come inline
             return int(cfg().max_body_mb * 1024 * 1024)
         return None
 
@@ -3210,12 +3216,9 @@ def create_app(
         )
         rlog.finish(stats, outcome="done", status=200)
 
-    @app.get("/v1/videos/{job_id}")
-    async def video_status(job_id: str, request: Request):
-        """How a video job is going (OpenRouter's form); once done, where the video is and what it cost."""
-        client, denied = authenticate(request)
-        if denied:
-            return denied
+    async def video_progress(job_id: str, request: Request, client: ClientKey) -> dict | Response:
+        """How a video job is going: {"job": OpenRouter's form, "task": Qwen's word, "row": the job}, or the error to
+        answer instead. The first time it's seen done it's priced and recorded, and QueueRouter keeps a copy."""
         job = await asyncio.to_thread(store.media_job, job_id, client.name)
         if job is None:
             return error_response(f"video job '{job_id}' not found", 404, "not_found")
@@ -3229,22 +3232,44 @@ def create_app(
             cost = media_mod.task_cost(job["model"], task, bool(job["audio"]))
             if await asyncio.to_thread(store.settle_media_job, job_id, status, cost):
                 video_made(request, client, job, target, cost, task)
+            if (
+                isinstance(link := output.get("video_url"), str)
+                and await asyncio.to_thread(store.media_file, job_id) is None
+            ):
+                keep_media(
+                    job_id, client.name, "video", url=link, provider_until=job["created"] + media_mod.PROVIDER_KEEPS_S
+                )
         elif status in media_mod.FINISHED:
             await asyncio.to_thread(store.settle_media_job, job_id, status, None)  # nothing made: nothing to pay
         elif status != job["status"]:
             await asyncio.to_thread(store.mark_media_job, job_id, status)
         error = output.get("message") if status in ("failed", "expired") else None
-        return media_mod.job(job_id, status, public_base(request), cost, str(error) if error else None)
+        answer = media_mod.job(job_id, status, public_base(request), cost, str(error) if error else None)
+        return {"job": answer, "task": task, "row": job}
+
+    @app.get("/v1/videos/{job_id}")
+    async def video_status(job_id: str, request: Request):
+        """How a video job is going (OpenRouter's form); once done, where the video is and what it cost."""
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        progress = await video_progress(job_id, request, client)
+        return progress if isinstance(progress, Response) else progress["job"]
 
     @app.get("/v1/videos/{job_id}/content")
     async def video_content(job_id: str, request: Request):
-        """The finished video itself, passed on from the provider's temporary link (a day)."""
+        """The finished video itself: QueueRouter's copy once it has one, else passed on from the provider's
+        temporary link (a day)."""
         client, denied = authenticate(request)
         if denied:
             return denied
         job = await asyncio.to_thread(store.media_job, job_id, client.name)
         if job is None:
             return error_response(f"video job '{job_id}' not found", 404, "not_found")
+        if (kept := await asyncio.to_thread(store.media_file, job_id)) is not None and kept["file"]:
+            path = os.path.join(media_dir, kept["file"])
+            if await asyncio.to_thread(os.path.exists, path):
+                return FileResponse(path, media_type=kept["mime"] or "video/mp4")
         _, task, failed = await video_task(job)
         if failed is not None:
             return failed
@@ -3268,6 +3293,269 @@ def create_app(
             headers=kept,
             background=BackgroundTask(response.aclose),
         )
+
+    # -- made images and videos behind download links (/media/<token>) -------------------------------------
+    # One link per image or video: a redirect to the provider's own file while it lasts (Qwen keeps it a day), else
+    # QueueRouter's copy in <data>/media, kept media_keep_days and up to media_max_mb. The token is the file's id,
+    # encrypted with QueueRouter's key: it names nothing else, and no key goes in a link.
+
+    media_dir = os.path.join(bootstrap.data_dir, "media")
+    media_tasks: set[asyncio.Task] = set()  # copies being fetched (kept here so they aren't collected)
+
+    def media_link(request: Request, file_id: str) -> str:
+        return f"{public_base(request)}/media/{store.fernet.encrypt(file_id.encode()).decode()}"
+
+    async def save_media(file_id: str, mime: str, data: bytes | None = None, url: str | None = None) -> None:
+        """A copy of an image or video: its bytes, or what its link gives (up to media_max_mb)."""
+        name = f"{file_id}{media_mod.EXTENSIONS.get(mime.split(';')[0].strip(), '.bin')}"
+        path, limit = os.path.join(media_dir, name), cfg().media_max_mb * 1024 * 1024
+        try:
+            os.makedirs(media_dir, exist_ok=True)
+            if data is None:
+                async with app.state.client.stream("GET", url or "", timeout=300) as response:
+                    if response.status_code != 200:
+                        raise httpx.HTTPError(f"HTTP {response.status_code}")
+                    mime = response.headers.get("content-type", mime).split(";")[0].strip() or mime
+                    got = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        got += chunk
+                        if len(got) > limit:
+                            raise httpx.HTTPError("bigger than media_max_mb")
+                size = len(got)
+                await asyncio.to_thread(Path(path).write_bytes, bytes(got))
+            else:
+                size = len(data)
+                await asyncio.to_thread(Path(path).write_bytes, data)
+            await asyncio.to_thread(store.keep_media_file, file_id, name, mime, size)
+        except (httpx.HTTPError, OSError) as exc:
+            with contextlib.suppress(OSError):
+                os.remove(path)
+            log.warning(json.dumps({"event": "media_copy_failed", "id": file_id, "error": repr(exc)[:200]}))
+
+    def keep_media(
+        file_id: str,
+        client: str,
+        kind: str,
+        data: bytes | None = None,
+        mime: str | None = None,
+        url: str | None = None,
+        provider_until: float | None = None,
+    ) -> None:
+        """Note a made image or video under ``file_id`` and keep a copy of it in the background."""
+        row = {"id": file_id, "client": client, "kind": kind, "provider_url": url, "provider_until": provider_until}
+        store.add_media_file(row)
+        default = "video/mp4" if kind == "video" else "image/png"
+        task = asyncio.create_task(save_media(file_id, mime or default, data, url))
+        media_tasks.add(task)
+        task.add_done_callback(media_tasks.discard)
+
+    def prune_media() -> None:
+        """Copies older than media_keep_days, then the oldest over media_max_mb (in the daily maintenance)."""
+        stale = store.stale_media_files(cfg().media_keep_days, cfg().media_max_mb * 1024 * 1024)
+        for row in stale:
+            if row["file"]:
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(media_dir, row["file"]))
+        store.drop_media_files([row["id"] for row in stale])
+
+    @app.get("/media/{token}")
+    async def media_download(token: str):
+        """A made image or video: the provider's file while it has it, else QueueRouter's copy."""
+        try:
+            ttl = int((cfg().media_keep_days + 1) * 86_400)
+            file_id = store.fernet.decrypt(token.encode(), ttl=ttl).decode()
+        except (InvalidToken, ValueError):
+            return error_response("this link is unknown or has expired", 404, "not_found")
+        row = await asyncio.to_thread(store.media_file, file_id)
+        if row is not None and row["provider_url"] and time.time() < (row["provider_until"] or 0):
+            return RedirectResponse(row["provider_url"], 302)
+        path = os.path.join(media_dir, row["file"]) if row is not None and row["file"] else ""
+        if path and await asyncio.to_thread(os.path.exists, path):
+            return FileResponse(path, media_type=row["mime"] or "application/octet-stream")
+        return error_response("this image or video is no longer kept", 410, "gone")
+
+    # -- /mcp/media: QueueRouter's own MCP server for images and videos (app/mcp.py) ---------------------------
+
+    async def serve_as(request: Request, client: ClientKey, path: str, body: dict) -> tuple[int, bytes]:
+        """A /v1 request made by a tool, through the normal pipeline as ``client`` (queue, limits, Requests page),
+        from the app's address and with its User-Agent."""
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": f"/v1/{path}",
+            "raw_path": f"/v1/{path}".encode(),
+            "query_string": b"",
+            "headers": [],
+            "client": (client_ip(request, bootstrap.trusted_proxies), 0),
+            "server": None,
+            "scheme": "http",
+            "root_path": "",
+            "http_version": "1.1",
+        }
+        headers = {"content-type": "application/json", "user-agent": request.headers.get("user-agent", "")}
+        response = await serve(Request(scope, _never_disconnects), client, path, json.dumps(body).encode(), headers, "")
+        if isinstance(response, StreamingResponse):
+            chunks = [c if isinstance(c, bytes) else c.encode() async for c in response.body_iterator]
+            return response.status_code, b"".join(chunks)
+        return response.status_code, bytes(response.body)
+
+    def failure(status: int, content: bytes) -> str:
+        try:
+            message = json.loads(content)["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            message = content[:300].decode("utf-8", "replace") or "no error text"
+        return f"failed ({status}): {message}"
+
+    async def media_models(client: ClientKey) -> list[tuple[str, str, str]] | Response:
+        """(id for apps, "image" / "video", the real ID) of the models ``client`` may use that make them."""
+        data = await model_entries(client)
+        if isinstance(data, Response):
+            return data
+        ids = app_ids()
+        made = []
+        for entry in data:
+            kind = (
+                (entry.get("output_modalities") or [None])[0]
+                if len(entry.get("output_modalities") or []) == 1
+                else None
+            )
+            if kind in ("image", "video"):
+                made.append((entry["id"], kind, ids.to.get(entry["id"], (entry["id"], ""))[0]))
+        return made
+
+    async def mcp_tool(request: Request, client: ClientKey, name: str, args: dict) -> dict:
+        made = await media_models(client)
+        if isinstance(made, Response):
+            return mcp_mod.text(f"The model list isn't available: {failure(made.status_code, bytes(made.body))}", True)
+        if name == "list_media_models":
+            if not made:
+                return mcp_mod.text("This key can use no image or video models.")
+            lines = [f"- {public} ({kind}): {media_mod.price_text(real, kind)}" for public, kind, real in made]
+            return mcp_mod.text("Models this key can use:\n" + "\n".join(lines))
+        if name == "check_video":
+            return await mcp_check_video(request, client, str(args.get("job_id") or ""))
+        kind = "image" if name == "generate_image" else "video"
+        model = args.get("model") or next((public for public, k, _ in made if k == kind), None)
+        if not isinstance(model, str) or not model:
+            return mcp_mod.text(f"This key can use no {kind} model.", True)
+        real = next((r for public, _, r in made if public == model), model)
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return mcp_mod.text("A prompt is required.", True)
+        if kind == "image":
+            return await mcp_image(request, client, model, real, prompt, args)
+        return await mcp_video(request, client, model, real, prompt, args)
+
+    def links(value) -> list[str]:
+        return [v for v in (value if isinstance(value, list) else [value]) if isinstance(v, str) and v.strip()]
+
+    async def mcp_image(request: Request, client: ClientKey, model: str, real: str, prompt: str, args: dict) -> dict:
+        inputs = links(args.get("input_images"))
+        body: dict = {"model": model, "prompt": prompt, "n": args.get("n") or 1, "response_format": "b64_json"}
+        for field in ("size", "negative_prompt", "seed"):
+            if args.get(field) is not None:
+                body[field] = args[field]
+        if inputs:
+            body["input_references"] = [{"type": "image_url", "url": url} for url in inputs]
+        status, content = await serve_as(request, client, "images/edits" if inputs else "images/generations", body)
+        if status >= 400:
+            return mcp_mod.text(f"The image {failure(status, content)}", True)
+        answer = json.loads(content)
+        blocks, urls = [], []
+        for item in answer.get("data") or []:
+            file_id = f"image-{uuid.uuid4().hex}"
+            if isinstance(item.get("b64_json"), str):
+                raw, mime = base64.b64decode(item["b64_json"]), item.get("media_type") or "image/png"
+                keep_media(file_id, client.name, "image", data=raw, mime=mime)
+                if len(raw) <= mcp_mod.INLINE_BYTES:  # the app shows it; a bigger one only by its link
+                    blocks.append({"type": "image", "data": item["b64_json"], "mimeType": mime})
+            elif isinstance(item.get("url"), str):
+                keep_media(
+                    file_id,
+                    client.name,
+                    "image",
+                    url=item["url"],
+                    provider_until=time.time() + media_mod.PROVIDER_KEEPS_S,
+                )
+            else:
+                continue
+            urls.append(media_link(request, file_id))
+        usage = answer.get("usage") or {}
+        made = f"{len(urls)} image{'s' if len(urls) != 1 else ''}" + (
+            f" ({usage['size']})" if usage.get("size") else ""
+        )
+        cost = f", ${usage['cost']:.3f}" if isinstance(usage.get("cost"), int | float) else ""
+        note = "" if len(blocks) == len(urls) else " (too big to show here: open the link)"
+        summary = f"Made {made} with {model}{cost}. Download{note}:\n" + "\n".join(urls)
+        return {"content": [*blocks, {"type": "text", "text": summary}], "isError": False}
+
+    async def mcp_video(request: Request, client: ClientKey, model: str, real: str, prompt: str, args: dict) -> dict:
+        seconds = args.get("duration") if isinstance(args.get("duration"), int) else 5
+        resolution = args.get("resolution") if isinstance(args.get("resolution"), str) else "720p"
+        body: dict = {"model": model, "prompt": prompt, "duration": seconds, "resolution": resolution}
+        for field in ("aspect_ratio", "seed"):
+            if args.get(field) is not None:
+                body[field] = args[field]
+        if first := links(args.get("first_frame")):
+            body["frame_images"] = [{"type": "image_url", "image_url": {"url": first[0]}, "frame_type": "first_frame"}]
+        if references := links(args.get("reference_images")):
+            body["input_references"] = [{"type": "image_url", "image_url": {"url": url}} for url in references]
+        status, content = await serve_as(request, client, "videos", body)
+        if status >= 400:
+            return mcp_mod.text(f"The video {failure(status, content)}", True)
+        job_id = json.loads(content).get("id")
+        estimate = media_mod.video_cost(real, seconds, resolution)
+        about = f", about ${estimate:.2f}" if estimate is not None else ""
+        return mcp_mod.text(
+            f"Started a {seconds} s {resolution} video with {model}{about}. job_id: {job_id}\n"
+            "It takes one to three minutes: call check_video with this job_id in about 30 seconds."
+        )
+
+    async def mcp_check_video(request: Request, client: ClientKey, job_id: str) -> dict:
+        progress = await video_progress(job_id, request, client)
+        if isinstance(progress, Response):
+            return mcp_mod.text(f"Can't check {job_id}: {failure(progress.status_code, bytes(progress.body))}", True)
+        job, row = progress["job"], progress["row"]
+        status = job["status"]
+        if status == "completed":
+            _, units = media_mod.video_units(progress["task"])
+            cost = job.get("usage", {}).get("cost")
+            spent = f", ${cost:.3f}" if isinstance(cost, int | float) else ""
+            return mcp_mod.text(
+                f"Completed: {units or 'the video'} with {row['model']}{spent}.\n"
+                f"Download: {media_link(request, job_id)}"
+            )
+        if status in media_mod.FINISHED:
+            return mcp_mod.text(f"The video {status}: {job.get('error') or 'no reason given'}. It costs nothing.", True)
+        waited = round(time.time() - row["created"])
+        return mcp_mod.text(f"Still {status.replace('_', ' ')} after {waited} s. Check again in about 20 seconds.")
+
+    async def mcp_media(request: Request, key: str | None) -> Response:
+        client, denied = authenticate(request, key)
+        if denied:
+            return denied
+        try:
+            message = json.loads(await request.body())
+        except ValueError:
+            return JSONResponse(mcp_mod.error(None, mcp_mod.PARSE_ERROR, "the body isn't JSON"), status_code=400)
+        answer = await mcp_mod.handle(message, lambda name, args: mcp_tool(request, client, name, args), __version__)
+        return Response(status_code=202) if answer is None else JSONResponse(answer)
+
+    @app.post("/mcp/media")
+    async def mcp_media_header(request: Request):
+        """For apps that send the client key as a header (Claude Code, oh-my-pi, opencode...)."""
+        return await mcp_media(request, None)
+
+    @app.post("/mcp/media/{key}")
+    async def mcp_media_keyed(key: str, request: Request):
+        """For apps whose connector takes only an address (the Claude app): the client key in it."""
+        return await mcp_media(request, key)
+
+    @app.get("/mcp/media")
+    @app.get("/mcp/media/{key}")
+    async def mcp_media_get():
+        """No stream of the server's own (MCP's streamable HTTP without it): POST only."""
+        return Response(status_code=405, headers={"Allow": "POST"})
 
     async def _never_disconnects() -> dict:
         await asyncio.Event().wait()

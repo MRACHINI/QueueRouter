@@ -416,3 +416,49 @@ def error_answer(response: httpx.Response, content: bytes) -> httpx.Response:
     answer = task_of(content)
     message = str(answer.get("message") or content[:300].decode("utf-8", "replace") or "no error text")
     return _error(response, response.status_code, message, answer.get("code"))
+
+
+# -- QueueRouter's copies and what the MCP tools say (app/mcp.py) -------------------------------
+
+PROVIDER_KEEPS_S = 23 * 3600  # a provider's link is used this long (Qwen keeps its files a day)
+EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+    "video/quicktime": ".mov",
+}
+VIDEO_LENGTHS = (  # a model's name starts with -> the lengths it takes
+    ("wan3.0", "2 to 30 s"),
+    ("wan2.7", "2 to 15 s"),
+    ("wan2.6", "5, 10 or 15 s"),
+    ("wan2.5", "5 or 10 s"),
+    ("wan2.", "5 s"),
+    ("pixverse", "up to 15 s"),
+)
+
+
+def price_text(model: str, kind: str) -> str:
+    """What one image, or a second of video at each resolution, costs on this model, and a video's lengths."""
+    key = str(model or "").lower()
+    if kind == "image":
+        prices = IMAGE_PRICES.get(key)
+        if prices is None:
+            return "price unknown"
+        return (
+            f"${prices[0]:g} per image"
+            if prices[0] == prices[1]
+            else f"${prices[0]:g} (1K) / ${prices[1]:g} (2K) per image"
+        )
+    table = VIDEO_PRICES.get(key if key in VIDEO_PRICES else _DATED.sub("", key))
+    rates = (
+        "price unknown"
+        if table is None
+        else ", ".join(
+            f"${rate:g}/s" if height == 0 else f"{height}p ${rate:g}/s" for height, rate in sorted(table.items())
+        )
+    )
+    lengths = next((said for prefix, said in VIDEO_LENGTHS if key.startswith(prefix)), None)
+    return f"{rates}; {lengths}" if lengths else rates
