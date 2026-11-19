@@ -35,6 +35,11 @@
     <div class="tile-value">{{ "{:,}".format(totals.images) }} · {{ "{:,}".format(totals.videos) }}</div>
     <div class="small muted">{{ "{:,.0f}".format(totals.video_seconds) }} s of video</div></div>
   {% endif %}
+  {% if totals.speech_characters or totals.audio_seconds %}
+  <div class="tile"><div class="tile-label">Speech</div>
+    <div class="tile-value">{{ "{:,}".format(totals.speech_characters) }}</div>
+    <div class="small muted">characters spoken · {{ "{:,.0f}".format(totals.audio_seconds) }} s of audio heard</div></div>
+  {% endif %}
   <div class="tile">
     {% if plan_per_month %}
     {% if totals.savings >= 0 %}
@@ -97,15 +102,16 @@ double against a plan's weekly quota, so a row with them also says what it used 
 </table>
 </div>
 
-{% set made = models | selectattr("images") | list + models | rejectattr("images") | selectattr("videos") | list %}
+{% set made = [] %}
+{% for m in models if m.images or m.videos or m.speech_characters or m.audio_seconds %}{% set _ = made.append(m) %}{% endfor %}
 {% if made %}
-<h2>Images and videos (UTC)</h2>
-<p class="small muted">Made in this period, priced per image and per second of video when they were made (Qwen
-Cloud's prices). Videos count when finished; a failed one costs nothing. Each request's own count, size and length
-are in its details on the Requests page.</p>
+<h2>Images, videos and speech (UTC)</h2>
+<p class="small muted">Made in this period, priced per image, per second of video, per character spoken and per
+second of audio heard when they were made (Qwen Cloud's prices). Videos count when finished; a failed one costs
+nothing. Each request's own count, size and length are in its details on the Requests page.</p>
 <div class="table-wrap">
 <table class="cards dense">
-  <thead><tr><th>Model</th><th class="num">Images</th><th class="num">Videos</th><th class="num">Video seconds</th><th class="num">Total</th></tr></thead>
+  <thead><tr><th>Model</th><th class="num">Images</th><th class="num">Videos</th><th class="num">Video seconds</th><th class="num">Characters spoken</th><th class="num">Audio heard (s)</th><th class="num">Total</th></tr></thead>
   <tbody>
   {% for m in made %}
   <tr>
@@ -113,6 +119,8 @@ are in its details on the Requests page.</p>
     <td data-label="Images" class="num">{{ "{:,}".format(m.images) }}</td>
     <td data-label="Videos" class="num">{{ "{:,}".format(m.videos) }}</td>
     <td data-label="Video seconds" class="num">{{ "{:,.0f}".format(m.video_seconds) }}</td>
+    <td data-label="Characters spoken" class="num">{{ "{:,}".format(m.speech_characters) }}</td>
+    <td data-label="Audio heard (s)" class="num">{{ "{:,.0f}".format(m.audio_seconds) }}</td>
     {{ total(m) }}
   </tr>
   {% endfor %}

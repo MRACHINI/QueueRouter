@@ -260,6 +260,8 @@ class RequestLog:
             "media_units": None,  # what it made, as shown: "2 × 1024*1024", "5 s at 720P"
             "images": None,  # how many images it made
             "video_seconds": None,  # a finished video: its length
+            "speech_characters": None,  # text to speech: the characters spoken
+            "audio_seconds": None,  # transcription: the seconds of audio heard
             "compaction": None,  # e.g. "trim 812k -> 402k": the conversation was shrunk to fit (app/compaction.py)
             "council": None,  # e.g. "pick 2/3: GLM-4.7": what a model council did (app/council.py)
             "client_headers": None,  # what the app sent about itself (app/upstream.py client_identity)
@@ -1891,13 +1893,21 @@ def create_app(
     def speaks_claude(adm: Admission, target: Target) -> bool:
         return adm.path == "chat/completions" and claude.native(target.upstream)
 
-    def draws_on_qwen(adm: Admission, target: Target) -> bool:
-        """An image request for an upstream on Qwen Cloud: it goes to Qwen's own image API (app/media.py)."""
-        return adm.path in media_mod.IMAGE_PATHS and media_mod.qwen(target.upstream)
+    def own_api(adm: Admission, target: Target) -> str | None:
+        """The path, when a request to it goes to its provider's own API instead (Qwen Cloud: images, video,
+        speech; app/media.py)."""
+        return adm.path if adm.path in media_mod.QWEN_ENDPOINTS and media_mod.qwen(target.upstream) else None
 
-    def films_on_qwen(adm: Admission, target: Target) -> bool:
-        """A video request (OpenRouter's /v1/videos) for an upstream on Qwen Cloud: a task of its video API."""
-        return adm.path == media_mod.VIDEO_PATH and media_mod.qwen(target.upstream)
+    async def own_answer(own: str, adm: Admission, target: Target, response: httpx.Response) -> httpx.Response:
+        """A provider's own API's answer (own_api) in the form the app asked for."""
+        payload = json.loads(adm.body)
+        if own in media_mod.IMAGE_PATHS:  # its images, fetched when asked as base64
+            return await media_mod.image_answer(response, app.state.client, payload)
+        if own == media_mod.VIDEO_PATH:  # its task, as a job of QueueRouter's (OpenRouter's form)
+            return await video_started(adm, target, response)
+        if own == media_mod.SPEECH_PATH:  # the audio itself
+            return await media_mod.speech_answer(response, app.state.client, payload)
+        return await media_mod.transcription_answer(response, payload)
 
     async def video_started(adm: Admission, target: Target, response: httpx.Response) -> httpx.Response:
         """Qwen's new task as a job of QueueRouter's: kept with whose it is (polls and the video go to the same
@@ -1931,29 +1941,29 @@ def create_app(
     def build_request(adm: Admission, target: Target) -> httpx.Request:
         s = cfg()
         native = speaks_claude(adm, target)
-        drawn, filmed = draws_on_qwen(adm, target), films_on_qwen(adm, target)
+        own = own_api(adm, target)
+        filmed = own == media_mod.VIDEO_PATH
         path = "messages" if native else adm.path
         url = f"{target.upstream.base_url}/{path}" + (f"?{adm.query}" if adm.query else "")
-        if drawn or filmed:
-            endpoint = media_mod.IMAGE_ENDPOINT if drawn else media_mod.VIDEO_ENDPOINT
-            url = f"{media_mod.api_root(target.upstream.base_url)}/{endpoint}"
+        if own:
+            url = f"{media_mod.api_root(target.upstream.base_url)}/{media_mod.QWEN_ENDPOINTS[own]}"
         body = adm.body
         # how hard to think, not one of the model's levels (Claude Code's effort, from /v1/messages): the nearest one
         hint = adm.headers.get("x-queuerouter-effort") if adm.path == "chat/completions" else None
         thinking = bool(body) and (b'"reasoning_effort"' in body or bool(hint))  # asked as this provider understands
         # Claude reads images; others may not (an image or video request's images are what it's made from)
-        images = bool(body) and not native and not drawn and not filmed and b'"image_url"' in body
+        images = bool(body) and not native and not own and b'"image_url"' in body
         fast = adm.fast and not native and is_synthetic(target.upstream.preset, target.upstream.base_url)
         sent_fast = False
-        if drawn or filmed:
+        if own:
             try:
                 sent = json.loads(body or b"")
             except ValueError:
                 sent = None
             if not isinstance(sent, dict):  # e.g. OpenAI's multipart edits: Qwen takes the images as links
-                raise media_mod.Unsupported("send image and video requests to this provider as JSON (images as links)")
+                raise media_mod.Unsupported("send this request to this provider as JSON (images and audio as links)")
         if body and (
-            native or drawn or filmed or target.upstream.params or thinking or images or fast
+            native or own or target.upstream.params or thinking or images or fast
         ):  # this provider's own rules (e.g. fields it rejects)
             try:
                 payload = json.loads(body)
@@ -1961,10 +1971,8 @@ def create_app(
                 payload = None
             if isinstance(payload, dict):
                 apply_rules(payload, rules_of(target.upstream.params), {})
-                if drawn:
-                    payload = media_mod.image_request(payload)
-                elif filmed:
-                    payload = media_mod.video_request(payload)
+                if own:
+                    payload = media_mod.qwen_request(own, payload)
                 elif native or thinking or images:
                     entry = next(
                         (m for m in catalogs.models(target.id, raw=True) if m.get("id") == payload.get("model")), None
@@ -2108,10 +2116,8 @@ def create_app(
                         response = await sending
                         if speaks_claude(adm, target):
                             response = claude.answer(response)
-                        elif draws_on_qwen(adm, target):  # its images as OpenAI's answer, fetched if asked as base64
-                            response = await media_mod.image_answer(response, app.state.client, json.loads(adm.body))
-                        elif films_on_qwen(adm, target):  # its task, as a job of QueueRouter's (OpenRouter's form)
-                            response = await video_started(adm, target, response)
+                        elif own := own_api(adm, target):  # its own API's answer as the one the app asked for
+                            response = await own_answer(own, adm, target, response)
                         if adm.rlog.fields["stream"]:  # a non-streamed answer's headers come with all of it
                             adm.rlog.fields["headers_ms"] = round((time.monotonic() - adm.rlog.sent_at) * 1000)
                     except TimeoutError:
@@ -3376,7 +3382,7 @@ def create_app(
 
     # -- /mcp/media: QueueRouter's own MCP server for images and videos (app/mcp.py) ---------------------------
 
-    async def serve_as(request: Request, client: ClientKey, path: str, body: dict) -> tuple[int, bytes]:
+    async def serve_as(request: Request, client: ClientKey, path: str, body: dict) -> tuple[int, bytes, Mapping]:
         """A /v1 request made by a tool, through the normal pipeline as ``client`` (queue, limits, Requests page),
         from the app's address and with its User-Agent."""
         scope = {
@@ -3396,8 +3402,8 @@ def create_app(
         response = await serve(Request(scope, _never_disconnects), client, path, json.dumps(body).encode(), headers, "")
         if isinstance(response, StreamingResponse):
             chunks = [c if isinstance(c, bytes) else c.encode() async for c in response.body_iterator]
-            return response.status_code, b"".join(chunks)
-        return response.status_code, bytes(response.body)
+            return response.status_code, b"".join(chunks), response.headers
+        return response.status_code, bytes(response.body), response.headers
 
     def failure(status: int, content: bytes) -> str:
         try:
@@ -3419,8 +3425,10 @@ def create_app(
                 if len(entry.get("output_modalities") or []) == 1
                 else None
             )
-            if kind in ("image", "video"):
-                made.append((entry["id"], kind, ids.to.get(entry["id"], (entry["id"], ""))[0]))
+            real = ids.to.get(entry["id"], (entry["id"], ""))[0]
+            kind = kind if kind in ("image", "video") else media_mod.audio_kind(real)  # speech, transcription
+            if kind is not None:
+                made.append((entry["id"], kind, real))
         return made
 
     async def mcp_tool(request: Request, client: ClientKey, name: str, args: dict) -> dict:
@@ -3429,16 +3437,22 @@ def create_app(
             return mcp_mod.text(f"The model list isn't available: {failure(made.status_code, bytes(made.body))}", True)
         if name == "list_media_models":
             if not made:
-                return mcp_mod.text("This key can use no image or video models.")
+                return mcp_mod.text("This key can use no image, video or speech models.")
             lines = [f"- {public} ({kind}): {media_mod.price_text(real, kind)}" for public, kind, real in made]
             return mcp_mod.text("Models this key can use:\n" + "\n".join(lines))
         if name == "check_video":
             return await mcp_check_video(request, client, str(args.get("job_id") or ""))
-        kind = "image" if name == "generate_image" else "video"
+        kind = {"generate_image": "image", "generate_video": "video", "text_to_speech": "speech"}.get(
+            name, "transcription"
+        )
         model = args.get("model") or next((public for public, k, _ in made if k == kind), None)
         if not isinstance(model, str) or not model:
             return mcp_mod.text(f"This key can use no {kind} model.", True)
         real = next((r for public, _, r in made if public == model), model)
+        if kind == "speech":
+            return await mcp_speech(request, client, model, args)
+        if kind == "transcription":
+            return await mcp_transcribe(request, client, model, args)
         prompt = args.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             return mcp_mod.text("A prompt is required.", True)
@@ -3449,6 +3463,48 @@ def create_app(
     def links(value) -> list[str]:
         return [v for v in (value if isinstance(value, list) else [value]) if isinstance(v, str) and v.strip()]
 
+    def spent(headers: Mapping) -> str:
+        """ ", $0.0012" from what a translated answer said it cost (media.UNIT_HEADERS), else nothing."""
+        cost = media_mod.units_of(headers)["media_cost"]
+        return ", $" + f"{cost:.6f}".rstrip("0").rstrip(".") if cost is not None else ""
+
+    async def mcp_speech(request: Request, client: ClientKey, model: str, args: dict) -> dict:
+        text = args.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return mcp_mod.text("The text to speak is required.", True)
+        body: dict = {"model": model, "input": text, "response_format": args.get("format") or "mp3"}
+        if isinstance(args.get("voice"), str) and args["voice"].strip():
+            body["voice"] = args["voice"]
+        status, content, headers = await serve_as(request, client, media_mod.SPEECH_PATH, body)
+        if status >= 400:
+            return mcp_mod.text(f"Text to speech {failure(status, content)}", True)
+        mime = (headers.get("content-type") or "audio/mpeg").split(";")[0].strip()
+        file_id = f"speech-{uuid.uuid4().hex}"
+        keep_media(file_id, client.name, "audio", data=content, mime=mime)
+        blocks = [{"type": "audio", "data": base64.b64encode(content).decode(), "mimeType": mime}]
+        blocks = blocks if len(content) <= mcp_mod.INLINE_BYTES else []
+        said = f"Spoke {len(text):,} characters with {model}{spent(headers)}. Download: {media_link(request, file_id)}"
+        return {"content": [*blocks, {"type": "text", "text": said}], "isError": False}
+
+    async def mcp_transcribe(request: Request, client: ClientKey, model: str, args: dict) -> dict:
+        audio = args.get("audio")
+        if not isinstance(audio, str) or not audio.strip():
+            return mcp_mod.text("The audio (an https link or a data: URL) is required.", True)
+        body: dict = {"model": model, "file": audio, "response_format": "json"}
+        for field in ("language", "format", "prompt"):
+            if isinstance(args.get(field), str) and args[field].strip():
+                body[field] = args[field]
+        status, content, headers = await serve_as(request, client, media_mod.TRANSCRIBE_PATH, body)
+        if status >= 400:
+            return mcp_mod.text(f"The transcription {failure(status, content)}", True)
+        units = media_mod.units_of(headers)
+        heard = f"{units['audio_seconds']:g} s of audio" if units["audio_seconds"] is not None else "the audio"
+        try:
+            text = json.loads(content)["text"]
+        except (ValueError, KeyError, TypeError):
+            text = content.decode("utf-8", "replace")
+        return mcp_mod.text(f"Transcribed {heard} with {model}{spent(headers)}:\n\n{text}")
+
     async def mcp_image(request: Request, client: ClientKey, model: str, real: str, prompt: str, args: dict) -> dict:
         inputs = links(args.get("input_images"))
         body: dict = {"model": model, "prompt": prompt, "n": args.get("n") or 1, "response_format": "b64_json"}
@@ -3457,7 +3513,7 @@ def create_app(
                 body[field] = args[field]
         if inputs:
             body["input_references"] = [{"type": "image_url", "url": url} for url in inputs]
-        status, content = await serve_as(request, client, "images/edits" if inputs else "images/generations", body)
+        status, content, _ = await serve_as(request, client, "images/edits" if inputs else "images/generations", body)
         if status >= 400:
             return mcp_mod.text(f"The image {failure(status, content)}", True)
         answer = json.loads(content)
@@ -3500,7 +3556,7 @@ def create_app(
             body["frame_images"] = [{"type": "image_url", "image_url": {"url": first[0]}, "frame_type": "first_frame"}]
         if references := links(args.get("reference_images")):
             body["input_references"] = [{"type": "image_url", "image_url": {"url": url}} for url in references]
-        status, content = await serve_as(request, client, "videos", body)
+        status, content, _ = await serve_as(request, client, "videos", body)
         if status >= 400:
             return mcp_mod.text(f"The video {failure(status, content)}", True)
         job_id = json.loads(content).get("id")
@@ -5193,7 +5249,29 @@ def create_app(
             return await submit_job(
                 client, {"request": payload, "endpoint": f"/v1/{path}", "priority": wanted, "tags": tags}
             )
+        if path == media_mod.TRANSCRIBE_PATH and (
+            (fields := media_mod.form_fields(body, request.headers.get("content-type", ""))) is not None
+            and served_on_qwen(fields.get("model"))
+        ):  # an upload for Qwen, which takes the audio inside JSON: that JSON (other providers get the upload)
+            headers = {k: v for k, v in request.headers.items() if k.lower() != "content-type"}
+            headers["content-type"] = "application/json"
+            return await serve(request, client, path, json.dumps(fields).encode(), headers)
         return await serve(request, client, path, body)
+
+    def served_on_qwen(model) -> bool:
+        """Whether ``model`` (as an app names it: an alias, an ID for apps, "model@provider") is on Qwen Cloud."""
+        if not isinstance(model, str) or not model:
+            return False
+        alias = snapshot.aliases.get(model)
+        model = alias.target_model if alias else model
+        named = app_ids().to.get(model)
+        if named is not None:
+            return any(t.upstream.name == named[1] and media_mod.qwen(t.upstream) for t in snapshot.upstreams.values())
+        bare, pins = split_pin(model)
+        return any(
+            media_mod.qwen(t.upstream) and (not pins or t.id in pins) and bare in (catalogs.ids(t.id) or ())
+            for t in snapshot.upstreams.values()
+        )
 
     async def serve(
         request: Request,
@@ -5693,6 +5771,8 @@ def create_app(
                             if adm.path in media_mod.IMAGE_PATHS:  # priced per image (its usage.cost), not per token
                                 rlog.fields["media_cost"] = media_mod.cost_of(content)
                                 rlog.fields["images"], rlog.fields["media_units"] = media_mod.image_units(content)
+                            elif adm.path in (media_mod.SPEECH_PATH, media_mod.TRANSCRIBE_PATH):  # said in its headers
+                                rlog.fields.update(media_mod.units_of(response.headers))
                         headers = response_headers(response.headers)
                         headers.update(adm.hints)
                         headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])

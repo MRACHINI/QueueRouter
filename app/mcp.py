@@ -17,10 +17,10 @@ from collections.abc import Awaitable, Callable
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first: an older client gets its own
 SERVER = {"name": "queuerouter-media", "title": "QueueRouter media"}
 INSTRUCTIONS = (
-    "Makes images and videos through QueueRouter. Call list_media_models first to see the models this key can use and "
-    "what they cost. Images come back at once. A video takes one to three minutes: generate_video starts it, then call "
-    "check_video with its job_id about every 20 seconds until it's completed or failed. Say what a video will cost "
-    "before starting one over $1."
+    "Makes images, videos and speech, and transcribes recordings, through QueueRouter. Call list_media_models first "
+    "to see the models this key can use and what they cost. Images, speech and transcriptions come back at once. A "
+    "video takes one to three minutes: generate_video starts it, then call check_video with its job_id about every 20 "
+    "seconds until it's completed or failed. Say what a video will cost before starting one over $1."
 )
 
 _STRING = {"type": "string"}
@@ -92,6 +92,40 @@ TOOLS = [
             "type": "object",
             "properties": {"job_id": {**_STRING, "description": "The job_id generate_video gave."}},
             "required": ["job_id"],
+        },
+        "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "text_to_speech",
+        "title": "Text to speech",
+        "description": "Read a text aloud. Returns the audio (shown in the app when it's small), a download link and "
+        "what it cost (per character).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {**_STRING, "description": "What to say."},
+                "voice": {**_STRING, "description": "A voice of the model's (e.g. longanhuan_v3.6; default its own)."},
+                "format": {**_STRING, "enum": ["mp3", "wav", "opus", "pcm"], "description": "Default mp3."},
+                "model": {**_STRING, "description": "A speech model's id from list_media_models (default: the first)."},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "transcribe",
+        "title": "Transcribe audio",
+        "description": "The text of a recording (up to 5 minutes): what's said in it, and what it cost (per second).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "audio": {
+                    **_STRING,
+                    "description": "The recording: an https link or a data: URL (data:audio/mp3;...).",
+                },
+                "language": {**_STRING, "description": "Its language, if known (e.g. en, ar, zh)."},
+                "model": {**_STRING, "description": "A transcription model's id (default: the first)."},
+            },
+            "required": ["audio"],
         },
         "annotations": {"readOnlyHint": True},
     },

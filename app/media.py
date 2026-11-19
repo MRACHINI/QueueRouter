@@ -17,7 +17,10 @@ says, else from the model's name: oh-my-pi gives a model that outputs only image
 from __future__ import annotations
 
 import base64
+import email.parser
+import email.policy
 import json
+import os
 import re
 import time
 import urllib.parse
@@ -215,7 +218,11 @@ async def image_answer(response: httpx.Response, client: httpx.AsyncClient, payl
         data.append({"b64_json": got[0], "media_type": got[1]} if got else {"url": url})
     usage = answer.get("usage") if isinstance(answer.get("usage"), dict) else {}
     count = usage.get("image_count") if isinstance(usage.get("image_count"), int) else len(urls)
-    size = usage.get("size") if isinstance(usage.get("size"), str) else None
+    count = usage.get("output_image_count") if isinstance(usage.get("output_image_count"), int) else count
+    size = usage.get("size") if isinstance(usage.get("size"), str) else None  # Wan: "1024*1024"
+    for wide, tall in (("width", "height"), ("output_width", "output_height")):  # Qwen-Image: its two sides
+        if size is None and isinstance(usage.get(wide), int) and isinstance(usage.get(tall), int):
+            size = f"{usage[wide]}*{usage[tall]}"
     cost = image_cost(str(payload.get("model") or ""), count, size, len(input_images(payload)))
     summary: dict = {"images": count}
     if size:
@@ -285,6 +292,8 @@ VIDEO_PRICES = {
     "wan2.7-videoedit": {720: 0.10, 1080: 0.15},
     "wan2.1-vace-plus": {0: 0.10},
     "happyhorse-1.1-t2v": {480: 0.07, 720: 0.14, 1080: 0.18},
+    "happyhorse-1.1-i2v": {480: 0.07, 720: 0.14, 1080: 0.18},
+    "happyhorse-1.1-r2v": {480: 0.07, 720: 0.14, 1080: 0.18},
     "happyhorse-1.0-video-edit": {720: 0.14, 1080: 0.24},
     "pixverse/pixverse-v6-t2v": {360: 0.023, 540: 0.032, 720: 0.040, 1080: 0.080},
     "vidu/viduq2-pro-fast_img2video": {720: 0.016, 1080: 0.032},
@@ -429,6 +438,10 @@ EXTENSIONS = {
     "video/mp4": ".mp4",
     "video/webm": ".webm",
     "video/quicktime": ".mov",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/ogg": ".ogg",
+    "audio/pcm": ".pcm",
 }
 VIDEO_LENGTHS = (  # a model's name starts with -> the lengths it takes
     ("wan3.0", "2 to 30 s"),
@@ -437,12 +450,19 @@ VIDEO_LENGTHS = (  # a model's name starts with -> the lengths it takes
     ("wan2.5", "5 or 10 s"),
     ("wan2.", "5 s"),
     ("pixverse", "up to 15 s"),
+    ("happyhorse", "3 to 15 s"),
 )
 
 
 def price_text(model: str, kind: str) -> str:
     """What one image, or a second of video at each resolution, costs on this model, and a video's lengths."""
     key = str(model or "").lower()
+    if kind == "speech":
+        rate = SPEECH_PRICES.get(key)
+        return "price unknown" if rate is None else f"${rate * 10_000:g} per 10,000 characters"
+    if kind == "transcription":
+        rate = TRANSCRIBE_PRICES.get(key)
+        return "price unknown" if rate is None else f"${rate * 60:.4f} per minute of audio (up to 5 minutes)"
     if kind == "image":
         prices = IMAGE_PRICES.get(key)
         if prices is None:
@@ -462,3 +482,252 @@ def price_text(model: str, kind: str) -> str:
     )
     lengths = next((said for prefix, said in VIDEO_LENGTHS if key.startswith(prefix)), None)
     return f"{rates}; {lengths}" if lengths else rates
+
+
+# -- speech: text to speech and transcription ----------------------------------------------------
+# OpenAI's /v1/audio/speech (text in, the audio file out) and /v1/audio/transcriptions (an audio file in, its text
+# out) for an upstream on Qwen Cloud, as its Token Plan pages give them (2026-11): text to speech is
+# POST services/audio/tts/SpeechSynthesizer ({model, input: {text, voice, format}} -> a link to the audio, and
+# usage.characters); transcription is the multimodal endpoint with the audio as an input_audio part (a link or a
+# data: URL; up to 5 minutes) -> its text, and usage.duration. What a request made and cost goes back to QueueRouter
+# in headers (UNIT_HEADERS), since a speech answer is the audio itself.
+
+SPEECH_PATH = "audio/speech"
+TRANSCRIBE_PATH = "audio/transcriptions"
+QWEN_ENDPOINTS = {  # QueueRouter's path -> Qwen's own API for it
+    "images/generations": IMAGE_ENDPOINT,
+    "images/edits": IMAGE_ENDPOINT,
+    VIDEO_PATH: VIDEO_ENDPOINT,
+    SPEECH_PATH: "services/audio/tts/SpeechSynthesizer",
+    TRANSCRIBE_PATH: IMAGE_ENDPOINT,
+}
+DEFAULT_VOICE = "longanhuan_v3.6"  # the voice in Qwen's own example for qwen-audio-3.0-tts-plus
+OPENAI_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"}
+OPENAI_VOICES |= {"marin", "cedar"}
+SPEECH_TYPES = {"mp3": "audio/mpeg", "wav": "audio/wav", "pcm": "audio/pcm", "opus": "audio/ogg"}
+SPEECH_PRICES = {"qwen-audio-3.0-tts-plus": 0.2 / 10_000}  # USD per character (Qwen Cloud's page, 2026-11)
+TRANSCRIBE_PRICES = {"qwen-audio-3.0-asr-flash": 0.000035}  # USD per second of audio
+AUDIO_FORMATS = ("mp3", "wav", "opus", "ogg", "m4a", "aac", "flac", "webm", "amr", "pcm")
+MAX_AUDIO_BYTES = 100 * 1024 * 1024  # one speech answer fetched
+UNIT_HEADERS = {  # what a translated answer says about itself, for the request's record
+    "cost": "x-queuerouter-media-cost",
+    "units": "x-queuerouter-media-units",
+    "characters": "x-queuerouter-characters",
+    "seconds": "x-queuerouter-audio-seconds",
+}
+_SPEECH_NAME = re.compile(r"(^|[-_./])tts([-_.]|\d|$)")
+_TRANSCRIBE_NAME = re.compile(r"(^|[-_./])(asr|whisper|transcribe)([-_.]|\d|$)")
+
+
+def audio_kind(model_id: str) -> str | None:
+    """What a model does with sound by its name: "speech" (text to speech), "transcription", or None."""
+    name = str(model_id or "").lower()
+    if "realtime" in name:
+        return None
+    return "speech" if _SPEECH_NAME.search(name) else "transcription" if _TRANSCRIBE_NAME.search(name) else None
+
+
+def qwen_request(path: str, payload: dict) -> dict:
+    """A request to ``path`` in Qwen's own form (QWEN_ENDPOINTS)."""
+    if path in IMAGE_PATHS:
+        return image_request(payload)
+    if path == VIDEO_PATH:
+        return video_request(payload)
+    if path == SPEECH_PATH:
+        return speech_request(payload)
+    return transcription_request(payload)
+
+
+def speech_format(payload: dict) -> str:
+    wanted = str(payload.get("response_format") or "mp3").lower()
+    return wanted if wanted in SPEECH_TYPES else "mp3"  # aac, flac: Qwen makes neither
+
+
+def speech_request(payload: dict) -> dict:
+    """OpenAI's speech request in Qwen's form. An OpenAI voice name (alloy, nova...) gets Qwen's default voice; a
+    Qwen voice name goes as it is."""
+    text = payload.get("input")
+    if not isinstance(text, str) or not text.strip():
+        raise Unsupported("input (the text to speak) is required")
+    voice = payload.get("voice")
+    if isinstance(voice, dict):  # OpenAI's custom voice: {"id": ...}
+        voice = voice.get("id")
+    if not isinstance(voice, str) or not voice.strip() or voice.strip().lower() in OPENAI_VOICES:
+        voice = DEFAULT_VOICE
+    spoken: dict = {"text": text, "voice": voice.strip(), "format": speech_format(payload)}
+    if isinstance(payload.get("sample_rate"), int):
+        spoken["sample_rate"] = payload["sample_rate"]
+    return {"model": payload.get("model"), "input": spoken}
+
+
+def _audio_format(payload: dict) -> str:
+    """The audio's format: as given, else from a data: URL's type or a link's extension, else mp3."""
+    said = str(payload.get("format") or "").lower()
+    if said in AUDIO_FORMATS:
+        return said
+    audio = str(payload.get("file") or payload.get("audio") or "")
+    found = re.match(r"data:audio/(?:x-)?([a-z0-9]+)", audio) or re.search(r"\.([a-z0-9]{2,4})(?:\?|$)", audio.lower())
+    named = found[1] if found else ""
+    named = {"mpeg": "mp3", "mpga": "mp3", "wave": "wav", "mp4": "m4a"}.get(named, named)
+    return named if named in AUDIO_FORMATS else "mp3"
+
+
+def transcription_request(payload: dict) -> dict:
+    """A transcription (as JSON: ``file`` a link or a data: URL, what a multipart upload becomes) in Qwen's form."""
+    audio = payload.get("file") or payload.get("audio")
+    if not isinstance(audio, str) or not audio.strip():
+        raise Unsupported("file (the audio, as a link or a data: URL) is required")
+    parameters: dict = {"format": _audio_format(payload)}
+    if isinstance(payload.get("language"), str) and payload["language"].strip():
+        parameters["language_hints"] = [payload["language"].strip()]
+    part = {"type": "input_audio", "input_audio": {"data": audio}}
+    messages: list[dict] = [{"role": "user", "content": [part]}]
+    if isinstance(payload.get("prompt"), str) and payload["prompt"].strip():  # context, as Qwen's ASR takes it
+        messages.insert(0, {"role": "system", "content": [{"text": payload["prompt"]}]})
+    return {"model": payload.get("model"), "input": {"messages": messages}, "parameters": parameters}
+
+
+def form_fields(body: bytes, content_type: str) -> dict | None:
+    """A multipart upload (OpenAI's transcription form) as the JSON it means: its fields, and the file as a data:
+    URL with its ``format``. None when it isn't multipart."""
+    if "multipart/form-data" not in (content_type or "").lower():
+        return None
+    try:
+        head = b"Content-Type: " + content_type.encode() + b"\r\n\r\n"
+        message = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(head + body)
+    except (ValueError, TypeError, UnicodeEncodeError):
+        return None
+    if not message.is_multipart():
+        return None
+    fields: dict = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not isinstance(name, str):
+            continue
+        data = part.get_payload(decode=True) or b""
+        if part.get_filename() is not None:
+            kind_ = part.get_content_type()
+            kind_ = "audio/mpeg" if kind_ in ("application/octet-stream", "text/plain") else kind_
+            fields[name] = f"data:{kind_};base64,{base64.b64encode(data).decode()}"
+            extension = os.path.splitext(part.get_filename() or "")[1].lstrip(".").lower()
+            if extension in AUDIO_FORMATS:
+                fields.setdefault("format", extension)
+        else:
+            fields[name] = data.decode("utf-8", "replace")
+    return fields
+
+
+def _units_headers(cost: float | None, units: str | None, **counts) -> dict:
+    headers = {UNIT_HEADERS["units"]: units} if units else {}
+    if cost is not None:
+        headers[UNIT_HEADERS["cost"]] = repr(cost)
+    for name, value in counts.items():
+        if value is not None:
+            headers[UNIT_HEADERS[name]] = str(value)
+    return headers
+
+
+def units_of(headers) -> dict:
+    """What a translated answer said about itself (UNIT_HEADERS), as the request's fields."""
+
+    def number(name: str, kind_):
+        try:
+            value = headers.get(UNIT_HEADERS[name])
+            return kind_(value) if value is not None else None
+        except ValueError:
+            return None
+
+    return {
+        "media_cost": number("cost", float),
+        "media_units": headers.get(UNIT_HEADERS["units"]),
+        "speech_characters": number("characters", int),
+        "audio_seconds": number("seconds", float),
+    }
+
+
+async def _download(client: httpx.AsyncClient, url: str, limit: int) -> bytes | None:
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        return None
+    try:
+        async with client.stream("GET", url, timeout=120) as response:
+            if response.status_code != 200:
+                return None
+            data = bytearray()
+            async for chunk in response.aiter_bytes():
+                data += chunk
+                if len(data) > limit:
+                    return None
+            return bytes(data)
+    except httpx.HTTPError:
+        return None
+
+
+async def speech_answer(response: httpx.Response, client: httpx.AsyncClient, payload: dict) -> httpx.Response:
+    """Qwen's speech (a link to it) as OpenAI's answer: the audio itself, in the format asked for."""
+    try:
+        content = await response.aread()
+    finally:
+        await response.aclose()
+    if response.status_code != 200:
+        return error_answer(response, content)
+    answer = task_of(content)
+    output = answer.get("output") if isinstance(answer.get("output"), dict) else {}
+    audio = output.get("audio") if isinstance(output.get("audio"), dict) else {}
+    spoken = None
+    if isinstance(audio.get("data"), str) and audio["data"]:  # the audio itself (base64)
+        spoken = base64.b64decode(audio["data"])
+    elif isinstance(audio.get("url"), str):
+        spoken = await _download(client, audio["url"], MAX_AUDIO_BYTES)
+    if not spoken:
+        message = str(answer.get("message") or "the provider returned no audio")
+        return _error(response, 502, message, answer.get("code"))
+    usage = answer.get("usage") if isinstance(answer.get("usage"), dict) else {}
+    characters = usage.get("characters") if isinstance(usage.get("characters"), int) else len(payload["input"])
+    price = SPEECH_PRICES.get(str(payload.get("model") or "").lower())
+    cost = round(characters * price, 8) if price is not None else None
+    units = _units_headers(cost, f"{characters:,} characters", characters=characters)
+    headers = {"content-type": SPEECH_TYPES[speech_format(payload)], **units}
+    return httpx.Response(200, content=spoken, headers=headers, request=response.request)
+
+
+async def transcription_answer(response: httpx.Response, payload: dict) -> httpx.Response:
+    """Qwen's transcription as OpenAI's: {"text"} (json), the text alone (text), or with its words (verbose_json)."""
+    try:
+        content = await response.aread()
+    finally:
+        await response.aclose()
+    if response.status_code != 200:
+        return error_answer(response, content)
+    answer = task_of(content)
+    output = answer.get("output") if isinstance(answer.get("output"), dict) else {}
+    said = output.get("text") if isinstance(output.get("text"), str) else None
+    if said is None:  # the multimodal endpoint's usual shape: the text in the message
+        parts = [
+            part.get("text", "")
+            for choice in output.get("choices") or []
+            if isinstance(choice, dict)
+            for part in ((choice.get("message") or {}).get("content") or [])
+            if isinstance(part, dict)
+        ]
+        said = "".join(parts) if parts else None
+    if said is None:
+        message = str(answer.get("message") or "the provider returned no text")
+        return _error(response, 502, message, answer.get("code"))
+    usage = answer.get("usage") if isinstance(answer.get("usage"), dict) else {}
+    seconds = usage.get("duration") or usage.get("seconds") or usage.get("input_audio_duration")
+    seconds = float(seconds) if isinstance(seconds, int | float) else None
+    price = TRANSCRIBE_PRICES.get(str(payload.get("model") or "").lower())
+    cost = round(seconds * price, 8) if price is not None and seconds is not None else None
+    headers = _units_headers(cost, f"{seconds:g} s of audio" if seconds is not None else None, seconds=seconds)
+    wanted = str(payload.get("response_format") or "json").lower()
+    if wanted in ("text", "srt", "vtt"):  # no timings to make subtitles from: the text
+        return httpx.Response(200, text=said, headers=headers, request=response.request)
+    body: dict = {"text": said}
+    if wanted == "verbose_json":
+        sentence = output.get("sentence") if isinstance(output.get("sentence"), dict) else {}
+        body = {"task": "transcribe", "language": payload.get("language"), "duration": seconds, "text": said}
+        if isinstance(sentence.get("words"), list):
+            body["words"] = sentence["words"]
+    if seconds is not None:
+        body["usage"] = {"type": "duration", "seconds": seconds, **({"cost": cost} if cost is not None else {})}
+    return httpx.Response(200, json=body, headers=headers, request=response.request)

@@ -33,7 +33,8 @@ def test_the_protocol():
         handled(call("initialize", {"protocolVersion": "1999-01-01"}))["result"]["protocolVersion"] == mcp.PROTOCOLS[0]
     )
     names = [t["name"] for t in handled(call("tools/list"))["result"]["tools"]]
-    assert names == ["list_media_models", "generate_image", "generate_video", "check_video"]
+    assert names[:4] == ["list_media_models", "generate_image", "generate_video", "check_video"]
+    assert names[4:] == ["text_to_speech", "transcribe"]
     assert handled(call("tools/call", {"name": "check_video", "arguments": {"job_id": "x"}}))["result"] == mcp.text(
         "check_video {'job_id': 'x'}"
     )

@@ -54,6 +54,13 @@ _DROP_REQUEST_HEADERS = {
 _OWN_HEADER_PREFIXES = ("x-queuerouter-", "x-session-id", "x-run-id")
 # Only these upstream response headers are passed back on non-streaming responses.
 _KEEP_RESPONSE_HEADERS = {"content-type", "retry-after", "x-ratelimit-limit", "x-ratelimit-remaining"}
+# what QueueRouter's own translation says a speech request made and cost (app/media.py UNIT_HEADERS), for the app too
+_KEEP_RESPONSE_HEADERS |= {
+    "x-queuerouter-media-cost",
+    "x-queuerouter-media-units",
+    "x-queuerouter-characters",
+    "x-queuerouter-audio-seconds",
+}
 
 
 def upstream_headers(incoming: Mapping[str, str], api_key: str) -> dict[str, str]:

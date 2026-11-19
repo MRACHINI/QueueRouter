@@ -461,6 +461,8 @@ def _empty_usage() -> dict:
         "images": 0,  # made (app/media.py)
         "videos": 0,  # finished
         "video_seconds": 0.0,
+        "speech_characters": 0,  # spoken by text to speech
+        "audio_seconds": 0.0,  # heard by transcription
     }
 
 
@@ -485,7 +487,7 @@ def _add_usage(out: dict, row, costs: tuple[float, float, float] | None) -> None
     for field in ("requests", "errors", "prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
         out[field] += row[field] or 0
     keys = row.keys()
-    for field in ("images", "videos", "video_seconds"):  # usage rows have them all; a request row a video's seconds
+    for field in ("images", "videos", "video_seconds", "speech_characters", "audio_seconds"):  # usage rows: all
         if field in keys:
             out[field] += row[field] or 0
     if "videos" not in keys and "video_seconds" in keys and row["video_seconds"]:

@@ -111,7 +111,8 @@ PRESETS: dict[str, Preset] = {
             note="Key from home.qwencloud.com/api-keys; keys are per region (this address: Singapore). A Token Plan "
             "key uses https://token-plan.maas.qwencloudapi.com/compatible-mode/v1. Thinking levels go as "
             "reasoning_effort. Image requests (/v1/images/generations and /v1/images/edits) go to Qwen's own image "
-            "API, priced per image; videos (/v1/videos, OpenRouter's form) to its video tasks, priced per second.",
+            "API, priced per image; videos (/v1/videos, OpenRouter's form) to its video tasks, priced per second; "
+            "speech (/v1/audio/speech, /v1/audio/transcriptions) to its speech APIs.",
         ),
         Preset(
             "nvidia",

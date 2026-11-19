@@ -137,7 +137,7 @@ async def test_images_through_qwens_own_api(make_stack):
         assert tuple(store.query("SELECT SUM(images), SUM(videos) FROM usage_daily")[0]) == (4, 0)
         await login(c, stack.url)
         page = (await c.get("/admin/usage/body")).text
-        assert "Images and videos" in page and "Images · videos" in page
+        assert "Images, videos and speech" in page and "Images · videos" in page
 
 
 async def test_other_providers_get_image_requests_as_they_are(make_stack):
@@ -264,3 +264,18 @@ async def test_videos_through_qwens_task_api(make_stack):
         assert made[0]["video_seconds"] == 5.0 and made[0]["media_units"] == "5 s at 720P"
         totals = store.query("SELECT SUM(videos), SUM(video_seconds), SUM(images) FROM usage_daily")[0]
         assert tuple(totals) == (1, 5.0, 0)  # the finished video, not its two starts
+
+
+def test_qwen_images_size_from_its_two_sides():
+    """Qwen-Image says width and height (Wan says size): the size, and the price at 2K, come from them."""
+    import asyncio
+    import json
+
+    answer = {
+        "output": {"choices": [{"message": {"content": [{"image": "https://x/a.png"}]}}]},
+        "usage": {"width": 2048, "height": 2048, "image_count": 1},
+    }
+    payload = {"model": "qwen-image-3.0-pro", "prompt": "x"}
+    sent = httpx.Response(200, json=answer, request=httpx.Request("POST", "https://qwen.test/api"))
+    got = asyncio.run(media.image_answer(sent, None, payload))
+    assert json.loads(got.content)["usage"] == {"images": 1, "size": "2048*2048", "cost": 0.075}

@@ -837,6 +837,16 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX media_files_created ON media_files (created);
     """,
+    # 55: speech: the characters a text-to-speech request spoke, the seconds of audio a transcription heard, beside
+    # the images and video seconds
+    """
+    ALTER TABLE requests ADD COLUMN speech_characters INTEGER;
+    ALTER TABLE requests ADD COLUMN audio_seconds REAL;
+    ALTER TABLE usage_daily ADD COLUMN speech_characters INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE usage_daily ADD COLUMN audio_seconds REAL NOT NULL DEFAULT 0;
+    ALTER TABLE usage_hourly ADD COLUMN speech_characters INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE usage_hourly ADD COLUMN audio_seconds REAL NOT NULL DEFAULT 0;
+    """,
 ]
 CHECKERS_CONVERTED = "checkers_converted"  # meta: each alias's checker model became a tagger (_convert_checkers)
 CHECKER_TAGS = (  # what a converted checker gives: exactly one of these
@@ -917,6 +927,8 @@ REQUEST_COLUMNS = (
     "media_units",
     "images",
     "video_seconds",
+    "speech_characters",
+    "audio_seconds",
 )
 
 
@@ -934,15 +946,17 @@ _UPSERT = "INSERT INTO {table} (key, value) VALUES (?, ?) ON CONFLICT(key) DO UP
 # a finished request added to the daily or hourly usage totals
 _ADD_USAGE = (
     "INSERT INTO {table} ({slot}, client, model, upstream, alias, requests, errors, prompt_tokens, "
-    "completion_tokens, cached_tokens, cache_write_tokens, media_cost, images, videos, video_seconds) "
-    "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "completion_tokens, cached_tokens, cache_write_tokens, media_cost, images, videos, video_seconds, "
+    "speech_characters, audio_seconds) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
     "ON CONFLICT({slot}, client, model, upstream, alias) DO UPDATE SET requests = requests + 1, "
     "errors = errors + excluded.errors, prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
     "completion_tokens = completion_tokens + excluded.completion_tokens, "
     "cached_tokens = cached_tokens + excluded.cached_tokens, "
     "cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens, "
     "media_cost = media_cost + excluded.media_cost, images = images + excluded.images, "
-    "videos = videos + excluded.videos, video_seconds = video_seconds + excluded.video_seconds"
+    "videos = videos + excluded.videos, video_seconds = video_seconds + excluded.video_seconds, "
+    "speech_characters = speech_characters + excluded.speech_characters, "
+    "audio_seconds = audio_seconds + excluded.audio_seconds"
 )
 HOUR_FORMAT = "%Y-%m-%dT%H"  # usage_hourly's hours (UTC)
 
@@ -1822,6 +1836,8 @@ class Store:
                     row.get("images") or 0,
                     1 if row.get("video_seconds") else 0,  # a finished video (its start has none)
                     row.get("video_seconds") or 0,
+                    row.get("speech_characters") or 0,
+                    row.get("audio_seconds") or 0,
                 )
                 when = time.gmtime(row["ts"])
                 for table, slot, fmt in (("usage_daily", "day", "%Y-%m-%d"), ("usage_hourly", "hour", HOUR_FORMAT)):
@@ -1948,7 +1964,8 @@ class Store:
             "SELECT client, model, upstream, SUM(requests) AS requests, SUM(prompt_tokens) AS prompt_tokens, "
             "SUM(completion_tokens) AS completion_tokens, SUM(cached_tokens) AS cached_tokens, "
             "SUM(cache_write_tokens) AS cache_write_tokens, SUM(media_cost) AS media_cost, SUM(images) AS images, "
-            "SUM(videos) AS videos, SUM(video_seconds) AS video_seconds "
+            "SUM(videos) AS videos, SUM(video_seconds) AS video_seconds, "
+            "SUM(speech_characters) AS speech_characters, SUM(audio_seconds) AS audio_seconds "
             "FROM usage_daily WHERE day >= ? AND day < ? GROUP BY client, model, upstream",
             (f"{month}-01", f"{month}-32"),
         )
@@ -1963,7 +1980,7 @@ class Store:
         days = [time.strftime("%Y-%m-%d", time.gmtime(t)) for t in (start, end - 1)]
         counts = (
             "requests, errors, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, media_cost, "
-            "images, videos, video_seconds"
+            "images, videos, video_seconds, speech_characters, audio_seconds"
         )
         return self.read(
             f"SELECT hour, substr(hour, 1, 10) AS day, client, model, upstream, alias, {counts} "  # noqa: S608

@@ -100,7 +100,11 @@ def create_mock(limit: int = 2) -> FastAPI:
         if state.get("qwen_image_status"):
             status = state["qwen_image_status"]
             return JSONResponse({"code": "Throttling", "message": "forced", "request_id": "r"}, status_code=status)
-        content = body["input"]["messages"][0]["content"]
+        content = body["input"]["messages"][-1]["content"]
+        if content and content[0].get("type") == "input_audio":  # a transcription (the same endpoint)
+            state.setdefault("qwen_asr_requests", []).append(body)
+            said = [{"text": "hello from the recording"}]
+            return {"output": {"choices": [{"message": {"content": said}}]}, "usage": {"duration": 3.5}}
         if not isinstance(body.get("model"), str) or not content or "text" not in content[0]:
             return JSONResponse({"code": "InvalidParameter", "message": "bad input"}, status_code=400)
         n = body.get("parameters", {}).get("n", 1)
@@ -144,9 +148,20 @@ def create_mock(limit: int = 2) -> FastAPI:
         usage = {"duration": 5.0, "output_video_duration": 5.0, "SR": 720, "ratio": "16:9", "video_count": 1}
         return {"request_id": "r", "output": output, "usage": usage}
 
+    @app.post("/api/v1/services/audio/tts/SpeechSynthesizer")
+    async def qwen_speech(request: Request):
+        """Qwen Cloud's text to speech: a link to the audio, and the characters spoken."""
+        body = json.loads(await request.body())
+        state.setdefault("qwen_speech_requests", []).append(body)
+        text = body["input"]["text"]
+        audio = {"url": f"{str(request.base_url).rstrip('/')}/files/speech.mp3?Expires=1", "expires_at": 1}
+        return {"output": {"audio": audio}, "usage": {"characters": len(text)}}
+
     @app.get("/files/{name}")
     async def qwen_file(name: str):
         """An image or a video Qwen made, at its temporary link."""
+        if name.endswith(".mp3"):
+            return Response(content=b"ID3" + name.encode(), media_type="audio/mpeg")
         if name.endswith(".mp4"):
             return Response(content=b"\x00\x00\x00\x18ftypmp42" + name.encode(), media_type="video/mp4")
         return Response(content=b"\x89PNG\r\n\x1a\n" + name.encode(), media_type="image/png")

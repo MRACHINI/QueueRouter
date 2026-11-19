@@ -2368,6 +2368,23 @@ every finished video (whichever API saw it done first), kept `media_keep_days` (
 the oldest first, in the daily maintenance. `/v1/videos/{id}/content` serves the copy too once there is one. `/mcp`
 bodies get the `MAX_BODY_MB` limit (input images may come inline).
 
+v0.87.0: speech on Qwen Cloud, from its Token Plan pages (docs.qwencloud.com/token-plan/best-practices/...): OpenAI's
+`/v1/audio/speech` goes to `services/audio/tts/SpeechSynthesizer` ({model, input: {text, voice, format}}; an OpenAI
+voice name gets Qwen's `longanhuan_v3.6`, a Qwen voice goes as it is; aac/flac become mp3) and comes back as the
+audio itself, fetched from Qwen's link; `/v1/audio/transcriptions` goes to the multimodal endpoint with the audio as
+an `input_audio` part (link or data: URL, up to 5 minutes; `language` as `language_hints`, `prompt` as a system
+message) and comes back as {"text"}, the text alone, or verbose_json with its words. OpenAI's SDKs upload the audio
+(multipart): for a model on Qwen (`served_on_qwen`) the upload becomes that JSON before it's queued (the file as a
+data: URL); other providers get the upload as it is. The four media paths share one switch (`own_api`,
+media.QWEN_ENDPOINTS). A speech answer is the audio, so what it made and cost travels in QueueRouter's own headers
+(`x-queuerouter-media-cost`, `-media-units`, `-characters`, `-audio-seconds`), which apps get too; migration 55 adds
+`speech_characters` and `audio_seconds` to requests and the usage totals; the Usage page's table is now "Images,
+videos and speech", with a Speech tile. Prices: TTS Plus $0.2 per 10,000 characters, ASR Flash $0.000035 a second
+(kept to 8 decimals: these are fractions of a cent). `/mcp/media` gains `text_to_speech` (the audio in the answer up
+to 1 MB, a link, the cost) and `transcribe`. Also: Qwen-Image says its size as width / height (Wan as `size`), so a
+2K Qwen-Image image was priced at 1K and listed without its size; HappyHorse 1.1 I2V and R2V (the Token Plan's
+image-to-video and reference-to-video models) are priced like T2V, and HappyHorse videos take 3 to 15 seconds.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its
