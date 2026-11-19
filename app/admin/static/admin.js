@@ -879,6 +879,7 @@ function liveRequests(root) {
     if (d.answer_check) line("Answer check", d.answer_check);
     if (d.answer_tags) line("Answer tags", d.answer_tags.split(",").join(", "));
     if (d.thinking) line("Thinking level", d.thinking);
+    if (d.media_units) line("Made", d.media_units);
     if (d.role) line("Made by QueueRouter", d.role);
     if (d.parent) {
       const link = el("a", "mono", d.parent);

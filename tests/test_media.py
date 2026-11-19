@@ -8,6 +8,7 @@ import httpx
 
 from app import media
 from tests.conftest import eventually
+from tests.test_admin import OWNER, login
 from tests.test_usage import flushed
 
 
@@ -80,7 +81,7 @@ def test_image_prices():
 
 
 async def test_images_through_qwens_own_api(make_stack):
-    stack = make_stack(models_cache_s=0)
+    stack = make_stack(models_cache_s=0, bootstrap=OWNER)
     qwen(stack, "qwen-image-3.0-pro", "wan2.7-image", "wan3.0-video")
     async with httpx.AsyncClient(base_url=stack.url, timeout=30) as c:
         listed = {m["id"]: m for m in (await c.get("/v1/models", headers=stack.headers)).json()["data"]}
@@ -95,7 +96,7 @@ async def test_images_through_qwens_own_api(make_stack):
         answer = r.json()
         assert base64.b64decode(answer["data"][0]["b64_json"]).startswith(b"\x89PNG")
         assert answer["data"][0]["media_type"] == "image/png"
-        assert answer["usage"] == {"images": 1, "cost": 0.04}
+        assert answer["usage"] == {"images": 1, "size": "1024*1024", "cost": 0.04}
         sent = stack.mock["qwen_image_requests"][-1]
         assert sent["input"]["messages"][0]["content"] == [{"text": "an apple"}]
         assert sent["parameters"] == {"watermark": False, "n": 1, "size": "1024*1024"}
@@ -105,7 +106,7 @@ async def test_images_through_qwens_own_api(make_stack):
         r = await c.post("/v1/images/generations", headers=stack.headers, json={**ask, "n": 2})
         names = [d["url"].split("/files/")[1] for d in r.json()["data"]]
         assert names == ["image-0.png?Expires=1", "image-1.png?Expires=1"]
-        assert r.json()["usage"] == {"images": 2, "cost": 0.08}
+        assert r.json()["usage"] == {"images": 2, "size": "1024*1024", "cost": 0.08}
         edit = {**ask, "input_references": [{"type": "image_url", "url": "data:image/png;base64,AAAA"}]}
         r = await c.post("/v1/images/edits", headers=stack.headers, json=edit)
         assert r.status_code == 200 and r.json()["usage"]["cost"] == 0.043
@@ -131,6 +132,12 @@ async def test_images_through_qwens_own_api(make_stack):
         await eventually(lambda: round(spent(), 6) == 0.163, timeout=10)
         costs = sorted(r["media_cost"] for r in store.list_requests(20) if r["media_cost"])
         assert costs == [0.04, 0.043, 0.08]
+        made = sorted((r["images"], r["media_units"]) for r in store.list_requests(20) if r["images"])
+        assert made == [(1, "1 × 1024*1024"), (1, "1 × 1024*1024"), (2, "2 × 1024*1024")]
+        assert tuple(store.query("SELECT SUM(images), SUM(videos) FROM usage_daily")[0]) == (4, 0)
+        await login(c, stack.url)
+        page = (await c.get("/admin/usage/body")).text
+        assert "Images and videos" in page and "Images · videos" in page
 
 
 async def test_other_providers_get_image_requests_as_they_are(make_stack):
@@ -254,3 +261,6 @@ async def test_videos_through_qwens_task_api(make_stack):
         await eventually(lambda: round(spent(), 6) == 0.35, timeout=10)
         made = [r for r in store.list_requests(20) if r["media_cost"]]
         assert len(made) == 1 and made[0]["target_model"] == "wan3.0-video" and made[0]["path"] == job_url
+        assert made[0]["video_seconds"] == 5.0 and made[0]["media_units"] == "5 s at 720P"
+        totals = store.query("SELECT SUM(videos), SUM(video_seconds), SUM(images) FROM usage_daily")[0]
+        assert tuple(totals) == (1, 5.0, 0)  # the finished video, not its two starts

@@ -30,6 +30,11 @@
     <div class="small muted">≈ {{ usd(totals.cost_out) }}</div></div>
   <div class="tile"><div class="tile-label">At official prices</div><div class="tile-value">{{ usd(totals.cost) }}</div>
     <div class="small muted">what this would have cost</div></div>
+  {% if totals.images or totals.videos %}
+  <div class="tile"><div class="tile-label">Images · videos</div>
+    <div class="tile-value">{{ "{:,}".format(totals.images) }} · {{ "{:,}".format(totals.videos) }}</div>
+    <div class="small muted">{{ "{:,.0f}".format(totals.video_seconds) }} s of video</div></div>
+  {% endif %}
   <div class="tile">
     {% if plan_per_month %}
     {% if totals.savings >= 0 %}
@@ -91,6 +96,30 @@ double against a plan's weekly quota, so a row with them also says what it used 
   </tbody>
 </table>
 </div>
+
+{% set made = models | selectattr("images") | list + models | rejectattr("images") | selectattr("videos") | list %}
+{% if made %}
+<h2>Images and videos (UTC)</h2>
+<p class="small muted">Made in this period, priced per image and per second of video when they were made (Qwen
+Cloud's prices). Videos count when finished; a failed one costs nothing. Each request's own count, size and length
+are in its details on the Requests page.</p>
+<div class="table-wrap">
+<table class="cards dense">
+  <thead><tr><th>Model</th><th class="num">Images</th><th class="num">Videos</th><th class="num">Video seconds</th><th class="num">Total</th></tr></thead>
+  <tbody>
+  {% for m in made %}
+  <tr>
+    <td data-label="Model" class="wrap-any">{{ m.label }}</td>
+    <td data-label="Images" class="num">{{ "{:,}".format(m.images) }}</td>
+    <td data-label="Videos" class="num">{{ "{:,}".format(m.videos) }}</td>
+    <td data-label="Video seconds" class="num">{{ "{:,.0f}".format(m.video_seconds) }}</td>
+    {{ total(m) }}
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
 
 <h2>Cost per alias (UTC)</h2>
 <p class="small muted">What each alias cost with everything done for its requests: its model, its fallbacks, and the

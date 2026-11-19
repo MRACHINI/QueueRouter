@@ -2343,6 +2343,13 @@ a request with its `media_cost` (the polls themselves aren't); a failed one cost
 Only the job's client sees it. Prices per second from Qwen's model pages (Wan 3.0, Prime, Wan 2.7, VACE, HappyHorse,
 PixVerse with and without sound, Vidu); a model without one is unpriced.
 
+v0.85.1: what images and videos made, not only what they cost (migration 53). A request keeps `images` (how many),
+`video_seconds` (a finished video's length) and `media_units` as shown ("2 × 1024*1024", "5 s at 720P"): from an
+image answer's `usage` (QueueRouter's translation now says the size too) or its `data` list for any provider, from a
+finished task's `usage` (`output_video_duration` / `duration`, `SR`). The usage totals add `images`, `videos` (a
+finished video counts, its start doesn't) and `video_seconds`. The Requests page shows them in a request's details
+("Made"); the Usage page a tile and an "Images and videos" table per model when the period has any.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

@@ -253,6 +253,9 @@ class RequestLog:
             "sent_user_agent": None,  # what the provider saw instead, when changed by a User-Agent rule
             "fast": None,  # 1: sent to Synthetic as fast:<model> (an alias's fast mode)
             "media_cost": None,  # USD: what an image or video it made cost (app/media.py), per image or second
+            "media_units": None,  # what it made, as shown: "2 × 1024*1024", "5 s at 720P"
+            "images": None,  # how many images it made
+            "video_seconds": None,  # a finished video: its length
             "compaction": None,  # e.g. "trim 812k -> 402k": the conversation was shrunk to fit (app/compaction.py)
             "council": None,  # e.g. "pick 2/3: GLM-4.7": what a model council did (app/council.py)
             "client_headers": None,  # what the app sent about itself (app/upstream.py client_identity)
@@ -3189,8 +3192,10 @@ def create_app(
             return target, {}, Response(answer.content, answer.status_code, media_type="application/json")
         return target, media_mod.task_of(response.content), None
 
-    def video_made(request: Request, client: ClientKey, job, target: Target, cost: float | None) -> None:
-        """A finished video on the Requests and Usage pages, priced once (the job was settled just now)."""
+    def video_made(request: Request, client: ClientKey, job, target: Target, cost: float | None, task: dict) -> None:
+        """A finished video on the Requests and Usage pages, priced once (the job was settled just now), with its
+        seconds and resolution."""
+        seconds, units = media_mod.video_units(task)
         ip = client_ip(request, bootstrap.trusted_proxies)
         rlog = RequestLog(f"qr-{uuid.uuid4().hex[:12]}", "GET", f"/v1/videos/{job['id']}", ip)
         rlog.fields.update(
@@ -3199,6 +3204,8 @@ def create_app(
             target_model=job["model"],
             upstream=target.upstream.name,
             media_cost=cost,
+            video_seconds=seconds,
+            media_units=units,
             user_agent=(request.headers.get("user-agent") or "")[:300] or None,
         )
         rlog.finish(stats, outcome="done", status=200)
@@ -3221,7 +3228,7 @@ def create_app(
         if status == "completed":
             cost = media_mod.task_cost(job["model"], task, bool(job["audio"]))
             if await asyncio.to_thread(store.settle_media_job, job_id, status, cost):
-                video_made(request, client, job, target, cost)
+                video_made(request, client, job, target, cost, task)
         elif status in media_mod.FINISHED:
             await asyncio.to_thread(store.settle_media_job, job_id, status, None)  # nothing made: nothing to pay
         elif status != job["status"]:
@@ -5397,6 +5404,7 @@ def create_app(
                             )
                             if adm.path in media_mod.IMAGE_PATHS:  # priced per image (its usage.cost), not per token
                                 rlog.fields["media_cost"] = media_mod.cost_of(content)
+                                rlog.fields["images"], rlog.fields["media_units"] = media_mod.image_units(content)
                         headers = response_headers(response.headers)
                         headers.update(adm.hints)
                         headers["X-Queue-Wait-Ms"] = str(rlog.fields["queue_ms"])

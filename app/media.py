@@ -218,10 +218,41 @@ async def image_answer(response: httpx.Response, client: httpx.AsyncClient, payl
     size = usage.get("size") if isinstance(usage.get("size"), str) else None
     cost = image_cost(str(payload.get("model") or ""), count, size, len(input_images(payload)))
     summary: dict = {"images": count}
+    if size:
+        summary["size"] = size
     if cost is not None:
         summary["cost"] = cost
     body = {"created": int(time.time()), "data": data, "usage": summary}
     return httpx.Response(200, json=body, request=response.request)
+
+
+def image_units(body: bytes) -> tuple[int | None, str | None]:
+    """How many images an answer has, and what it made as the Requests page shows it ("2 × 1024*1024"). Any
+    provider's: its ``usage`` when it says (QueueRouter's own translation does), else its ``data`` list."""
+    try:
+        answer = json.loads(body)
+    except ValueError:
+        return None, None
+    if not isinstance(answer, dict):
+        return None, None
+    usage = answer.get("usage") if isinstance(answer.get("usage"), dict) else {}
+    count = usage.get("images")
+    if not isinstance(count, int):
+        count = len(answer["data"]) if isinstance(answer.get("data"), list) else None
+    if not count:
+        return None, None
+    size = usage.get("size") if isinstance(usage.get("size"), str) else None
+    return count, f"{count} × {size}" if size else f"{count} image{'s' if count > 1 else ''}"
+
+
+def video_units(task: dict) -> tuple[float | None, str | None]:
+    """A finished task's seconds, and what it made as shown ("5 s at 720P")."""
+    usage = task.get("usage") if isinstance(task.get("usage"), dict) else {}
+    seconds = usage.get("output_video_duration") or usage.get("duration")
+    if not isinstance(seconds, int | float) or seconds <= 0:
+        return None, None
+    height = _height(usage.get("SR") or usage.get("resolution"))
+    return float(seconds), f"{seconds:g} s at {height}P" if height else f"{seconds:g} s"
 
 
 # -- video -----------------------------------------------------------------------------------

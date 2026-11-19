@@ -165,6 +165,7 @@ REQUEST_DETAILS = (  # what opens under a row; the list above stays small
     "via",
     "edits",
     "fast",
+    "media_units",
 )
 HERE = os.path.dirname(__file__)
 

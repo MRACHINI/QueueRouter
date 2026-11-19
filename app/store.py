@@ -808,6 +808,19 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX media_jobs_created ON media_jobs (created);
     """,
+    # 53: what an image or video request made, beside its cost: how many images and their size, a video's seconds
+    # and resolution (``media_units``, as shown), and the counts the usage totals add up
+    """
+    ALTER TABLE requests ADD COLUMN media_units TEXT;
+    ALTER TABLE requests ADD COLUMN images INTEGER;
+    ALTER TABLE requests ADD COLUMN video_seconds REAL;
+    ALTER TABLE usage_daily ADD COLUMN images INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE usage_daily ADD COLUMN videos INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE usage_daily ADD COLUMN video_seconds REAL NOT NULL DEFAULT 0;
+    ALTER TABLE usage_hourly ADD COLUMN images INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE usage_hourly ADD COLUMN videos INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE usage_hourly ADD COLUMN video_seconds REAL NOT NULL DEFAULT 0;
+    """,
 ]
 CHECKERS_CONVERTED = "checkers_converted"  # meta: each alias's checker model became a tagger (_convert_checkers)
 CHECKER_TAGS = (  # what a converted checker gives: exactly one of these
@@ -885,6 +898,9 @@ REQUEST_COLUMNS = (
     "alias",
     "fast",
     "media_cost",
+    "media_units",
+    "images",
+    "video_seconds",
 )
 
 
@@ -902,13 +918,15 @@ _UPSERT = "INSERT INTO {table} (key, value) VALUES (?, ?) ON CONFLICT(key) DO UP
 # a finished request added to the daily or hourly usage totals
 _ADD_USAGE = (
     "INSERT INTO {table} ({slot}, client, model, upstream, alias, requests, errors, prompt_tokens, "
-    "completion_tokens, cached_tokens, cache_write_tokens, media_cost) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?) "
+    "completion_tokens, cached_tokens, cache_write_tokens, media_cost, images, videos, video_seconds) "
+    "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
     "ON CONFLICT({slot}, client, model, upstream, alias) DO UPDATE SET requests = requests + 1, "
     "errors = errors + excluded.errors, prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
     "completion_tokens = completion_tokens + excluded.completion_tokens, "
     "cached_tokens = cached_tokens + excluded.cached_tokens, "
     "cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens, "
-    "media_cost = media_cost + excluded.media_cost"
+    "media_cost = media_cost + excluded.media_cost, images = images + excluded.images, "
+    "videos = videos + excluded.videos, video_seconds = video_seconds + excluded.video_seconds"
 )
 HOUR_FORMAT = "%Y-%m-%dT%H"  # usage_hourly's hours (UTC)
 
@@ -1785,6 +1803,9 @@ class Store:
                     row.get("cached_tokens") or 0,
                     row.get("cache_write_tokens") or 0,
                     row.get("media_cost") or 0,
+                    row.get("images") or 0,
+                    1 if row.get("video_seconds") else 0,  # a finished video (its start has none)
+                    row.get("video_seconds") or 0,
                 )
                 when = time.gmtime(row["ts"])
                 for table, slot, fmt in (("usage_daily", "day", "%Y-%m-%d"), ("usage_hourly", "hour", HOUR_FORMAT)):
@@ -1910,7 +1931,8 @@ class Store:
         return self.query(
             "SELECT client, model, upstream, SUM(requests) AS requests, SUM(prompt_tokens) AS prompt_tokens, "
             "SUM(completion_tokens) AS completion_tokens, SUM(cached_tokens) AS cached_tokens, "
-            "SUM(cache_write_tokens) AS cache_write_tokens, SUM(media_cost) AS media_cost "
+            "SUM(cache_write_tokens) AS cache_write_tokens, SUM(media_cost) AS media_cost, SUM(images) AS images, "
+            "SUM(videos) AS videos, SUM(video_seconds) AS video_seconds "
             "FROM usage_daily WHERE day >= ? AND day < ? GROUP BY client, model, upstream",
             (f"{month}-01", f"{month}-32"),
         )
@@ -1923,7 +1945,10 @@ class Store:
         first = self.hourly_usage_from()
         hours = [time.strftime(HOUR_FORMAT, time.gmtime(t)) for t in (start, end)]
         days = [time.strftime("%Y-%m-%d", time.gmtime(t)) for t in (start, end - 1)]
-        counts = "requests, errors, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, media_cost"
+        counts = (
+            "requests, errors, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, media_cost, "
+            "images, videos, video_seconds"
+        )
         return self.read(
             f"SELECT hour, substr(hour, 1, 10) AS day, client, model, upstream, alias, {counts} "  # noqa: S608
             "FROM usage_hourly WHERE hour >= ? AND hour < ? AND hour >= ? UNION ALL "

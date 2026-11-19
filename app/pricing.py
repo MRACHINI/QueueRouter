@@ -458,6 +458,9 @@ def _empty_usage() -> dict:
         "quota_cost": 0.0,  # what it counts against a weekly quota: Synthetic's fast mode counts double
         "priced": True,
         "unpriced_tokens": 0,
+        "images": 0,  # made (app/media.py)
+        "videos": 0,  # finished
+        "video_seconds": 0.0,
     }
 
 
@@ -481,6 +484,12 @@ def _label(names: ModelNames, model: str, upstream: str) -> str:
 def _add_usage(out: dict, row, costs: tuple[float, float, float] | None) -> None:
     for field in ("requests", "errors", "prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
         out[field] += row[field] or 0
+    keys = row.keys()
+    for field in ("images", "videos", "video_seconds"):  # usage rows have them all; a request row a video's seconds
+        if field in keys:
+            out[field] += row[field] or 0
+    if "videos" not in keys and "video_seconds" in keys and row["video_seconds"]:
+        out["videos"] += 1
     out["input_tokens"] += max((row["prompt_tokens"] or 0) - (row["cached_tokens"] or 0), 0)
     if costs is None:
         out["priced"] = False
