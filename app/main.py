@@ -41,6 +41,7 @@ from . import (
     anthropic_api,
     claude,
     content_log,
+    levelcheck,
     metrics,
     modelcheck,
     ranking,
@@ -352,6 +353,7 @@ class Admission:
     hop: Hop | None = None  # after its own models, the request goes on to another alias (Forward)
     forward: Callable[[Hop, str, list], Awaitable[Response]] | None = None  # serves it there (see serve)
     fast: bool = False  # this step goes to Synthetic in fast mode (Step.fast)
+    raw: bool = False  # sent as it is: no provider rules, no fitting or translating of a thinking level (a level test)
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
@@ -1847,6 +1849,7 @@ def create_app(
                         ("Price", cost, cost_from),
                     ],
                     "style": style,
+                    "testable": kind is None and style not in levelcheck.UNTESTABLE,  # a chat model, asked a way
                 }
             )
         rows.sort(key=lambda r: r["id"].lower())
@@ -1859,6 +1862,69 @@ def create_app(
             "bare": sum(
                 1 for r in rows if not any(f["use"] not in (modelcheck.PLAIN, modelcheck.UNREAD) for f in r["fields"])
             ),
+        }
+
+    async def thinking_test(request: Request, upstream_id: int, model: str) -> dict | None:
+        """A live test of ``model``'s thinking levels on an upstream (app/levelcheck.py): its requests go through the
+        normal pipeline to that upstream only, as they are, as QueueRouter's own ("model check" on the Requests
+        page). None if the upstream or the model isn't there."""
+        target = snapshot.upstreams.get(upstream_id)
+        entry = next((m for m in catalogs.models(upstream_id, raw=True) if m["id"] == model), None)
+        if target is None or entry is None:
+            return None
+        upstream = target.upstream
+        style = thinking_mod.style_of(upstream.base_url, entry, upstream.preset, upstream.thinking_style)
+        style = "claude" if claude.native(upstream) else style
+        probes = levelcheck.plan(f"{model}@{upstream.name}", style)
+        if not probes:
+            return {"upstream": upstream, "model": model, "reason": levelcheck.UNTESTABLE[style], "results": []}
+        asker = ClientKey("model check", "", "low")
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "raw_path": b"/v1/chat/completions",
+            "query_string": b"",
+            "headers": [],
+            "client": (client_ip(request, bootstrap.trusted_proxies), 0),
+            "server": None,
+            "scheme": "http",
+            "root_path": "",
+            "http_version": "1.1",
+        }
+        headers = {
+            "content-type": "application/json",
+            "x-queuerouter-role": "thinking test",
+            "x-queuerouter-tags": "check",
+        }
+
+        async def ask(probe: levelcheck.Probe) -> levelcheck.Result:
+            try:
+                response = await serve(
+                    Request(scope, _never_disconnects),
+                    asker,
+                    "chat/completions",
+                    json.dumps(probe.body).encode(),
+                    headers,
+                    "",
+                    allow_defer=False,
+                    allow_council=False,
+                    internal=True,
+                    raw=True,
+                )
+            except Exception as exc:  # one probe failing isn't the test failing
+                return levelcheck.Result(probe, 502, f"{type(exc).__name__}: {exc}"[:300])
+            if isinstance(response, StreamingResponse):
+                return levelcheck.Result(probe, 502, "a streamed answer")
+            return levelcheck.read(probe, response.status_code, bytes(response.body))
+
+        results = list(await asyncio.gather(*(ask(probe) for probe in probes)))
+        return {
+            "upstream": upstream,
+            "model": model,
+            "reason": "",
+            "results": results,
+            "found": levelcheck.verdict(results, style),
         }
 
     async def client_opencode_config(request: Request, client_name: str) -> dict | None:
@@ -1899,6 +1965,7 @@ def create_app(
             upstream_models,
             model_choices,
             model_check,
+            thinking_test,
             scores,
             refresh_scores,
             ranking_table,
@@ -2045,9 +2112,9 @@ def create_app(
                 sent = None
             if not isinstance(sent, dict):  # e.g. OpenAI's multipart edits: Qwen takes the images as links
                 raise media_mod.Unsupported("send this request to this provider as JSON (images and audio as links)")
-        if body and (
-            native or own or target.upstream.params or thinking or images or fast
-        ):  # this provider's own rules (e.g. fields it rejects)
+        if (
+            body and not adm.raw and (native or own or target.upstream.params or thinking or images or fast)
+        ):  # this provider's own rules (e.g. fields it rejects); not for a request sent as it is (a level test)
             try:
                 payload = json.loads(body)
             except ValueError:
@@ -5406,6 +5473,7 @@ def create_app(
         parent: str | None = None,
         place: list | None = None,
         edited: frozenset[int] = frozenset(),
+        raw: bool = False,
     ) -> Response:
         """Everything after authentication: policies, aliases/fallbacks, queueing, forwarding.
         Used by the API and by the admin Playground (which passes its own clean ``headers``).
@@ -5810,6 +5878,7 @@ def create_app(
             check=check,
             hop=hop,
             forward=forward,
+            raw=raw,
         )
         if rlog.fields["stream"]:
             return StreamingResponse(

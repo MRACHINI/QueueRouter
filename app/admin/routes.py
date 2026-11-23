@@ -467,6 +467,7 @@ class AdminContext:
     upstream_models: Callable[[int], Awaitable[list[str] | None]]
     model_choices: Callable[[], list[dict]]
     model_check: Callable[[int], Awaitable[dict | None]]
+    thinking_test: Callable[[Request, int, str], Awaitable[dict | None]]
     scores: Scores
     refresh_scores: Callable[[], Awaitable[bool]]
     ranking_table: Callable[[], dict]
@@ -1455,6 +1456,17 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
         if check is None:
             return back("/admin/upstreams", error="invalid")
         return page(request, "upstream_check.html", session, style_notes=STYLE_NOTES, **check)
+
+    @app.post("/admin/upstreams/{upstream_id}/test-thinking")
+    async def upstream_test_thinking(upstream_id: int, request: Request):
+        """A live test of one model's thinking levels there: real requests (a dozen at most), so it's asked for."""
+        session, form = await require_post(request, "admin")
+        model = str(form.get("model", "")).strip()
+        found = await ctx.thinking_test(request, upstream_id, model) if model else None
+        if found is None:
+            return back(f"/admin/upstreams/{upstream_id}/check", error="invalid")
+        store.audit(session.user.username, "upstream.test_thinking", str(upstream_id), {"model": model})
+        return page(request, "upstream_test.html", session, thinking_choices=THINKING_CHOICES, **found)
 
     @app.post("/admin/upstreams/{upstream_id}/models")
     async def upstream_models_save(upstream_id: int, request: Request):

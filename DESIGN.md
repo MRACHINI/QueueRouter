@@ -2415,6 +2415,22 @@ getting only the levels its own list states, sent as they are: each upstream now
 (migration 57, `upstreams.thinking_style`; thinking.CHOICES: reasoning_effort as it is, reasoning.effort, the chat
 template's switch, not sent), which `style_of` takes first; chosen by hand, the reference's levels count there too.
 
+v0.89.0: the third part: a live test of a model's thinking levels (app/levelcheck.py; "Test thinking levels" on each
+chat model of Check models). What a model takes was read from lists or found by hand with PowerShell (Qwen,
+Synthetic). The test asks one small question with no level and once per level, each as the upstream is asked
+(`thinking.translate`: every level opencode can send, or the provider's own set), and for an API QueueRouter doesn't
+know every level as `reasoning_effort` plus off and high as `reasoning.effort` and as the chat template's switch: 12
+requests at most. They go through the normal pipeline to that upstream only, as QueueRouter's own (client "model
+check", role "thinking test": on the Requests page, counted as usage), and as they are: `Admission.raw` (serve's
+`raw`) skips the provider's rules and the fitting and translating of a level, which would turn "max" into a level
+already known. The page shows per level what was sent, answered / refused with the provider's words / failed, and
+the thinking that came back (characters, and tokens where its usage counts them), then what that means: the levels
+it takes, whether "none" turns thinking off (no thinking there, thinking elsewhere; accepted but still thinking:
+left out), for an unknown API the way it honours (the one where off worked). It's evidence, not proof (one answer per
+level; an accepted level may be ignored), so nothing is applied: the levels found are a form to edit and save as the
+model's own (the Models page's), and the way is named to choose on the Upstreams page. Not for an Anthropic-preset
+upstream (its list states the levels) or one levels aren't sent to.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

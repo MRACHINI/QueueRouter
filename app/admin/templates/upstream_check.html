@@ -8,7 +8,8 @@ the field as, next to what QueueRouter uses for the model and where that comes f
 <span class="badge high">not read</span> is one QueueRouter doesn't use: if it says something that matters (a context
 under another name, thinking levels), fill it in by hand — sizes, thinking levels and prices on the
 <a href="/admin/models#contexts">Models page</a>, how a level is sent on the
-<a href="/admin/upstreams">Upstreams page</a>. Nothing here sends a request to a model.</p>
+<a href="/admin/upstreams">Upstreams page</a>. Opening this page sends no request to a model; only a model's
+<strong>Test thinking levels</strong> button does, to find out what the list doesn't say.</p>
 
 {% if not listed %}
 <p class="notice err">{{ upstream.name }}'s model list couldn't be loaded right now. Check the upstream (Test on the
@@ -60,6 +61,15 @@ owns it): everything for them comes from the reference lists or from you.{% endi
       </tbody>
     </table>
     </div>
+    {% if r.testable %}
+    <form method="post" action="/admin/upstreams/{{ upstream.id }}/test-thinking" class="row wrap">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="model" value="{{ r.id }}">
+      <button type="submit" class="secondary">Test thinking levels</button>
+      <span class="small muted">Asks the model one small question per level (up to 12 real requests, a minute or
+      so) and shows which levels it takes, how much each thought, and whether off works.</span>
+    </form>
+    {% endif %}
   </details>
   {% else %}
   <p class="muted">No models listed.</p>

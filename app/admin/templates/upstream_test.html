@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Thinking levels of {{ model }} on {{ upstream.name }}{% endblock %}
+{% block content %}
+<p class="small"><a href="/admin/upstreams/{{ upstream.id }}/check">← Check models of {{ upstream.name }}</a></p>
+<h1>Thinking levels of <span class="mono">{{ model }}</span> on {{ upstream.name }}</h1>
+{% if reason %}
+<p class="notice">{{ reason }}</p>
+{% else %}
+<p class="muted">The model was asked one small question once with no level and once per level, each sent as shown.
+The requests are on the <a href="/admin/requests">Requests page</a> (client "model check") and count as usage. One
+answer per level is evidence, not proof: how much a model thinks varies from answer to answer.</p>
+
+<div class="card">
+  {% for note in found.notes %}<p>{{ note }}</p>{% endfor %}
+  {% if found.levels %}
+  <form method="post" action="/admin/model-thinking" class="row wrap">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="upstream_id" value="{{ upstream.id }}">
+    <input type="hidden" name="model" value="{{ model }}">
+    <label class="grow">Save as this model's levels on {{ upstream.name }}
+      <input name="levels" value="{{ found.levels }}" aria-label="Levels to save"></label>
+    <button type="submit">Save levels</button>
+  </form>
+  <p class="small muted">Edit the list first if the amounts below say a level changes nothing. Saved levels show under
+  "Yours" on the <a href="/admin/models#thinking">Models page</a>, where you can change or clear them.</p>
+  {% endif %}
+  {% if found.way %}
+  <p class="small">To send levels this way, set <strong>Thinking levels are sent</strong> to
+  "as {{ thinking_choices[found.way] }}" for {{ upstream.name }} on the <a href="/admin/upstreams">Upstreams page</a>.</p>
+  {% endif %}
+</div>
+
+<div class="table-wrap">
+<table class="cards dense">
+  <thead><tr><th>Level</th><th>Sent</th><th>Answer</th><th class="num">Thinking (characters)</th><th class="num">Thinking (tokens)</th><th class="num">Output tokens</th></tr></thead>
+  <tbody>
+  {% for r in results %}
+  <tr>
+    <td data-label="Level">{% if r.probe.level %}{{ r.probe.level }}{% else %}<span class="muted">no level</span>{% endif %}</td>
+    <td data-label="Sent" class="mono small wrap-any">{{ r.probe.sent }}</td>
+    <td data-label="Answer">{% if r.accepted %}answered{% elif r.refused %}<span class="badge high">refused</span>
+      <span class="small">{{ r.error }}</span>{% else %}<span class="badge">failed {{ r.status }}</span>
+      <span class="small">{{ r.error }}</span>{% endif %}</td>
+    <td data-label="Thinking (characters)" class="num">{% if r.accepted %}{{ "{:,}".format(r.thinking_chars) }}{% else %}—{% endif %}</td>
+    <td data-label="Thinking (tokens)" class="num">{% if r.thinking_tokens is not none %}{{ "{:,}".format(r.thinking_tokens) }}{% else %}—{% endif %}</td>
+    <td data-label="Output tokens" class="num">{% if r.output_tokens is not none %}{{ "{:,}".format(r.output_tokens) }}{% else %}—{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

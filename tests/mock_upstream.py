@@ -333,8 +333,16 @@ def create_mock(limit: int = 2) -> FastAPI:
         state["last_auth"] = request.headers.get("authorization")
         state["last_headers"] = {k.lower(): v for k, v in request.headers.items()}
         body = json.loads(raw)
+        if "bodies" in state:  # a test keeping every request (state["bodies"] = [])
+            state["bodies"].append(raw)
         if rejected := over_limit():
             return rejected
+        # A thinking model set by a test: state["thinkers"][model] = {"way": how it's asked ("openai":
+        # reasoning_effort, "openrouter": reasoning.effort, "vllm": the chat template's switch), "levels": the ones
+        # it takes}. A level asked another way is ignored (it thinks as it does by default), one it doesn't take is
+        # refused, "none" gives no thinking, a higher level more.
+        if spec := (state.get("thinkers") or {}).get(body.get("model")):
+            return _thinker(body, spec)
         # Context limits set by a test: state["context_limits"][model] = (tokens, style) rejects longer
         # prompts (about 4 characters per token) the way that provider words it.
         limit, style = (state.get("context_limits") or {}).get(body.get("model"), (None, None))
@@ -622,6 +630,39 @@ def create_mock(limit: int = 2) -> FastAPI:
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     return app
+
+
+_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _thinker(body: dict, spec: dict):
+    """A thinking model's answer (state["thinkers"]): how much it thought depends on the level asked its way."""
+    switch = body.get("chat_template_kwargs") if isinstance(body.get("chat_template_kwargs"), dict) else None
+    router = body.get("reasoning") if isinstance(body.get("reasoning"), dict) else None
+    if switch is not None:
+        way, level = "vllm", body.get("reasoning_effort", "high") if switch.get("enable_thinking") else "none"
+    elif router is not None:
+        way, level = "openrouter", router.get("effort")
+    elif "reasoning_effort" in body:
+        way, level = "openai", body["reasoning_effort"]
+    else:
+        way, level = "", None
+    if way != spec["way"]:
+        level = "high"  # not asked its way: as it thinks by default
+    elif level not in spec["levels"]:
+        message = f"reasoning effort must be one of {', '.join(spec['levels'])}"
+        return JSONResponse({"error": {"message": message, "type": "invalid_request_error"}}, status_code=400)
+    thought = "hm " * (10 * _LEVELS.index(level))
+    message = {"role": "assistant", "content": "23 sheep."}
+    if thought:
+        message["reasoning_content"] = thought
+    usage = {
+        "prompt_tokens": 40,
+        "completion_tokens": 4 + len(thought) // 3,
+        "completion_tokens_details": {"reasoning_tokens": len(thought) // 3},
+    }
+    choices = [{"index": 0, "message": message, "finish_reason": "stop"}]
+    return {"id": "x", "object": "chat.completion", "model": body.get("model"), "choices": choices, "usage": usage}
 
 
 def _claude_error(status: int, message: str, headers: dict | None = None) -> JSONResponse:
