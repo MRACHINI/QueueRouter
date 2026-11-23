@@ -852,6 +852,11 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE upstreams ADD COLUMN extra_models TEXT NOT NULL DEFAULT '';
     """,
+    # 57: how a thinking level is sent to an upstream, chosen by hand (thinking.CHOICES; '': by its address or
+    # provider)
+    """
+    ALTER TABLE upstreams ADD COLUMN thinking_style TEXT NOT NULL DEFAULT '';
+    """,
 ]
 CHECKERS_CONVERTED = "checkers_converted"  # meta: each alias's checker model became a tagger (_convert_checkers)
 CHECKER_TAGS = (  # what a converted checker gives: exactly one of these
@@ -1002,6 +1007,7 @@ class Upstream:
     ua_template: str = ""
     model_filter: str = ""  # which models it offers (see Catalogs.filters); "" = all
     extra_models: str = ""  # models it serves that its list leaves out, comma-separated (Catalogs.extras)
+    thinking_style: str = ""  # how a thinking level is sent there when chosen by hand (thinking.CHOICES)
 
 
 @dataclass(frozen=True)
@@ -1526,6 +1532,7 @@ class Store:
                 r["ua_template"] or "",
                 r["model_filter"] or "",
                 r["extra_models"] or "",
+                r["thinking_style"] or "",
             )
             for r in self.query("SELECT * FROM upstreams ORDER BY id")
         ]
@@ -1620,6 +1627,7 @@ class Store:
             "name",
             "model_filter",
             "extra_models",
+            "thinking_style",
             "preset",
             "base_url",
             "api_key_enc",

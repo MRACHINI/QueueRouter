@@ -2403,6 +2403,18 @@ video `driving_audio`. Qwen's examples take media only as public links, so a dat
 made media) and sent as its /media link, which Qwen fetches; through /v1/videos and the MCP tool alike. The MCP
 `generate_video` tool gains `last_frame`, `reference_videos`, `audio` (e.g. text_to_speech's link) and `sound`.
 
+v0.88.0: checking a provider's models, the first two of three parts the user asked for (the third, a live test of
+thinking levels, is next). What a model list says was only visible through what QueueRouter made of it, so a field
+under a name it doesn't know (a context, levels) went unseen, and a list that says nothing (Qwen Cloud's) looked the
+same as one not read. "Check models" (Upstreams page, `/admin/upstreams/{id}/check`, app/modelcheck.py) lists each
+model's entry field by field, opened one level, with what the field is read as (`_USES`, in step with the readers by
+a test), `not read` marked, next to what QueueRouter uses for the model and where it comes from (context, longest
+answer, thinking levels, reads images, what it makes, price), and how a level is sent there in words. It sends no
+request to a model. How a level is sent was decided by the upstream's address or provider only, an unknown API
+getting only the levels its own list states, sent as they are: each upstream now has "Thinking levels are sent"
+(migration 57, `upstreams.thinking_style`; thinking.CHOICES: reasoning_effort as it is, reasoning.effort, the chat
+template's switch, not sent), which `style_of` takes first; chosen by hand, the reference's levels count there too.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

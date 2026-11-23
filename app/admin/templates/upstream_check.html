@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Check models of {{ upstream.name }}{% endblock %}
+{% block content %}
+<p class="small"><a href="/admin/upstreams">← Upstreams</a></p>
+<h1>What {{ upstream.name }} says about its models</h1>
+<p class="muted">Each model as {{ upstream.name }}'s model list gives it, field by field, with what QueueRouter reads
+the field as, next to what QueueRouter uses for the model and where that comes from. A field marked
+<span class="badge high">not read</span> is one QueueRouter doesn't use: if it says something that matters (a context
+under another name, thinking levels), fill it in by hand — sizes, thinking levels and prices on the
+<a href="/admin/models#contexts">Models page</a>, how a level is sent on the
+<a href="/admin/upstreams">Upstreams page</a>. Nothing here sends a request to a model.</p>
+
+{% if not listed %}
+<p class="notice err">{{ upstream.name }}'s model list couldn't be loaded right now. Check the upstream (Test on the
+Upstreams page) and reload this page.</p>
+{% else %}
+<p class="small">A thinking level is sent to {{ upstream.name }}
+{% for s in styles %}<strong>{{ style_notes[s] }}</strong>{% if not loop.last %}; or {% endif %}{% endfor %}
+({% if upstream.thinking_style %}chosen on the Upstreams page{% else %}decided by its address or provider{% endif %}).
+{% if bare %}{{ bare }} of {{ rows | length }} models are listed with nothing QueueRouter can use (only an id and who
+owns it): everything for them comes from the reference lists or from you.{% endif %}</p>
+<div data-model-picker>
+  <div class="row wrap">
+    <input type="search" placeholder="Filter models…" aria-label="Filter models" data-picker-search class="grow">
+    <span class="muted small">{{ rows | length }} models</span>
+  </div>
+  {% for r in rows %}
+  <details class="card" data-picker-item="{{ (r.id ~ ' ' ~ r.label) | lower }}">
+    <summary><strong class="mono">{{ r.id }}</strong>{% if r.label != r.id %} <span class="muted">({{ r.label }})</span>{% endif %}
+      {% if not r.offered %}<span class="badge low">hidden</span>{% endif %}
+      {% if r.added %}<span class="badge">added by hand</span>{% endif %}
+      {% if r.unread %}<span class="badge high">{{ r.unread | length }} not read</span>{% endif %}
+      {% for what, value, source in r.uses if not value and what in ("Context", "Thinking levels") %}<span class="badge">no {{ what | lower }}</span>{% endfor %}
+    </summary>
+    <div class="table-wrap">
+    <table class="cards dense">
+      <thead><tr><th>QueueRouter uses</th><th>Value</th><th>From</th></tr></thead>
+      <tbody>
+      {% for what, value, source in r.uses %}
+      <tr>
+        <td data-label="QueueRouter uses">{{ what }}</td>
+        <td data-label="Value">{% if value %}{{ value }}{% else %}<span class="muted">unknown</span>{% endif %}</td>
+        <td data-label="From" class="small muted">{{ source }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <div class="table-wrap">
+    <table class="cards dense">
+      <thead><tr><th>Its list says</th><th>Value</th><th>Read as</th></tr></thead>
+      <tbody>
+      {% for f in r.fields %}
+      <tr>
+        <td data-label="Its list says" class="mono small">{{ f.path }}</td>
+        <td data-label="Value" class="mono small wrap-any">{{ f.value }}</td>
+        <td data-label="Read as" class="small">{% if f.use == "" %}<span class="badge high">not read</span>{% elif f.use == "-" %}<span class="muted">nothing to read</span>{% else %}{{ f.use }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </details>
+  {% else %}
+  <p class="muted">No models listed.</p>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

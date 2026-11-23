@@ -69,7 +69,7 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
       {% elif i.state == "closed" %}<span class="badge ok">healthy</span>
       {% else %}<span class="badge high">{{ i.state }}</span>{% endif %}
       <div class="small muted">{{ i.active or 0 }} active ·
-        {% if i.catalog_models is not none %}<a href="/admin/upstreams/{{ u.id }}/models" title="Choose which models it offers">{% if i.catalog_offered < i.catalog_models %}{{ i.catalog_offered }} of {{ i.catalog_models }} models offered{% else %}{{ i.catalog_models }} models{% endif %}</a>{% else %}<a href="/admin/upstreams/{{ u.id }}/models">models unknown</a>{% endif %}</div>
+        {% if i.catalog_models is not none %}<a href="/admin/upstreams/{{ u.id }}/models" title="Choose which models it offers">{% if i.catalog_offered < i.catalog_models %}{{ i.catalog_offered }} of {{ i.catalog_models }} models offered{% else %}{{ i.catalog_models }} models{% endif %}</a> · <a href="/admin/upstreams/{{ u.id }}/check" title="What its model list says about each model, and what QueueRouter reads from it">check</a>{% else %}<a href="/admin/upstreams/{{ u.id }}/models">models unknown</a>{% endif %}</div>
       {% if i.last_error %}<div class="small muted">last error: {{ i.last_error }}</div>{% endif %}
       {% if i.catalog_error %}<div class="small muted">model list: {{ i.catalog_error }}</div>{% endif %}
     </td>
@@ -100,6 +100,15 @@ Load balancing: <code>{{ strategy }}</code> (change it in <a href="/admin/settin
         <label class="span-all small">Extra models <small class="muted">ones it serves that its model list leaves out,
           comma-separated (e.g. Qwen Cloud's happyhorse-1.1-t2v): offered like the listed ones</small>
           <input name="extra_models" value="{{ u.extra_models }}" placeholder="model-id, another-model-id" aria-label="Extra models"></label>
+        <label class="span-all small">Thinking levels are sent <small class="muted">Automatic: by its address or provider
+          (an unknown one gets only the levels its own list states). <a href="/admin/upstreams/{{ u.id }}/check">Check
+          models</a> shows what its list says and what QueueRouter reads from it.</small>
+          <select name="thinking_style">
+            <option value="" {% if not u.thinking_style %}selected{% endif %}>automatically</option>
+            {% for key, label in thinking_choices.items() %}
+            <option value="{{ key }}" {% if u.thinking_style == key %}selected{% endif %}>as {{ label }}</option>
+            {% endfor %}
+          </select></label>
         <button type="submit" class="secondary">Save</button>
       </form>
     </td>

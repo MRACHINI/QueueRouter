@@ -123,6 +123,13 @@ def nearest(offered, wanted) -> str | None:
     return below[-1] if below else known[0] if known else None
 
 
+# How a thinking level is sent to an upstream, when chosen by hand (Upstreams page): what the choice is called
+CHOICES = {
+    "openai": "reasoning_effort, as it is (OpenAI style)",
+    "openrouter": "reasoning.effort (OpenRouter style)",
+    "vllm": "on / off switch in the chat template, with low / medium / high (vLLM, llama.cpp)",
+    "none": "not sent (the field is removed, no levels offered)",
+}
 PRESET_STYLES = {  # an upstream's provider (app/presets.py), for an address that doesn't say (a proxy in between)
     "openrouter": "openrouter",
     "arliai": "fixed",
@@ -135,10 +142,12 @@ PRESET_STYLES = {  # an upstream's provider (app/presets.py), for an address tha
 }
 
 
-def style_of(base_url: str, entry: dict | None, preset: str | None = None) -> str:
+def style_of(base_url: str, entry: dict | None, preset: str | None = None, chosen: str = "") -> str:
     """How an upstream is asked for a level: openrouter | vllm | openai | refuseless | synthetic | none (ignored: no
-    levels offered, the field is dropped) | fixed (no levels offered, requests passed on as they are) | unknown. By
-    its address, else by its provider (``preset``)."""
+    levels offered, the field is dropped) | fixed (no levels offered, requests passed on as they are) | unknown. As
+    ``chosen`` for it (Upstreams page: one of CHOICES), else by its address, else by its provider (``preset``)."""
+    if chosen in CHOICES:
+        return chosen
     url = (base_url or "").lower()
     if "openrouter.ai" in url:
         return "openrouter"

@@ -62,6 +62,7 @@ from ..council import MIN_MEMBERS as COUNCIL_MIN
 from ..council import MODES as COUNCIL_MODES
 from ..council import WHEN as COUNCIL_WHEN
 from ..fallback import DEFAULT_TRIGGERS, TRIGGERS, loop_of
+from ..modelcheck import STYLE_NOTES
 from ..names import EVERY, ModelNames
 from ..opencode import plugin_install_commands
 from ..params import parse_rules
@@ -84,6 +85,7 @@ from ..slots import STRATEGIES
 from ..state import MODES
 from ..store import ROLES, Store
 from ..taggers import TaggerError
+from ..thinking import CHOICES as THINKING_CHOICES
 from ..thinking import EFFORTS as THINKING_EFFORTS
 from ..upstream import UA_MODES
 from ..websearch import PROVIDERS as SEARCH_PROVIDERS
@@ -464,6 +466,7 @@ class AdminContext:
     context_table: Callable[[], list[dict]]
     upstream_models: Callable[[int], Awaitable[list[str] | None]]
     model_choices: Callable[[], list[dict]]
+    model_check: Callable[[int], Awaitable[dict | None]]
     scores: Scores
     refresh_scores: Callable[[], Awaitable[bool]]
     ranking_table: Callable[[], dict]
@@ -1349,6 +1352,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             plans=all_plans(),
             test=test,
             strategy=store.get_tunables().get("lb_strategy", "least-busy"),
+            thinking_choices=THINKING_CHOICES,
         )
 
     def int_field(form: dict, name: str, low: int, high: int, default: int | None = None) -> int | None:
@@ -1442,6 +1446,15 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             offer_new=offer_new,
             offered=sum(1 for r in rows if r["offered"]),
         )
+
+    @app.get("/admin/upstreams/{upstream_id}/check")
+    async def upstream_check_page(upstream_id: int, request: Request):
+        """What the upstream's model list says about each model, and what QueueRouter reads from it."""
+        session = require(request, "admin")
+        check = await ctx.model_check(upstream_id)
+        if check is None:
+            return back("/admin/upstreams", error="invalid")
+        return page(request, "upstream_check.html", session, style_notes=STYLE_NOTES, **check)
 
     @app.post("/admin/upstreams/{upstream_id}/models")
     async def upstream_models_save(upstream_id: int, request: Request):
@@ -1538,6 +1551,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
                 "max_retries": _opt(form, "max_retries", int, 0),
                 **_ua_fields(form),
                 "extra_models": _extra_models(form),
+                "thinking_style": _thinking_style(form),
             }
             base_url = str(form.get("base_url", "")).strip().rstrip("/")
             if base_url:
@@ -2830,6 +2844,14 @@ def _pretty(text: str) -> str:
         return json.dumps(json.loads(text), indent=2, ensure_ascii=False)
     except ValueError:
         return text
+
+
+def _thinking_style(form: dict) -> str:
+    """How a thinking level is sent to an upstream: one of thinking.CHOICES, or "" (by its address or provider)."""
+    style = str(form.get("thinking_style", "")).strip()
+    if style and style not in THINKING_CHOICES:
+        raise ValueError("thinking_style")
+    return style
 
 
 def _extra_models(form: dict) -> str:

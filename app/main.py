@@ -42,6 +42,7 @@ from . import (
     claude,
     content_log,
     metrics,
+    modelcheck,
     ranking,
     responses_api,
     structured,
@@ -1084,6 +1085,7 @@ def create_app(
     app.state.circuits = circuits
     app.state.prices = prices
     app.state.scores = scores
+    app.state.reference = reference  # OpenRouter's list: thinking levels by name (tests set it)
     app.state.alerts = alerts
     app.state.restart = lambda: os.kill(os.getpid(), signal.SIGTERM)  # Docker's restart policy starts us again
 
@@ -1703,7 +1705,8 @@ def create_app(
         for target, entry in pairs:
             native = claude.native(target.upstream)  # Claude's own levels, which its model list states
             upstream = target.upstream
-            style = "claude" if native else thinking_mod.style_of(upstream.base_url, entry, upstream.preset)
+            chosen = upstream.thinking_style
+            style = "claude" if native else thinking_mod.style_of(upstream.base_url, entry, upstream.preset, chosen)
             if style in ("none", "fixed"):  # no levels to offer there
                 continue
             if native:
@@ -1718,7 +1721,8 @@ def create_app(
             if found is None or found == ("none", "high"):  # nothing, or only on / off: the reference may know more
                 ref = reference.thinking(snapshot.names.name(model_id, target.upstream.name))
                 known_api = ("openai", "openrouter", "claude", "synthetic")  # its levels are those of the model
-                if ref is not None and style != "refuseless" and (found is not None or style in known_api):
+                known = style in known_api or chosen == style  # or it was chosen by hand for this upstream
+                if ref is not None and style != "refuseless" and (found is not None or known):
                     found, source = ref, "OpenRouter (reference)"
             if found is None or (style == "unknown" and source != target.upstream.name):
                 continue  # an unknown API: only levels its own list states
@@ -1784,6 +1788,79 @@ def create_app(
             "error": reference.error,
         }
 
+    async def model_check(upstream_id: int) -> dict | None:
+        """What an upstream's model list says about each model, field by field with what QueueRouter reads it as
+        (app/modelcheck.py), and what QueueRouter uses for the model with where that comes from: the Upstreams
+        page's "Check models". None if the upstream is gone; "listed" False when its list can't be fetched."""
+        target = snapshot.upstreams.get(upstream_id)
+        if target is None:
+            return None
+        if catalogs.stale(target.id, cfg().models_cache_s):
+            await refresh_catalog(target)
+        upstream = target.upstream
+        native = claude.native(upstream)
+        manual = await asyncio.to_thread(store.list_model_thinking)
+        overrides = await asyncio.to_thread(store.list_model_prices)
+        rows = []
+        for entry in catalogs.models(target.id, raw=True):
+            model = entry["id"]
+            read = modelcheck.fields(entry)
+            style = (
+                "claude"
+                if native
+                else thinking_mod.style_of(upstream.base_url, entry, upstream.preset, upstream.thinking_style)
+            )
+            levels = thinking_for(model, [(target, entry)], manual)
+            context, context_from = context_source(model, target, entry)
+            output, output_from = output_source(model, target, entry)
+            said = thinking_mod.takes_images(entry)
+            images = said if said is not None else reference.images(snapshot.names.name(model, upstream.name))
+            kind = media_mod.kind(model, entry) or media_mod.audio_kind(model)
+            price = price_on(model, target, entry, overrides)
+            if kind:
+                cost, cost_from = media_mod.price_text(model, kind), "QueueRouter's table (the provider's list prices)"
+            elif price is None:
+                cost, cost_from = "", ""
+            elif price.source == "plan":
+                cost, cost_from = "nothing extra", "the pool's monthly plan"
+            else:
+                cost = f"${price.input:g} in · ${price.cached_input:g} cached · ${price.output:g} out, per million"
+                cost_from = price.source
+            rows.append(
+                {
+                    "id": model,
+                    "label": snapshot.names.label(model, upstream.name),
+                    "offered": catalogs.offered(target.id, model),
+                    "added": model in catalogs.extras.get(target.id, ()),
+                    "fields": read,
+                    "unread": modelcheck.unread(read),
+                    "uses": [
+                        ("Context", f"{context:,}" if context else "", context_from),
+                        ("Longest answer", f"{output:,}" if output else "", output_from),
+                        ("Thinking levels", levels.summary if levels else "", levels.source if levels else ""),
+                        (
+                            "Reads images",
+                            {True: "yes", False: "no"}.get(images, ""),
+                            "" if images is None else "its list" if said is not None else "OpenRouter (reference)",
+                        ),
+                        ("Makes", kind or "text", "its list" if media_mod.kind("", entry) else "its name"),
+                        ("Price", cost, cost_from),
+                    ],
+                    "style": style,
+                }
+            )
+        rows.sort(key=lambda r: r["id"].lower())
+        styles = sorted({r["style"] for r in rows})
+        return {
+            "upstream": upstream,
+            "listed": catalogs.ids(target.id, raw=True) is not None,
+            "rows": rows,
+            "styles": styles,
+            "bare": sum(
+                1 for r in rows if not any(f["use"] not in (modelcheck.PLAIN, modelcheck.UNREAD) for f in r["fields"])
+            ),
+        }
+
     async def client_opencode_config(request: Request, client_name: str) -> dict | None:
         """The same config /v1/opencode-config gives that client (for the admin download)."""
         client = next((c for c in snapshot.clients.values() if c.name == client_name), None)
@@ -1821,6 +1898,7 @@ def create_app(
             context_table,
             upstream_models,
             model_choices,
+            model_check,
             scores,
             refresh_scores,
             ranking_table,
@@ -1989,7 +2067,8 @@ def create_app(
                     if native:
                         payload = claude.request(payload, entry)
                     else:
-                        style = thinking_mod.style_of(target.upstream.base_url, entry, target.upstream.preset)
+                        chosen = target.upstream.thinking_style
+                        style = thinking_mod.style_of(target.upstream.base_url, entry, target.upstream.preset, chosen)
                         thinking_mod.translate(payload, style)
                 model_id = payload.get("model")
                 if fast and isinstance(model_id, str) and model_id:  # Synthetic's fast mode, by the model's name
