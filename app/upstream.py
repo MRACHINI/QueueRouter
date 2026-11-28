@@ -116,6 +116,11 @@ def usage_from_body(body: bytes) -> tuple[int | None, int | None, int | None, in
         usage = json.loads(body).get("usage") or {}
     except (ValueError, AttributeError):
         return None, None, None, None
+    return usage_counts(usage)
+
+
+def usage_counts(usage) -> tuple[int | None, int | None, int | None, int | None]:
+    """The same four counts from the ``usage`` object itself."""
     if not isinstance(usage, dict):
         return None, None, None, None
     details = usage.get("prompt_tokens_details")

@@ -51,6 +51,7 @@ from . import (
     websearch,
 )
 from . import compaction as compaction_mod
+from . import costs as costs_mod
 from . import council as council_mod
 from . import cron as cron_mod
 from . import edits as edits_mod
@@ -354,6 +355,7 @@ class Admission:
     forward: Callable[[Hop, str, list], Awaitable[Response]] | None = None  # serves it there (see serve)
     fast: bool = False  # this step goes to Synthetic in fast mode (Step.fast)
     raw: bool = False  # sent as it is: no provider rules, no fitting or translating of a thinking level (a level test)
+    priced: bool = False  # an app's own chat request: its answer says what it cost (usage.cost, app/costs.py)
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
@@ -613,6 +615,9 @@ def create_app(
         nonlocal snapshot
         snapshot = load_snapshot(store)
         context_sizes.load(store.list_model_limits())
+        overrides = store.list_model_prices()  # a price set on the Models page: the next answer's cost uses it
+        price_overrides.clear()
+        price_overrides.update(overrides)
         apply_snapshot()
         edit_engine.forget()  # what prompt edits read and kept: from the database again
         log.info(json.dumps({"event": "config_reloaded", **summary()}))
@@ -715,6 +720,16 @@ def create_app(
         price = resolve(model, price_overrides, prices, upstream_id, name)
         costs = token_cost(price, prompt, completion, cached, written)
         return sum(costs) if costs else 0.0
+
+    def answer_cost(rlog: RequestLog, target: Target) -> costs_mod.CostOf:
+        """What an answer's tokens cost, for its ``usage.cost``: at the price apps are told for the model that
+        answered on the upstream that served it (price_on), so the figure is the one an app works out from the
+        prices in the model list. Nothing extra on a monthly plan; None for a model without a price."""
+        model = unfast(rlog.fields["target_model"] or rlog.fields["model"] or "")[0] or ""
+        model = snapshot.names.unpin(model)[0]
+        entry = next((m for m in catalogs.models(target.id, raw=True) if m["id"] == model), None)
+        price = price_on(model, target, entry, price_overrides)
+        return functools.partial(costs_mod.request_cost, price)
 
     mix_read: dict = {"at": None, "since": "", "mix": DEFAULT_MIX}
 
@@ -3243,17 +3258,32 @@ def create_app(
             "month": month_view(client),
         }
 
-    async def model_entries(client: ClientKey) -> list[dict] | JSONResponse:
+    async def model_entries(client: ClientKey, facts: dict[str, tuple] | None = None) -> list[dict] | JSONResponse:
         """Every offered model on every usable upstream (lists cached; doesn't use a slot), under its ID for apps,
         plus the aliases, limited to the client's allowed models. A model with a custom name gets QueueRouter's own
-        entry, so nothing of the provider's shows; the others keep the provider's. In opencode's order, for apps that
-        keep the list's: strongest first, equal scores cheapest first, then by name; aliases without a score last."""
+        entry, so nothing of the provider's shows; the others keep the provider's. Each says what it costs
+        (``pricing``, OpenRouter's form, app/costs.py): the price opencode is told. In opencode's order, for apps that
+        keep the list's: strongest first, equal scores cheapest first, then by name; aliases without a score last.
+        ``facts`` is filled with what /model/info says beyond an entry, by ID: (price, what it makes)."""
         targets = [t for t in snapshot.upstreams.values() if t.usable]
         if stale := [t for t in targets if catalogs.stale(t.id, cfg().models_cache_s) or catalogs.loading(t.id)]:
             await asyncio.gather(*(refresh_catalog(t) for t in stale))  # a first list on its way too, or it's missing
         ids = app_ids()
         allowed = set(client.policy.allowed_models or ())
         manual_thinking = await asyncio.to_thread(store.list_model_thinking)
+        overrides = await asyncio.to_thread(store.list_model_prices)
+        facts = {} if facts is None else facts
+
+        def costing(entry: dict, price: Price | None, real: str | None, raw: dict | None) -> dict:
+            """``entry`` with its price, noted with what the model makes for /model/info (``raw``: the provider's
+            own entry for the model ``real``)."""
+            made = (media_mod.kind(real, raw) or media_mod.audio_kind(real)) if real else None
+            facts[entry["id"]] = (price, made)
+            if price is None:
+                return entry
+            own = entry.get("pricing") if isinstance(entry.get("pricing"), dict) else {}
+            return {**entry, "pricing": {**own, **costs_mod.pricing(price)}}  # the provider's other prices stay
+
         merged: dict[str, dict] = {}
         inner: dict[str, str] = {}  # "model@upstream" or an alias's name -> the ID in the list
         everything: dict[str, dict] = {}  # hidden models too: an alias may point at one
@@ -3272,9 +3302,10 @@ def create_app(
                 levels = thinking_for(real, pair, manual_thinking)
                 if (target.id, real) in snapshot.names.custom:
                     named = own_entry(public, entry, levels, reads_images(real, pair))
-                    merged[public] = media_mod.marked(thinks(named, levels), real)
+                    shown = media_mod.marked(thinks(named, levels), real)
                 else:
-                    merged[public] = media_mod.marked(thinks({**entry, "id": public}, levels), real)  # images: oh-my-pi
+                    shown = media_mod.marked(thinks({**entry, "id": public}, levels), real)  # images: oh-my-pi
+                merged[public] = costing(shown, price_on(real, target, model, overrides), real, model)
                 inner[f"{real}@{upstream}"] = public
         if not merged and all(catalogs.ids(t.id) is None for t in targets):
             return error_response("no upstream returned a model list", 502, "upstream_error")
@@ -3284,10 +3315,12 @@ def create_app(
                 pairs = [(t, e) for t, e in offering.get(bare or "", []) if not pins or t.id in pins]
                 plain = alias.council == "off"  # a council's members and judge are asked as they are
                 levels = thinking_for(bare, pairs, manual_thinking) if plain and bare and pairs else None
-                merged[alias.name] = thinks(alias_entry(alias, everything.get(bare or "")), levels)
+                # a council makes several calls: no price rather than a low one (as for opencode)
+                price = model_price(bare, pairs, overrides) if plain and bare and pairs else None
+                shown = thinks(alias_entry(alias, everything.get(bare or "")), levels)
+                merged[alias.name] = costing(shown, price, bare, pairs[0][1] if pairs else None)
                 inner[alias.name] = alias.name
         scored = await asyncio.to_thread(store.list_model_scores)
-        overrides = await asyncio.to_thread(store.list_model_prices)
         order, why = strength_order(list(inner), scored, order_costs(inner, overrides, await current_mix()))
         listed = [merged[inner[name]] for name, _ in order if why[name]["source"] != "alias"]
         return listed + [merged[name] for name, _ in order if why[name]["source"] == "alias"]  # no score: last
@@ -3323,6 +3356,29 @@ def create_app(
         if found is None:
             return error_response(f"The model '{model_id}' does not exist", 404, "model_not_found")
         return found
+
+    @app.get("/model/info")
+    @app.get("/v1/model/info")
+    async def litellm_model_info(request: Request):
+        """The model list as LiteLLM's proxy gives it (app/costs.py), for apps that read prices and sizes there and
+        nowhere else: oh-my-pi (``discovery.type: litellm``), Roo Code's LiteLLM provider, Crush (``type: litellm``).
+        The same models as /v1/models for this key, under the IDs apps send."""
+        client, denied = authenticate(request)
+        if denied:
+            return denied
+        if unavailable := not_configured():
+            return unavailable
+        facts: dict[str, tuple] = {}
+        data = await model_entries(client, facts)
+        if isinstance(data, Response):
+            return data
+        rows = []
+        for entry in data:
+            price, made = facts.get(entry["id"], (None, None))
+            sizes = model_limits(entry, ())  # its output is a default when none is known: only a known one is said
+            context = sizes["context"] if sizes else None
+            rows.append(costs_mod.model_info(entry, price, context, listed_output(entry), made))
+        return {"data": rows}
 
     # -- video jobs (app/media.py): started by POST /v1/videos through the normal pipeline, followed here ---------
 
@@ -5879,6 +5935,8 @@ def create_app(
             hop=hop,
             forward=forward,
             raw=raw,
+            # not QueueRouter's own calls: a council passes a member's answer on, and its cost isn't that one call's
+            priced=not internal and not raw and path in ("chat/completions", "completions"),
         )
         if rlog.fields["stream"]:
             return StreamingResponse(
@@ -5945,6 +6003,8 @@ def create_app(
                         verdict = None
                         if status < 400 and cfg().structured_repair:
                             content, verdict = repair_structured(adm, content)
+                        if status < 400 and adm.priced:
+                            content = costs_mod.with_cost(content, answer_cost(rlog, event.target))
                         if status < 400:
                             prompt, completion, cached, written = usage_from_body(content)
                             rlog.fields.update(
@@ -6010,14 +6070,18 @@ def create_app(
         response = None
         sniffer = UsageSniffer()
         held_back = UsageChunkFilter() if adm.strip_usage else None
+        priced: costs_mod.CostWriter | None = None  # the usage an app asked for says what the answer cost
         captured = bytearray() if adm.log_request is not None else None
         end = AnswerEnd()  # the answer's end waits for the usage right behind it (app/upstream.py)
 
-        def to_app(chunk: bytes) -> bytes:
-            """What of ``chunk`` goes to the app: without QueueRouter's own usage chunk, if it asked for it. The
-            first of the answer that does is the request's time to first byte (an end held for its usage counts
-            when it goes)."""
+        def to_app(chunk: bytes, last: bool = False) -> bytes:
+            """What of ``chunk`` goes to the app: without QueueRouter's own usage chunk, if it asked for it, else
+            with the cost in the usage. The first of the answer that does is the request's time to first byte (an
+            end held for its usage counts when it goes). ``last``: nothing follows, so a line the cost waited for
+            the end of goes too."""
             chunk = held_back.feed(chunk) if held_back is not None and chunk else chunk
+            if priced is not None:
+                chunk = (priced.feed(chunk) if chunk else b"") + (priced.flush() if last else b"")
             if chunk and rlog.fields["ttft_ms"] is None:
                 rlog.fields["ttft_ms"] = round((time.monotonic() - rlog.started) * 1000)
             return chunk
@@ -6080,6 +6144,8 @@ def create_app(
                         # a provider can be silent for minutes (a long prompt, a model thinking in a way that isn't
                         # passed on): keep-alives between events keep apps and proxies from giving up on the stream
                         sse = response.headers.get("content-type", "").startswith("text/event-stream")
+                        if sse and adm.priced and held_back is None:
+                            priced = costs_mod.CostWriter(answer_cost(rlog, event.target))
                         between = True  # what the app got so far ends with a whole event
                         unfed = None  # an answer held back for its check was timed as it came: not again now
                         if (timed := getattr(response, "sniffer", None)) is not None:
@@ -6109,7 +6175,7 @@ def create_app(
                                         yield chunk
                                     if adm.expired():
                                         outcome, status = "timeout", 504
-                                        if rest := to_app(end.release()):
+                                        if rest := to_app(end.release(), True):
                                             yield rest
                                         yield MID_STREAM + sse_error(
                                             "request exceeded this key's total time limit", 504, "request_timeout"
@@ -6117,19 +6183,19 @@ def create_app(
                                         return
                         except httpx.HTTPError as exc:
                             status = 502
-                            if rest := to_app(end.release()):  # the end the provider sent goes before the error
+                            if rest := to_app(end.release(), True):  # the end the provider sent goes before the error
                                 yield rest
                             yield MID_STREAM + sse_error(f"upstream stream interrupted: {type(exc).__name__}", 502)
                             return
                         except TimeoutError:  # the stream stalled past the key's total time limit
                             outcome, status = "timeout", 504
-                            if rest := to_app(end.release()):
+                            if rest := to_app(end.release(), True):
                                 yield rest
                             yield MID_STREAM + sse_error(
                                 "request exceeded this key's total time limit", 504, "request_timeout"
                             )
                             return
-                        if rest := to_app(end.release()):  # a stream that ended while its end waited
+                        if rest := to_app(end.release(), True):  # a stream that ended while its end waited
                             yield rest
                         if held_back is not None and (rest := held_back.flush()):
                             yield rest

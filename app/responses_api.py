@@ -191,6 +191,8 @@ def usage_of(usage: dict | None) -> dict:
             "reasoning_tokens": (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
         },
         "total_tokens": prompt + completion,
+        # what the answer cost, where QueueRouter said so in the chat answer (app/costs.py): OpenRouter's field here too
+        **({"cost": usage["cost"]} if isinstance(usage.get("cost"), int | float) else {}),
     }
 
 

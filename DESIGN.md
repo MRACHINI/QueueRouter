@@ -2431,6 +2431,30 @@ level; an accepted level may be ignored), so nothing is applied: the levels foun
 model's own (the Models page's), and the way is named to choose on the Upstreams page. Not for an Anthropic-preset
 upstream (its list states the levels) or one levels aren't sent to.
 
+v0.90.0: what a request cost, said the ways apps read it (app/costs.py). Only opencode knew, through the plugin's
+price per model; oh-my-pi and the others showed $0. Reading each app's source (2026-11) showed no single way: most
+keep a price table of their own by model name, which a router's names don't match, and a router can reach them by
+three signals, each read by some. (1) `usage.cost` (USD) in a chat answer, OpenRouter's field: opencode takes it from
+any endpoint ahead of its table, Cline and Goose too, Open WebUI shows it. It is added to an app's own
+chat/completions and completions answers (whole: `with_cost`; streamed: `CostWriter` on the usage chunk the app
+asked for, line by line, the rest of the stream untouched; an app that didn't ask still gets no usage chunk), and
+/v1/responses passes it on. Not to QueueRouter's own calls (`Admission.priced`): a council passes a member's answer
+on, and its cost isn't that one call's (no price rather than a low one, as for opencode). A cost the provider states
+itself stays (OpenRouter's is what it charged). No `cost_details.upstream_inference_cost` (Kilo reads it): Roo's
+OpenRouter mode adds it to `cost`, which would double the figure. (2) `pricing` in each /v1/models entry, OpenRouter's
+form (USD per token as strings: prompt, completion, input_cache_read, input_cache_write; a provider's other prices
+stay): LibreChat, Roo's OpenRouter mode. (3) GET /model/info and /v1/model/info, LiteLLM's list (`model_name` = the
+ID apps send, `litellm_params.model`, `model_info` with mode, max_input_tokens, max_output_tokens, supports_vision,
+supports_reasoning, supported_openai_params and the per-token costs): oh-my-pi's `discovery.type: litellm` (it
+ignores `usage.cost` and /v1/models prices for a custom provider, on purpose), Roo's LiteLLM provider, Crush's
+`type: litellm`. Same key, same models and IDs as /v1/models; image, video and speech models carry LiteLLM's modes,
+which those apps leave out of their chat models. All three use one price, the one opencode is told (`price_on`):
+yours, else nothing on a monthly plan, else the provider's own, else the reference table; an alias the highest of
+its upstreams, a council none. So a plan's models report 0 (/model/info then states no price: apps read 0 as
+unknown), and the cost an app works out from the list is the one the answer reports. The Usage page keeps its own
+figure (list price also on a plan). Not done: a cost header (LiteLLM's `x-litellm-response-cost`: no app read it) and
+a lookup by generation id (none used it).
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

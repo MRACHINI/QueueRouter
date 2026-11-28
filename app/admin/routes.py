@@ -2027,6 +2027,7 @@ def mount_admin(app: FastAPI, ctx: AdminContext) -> None:
             )
         except ValueError:
             return back("/admin/models#pricing", error="invalid")
+        ctx.reload()  # the next answer's cost uses it (it was read again within a minute)
         return back("/admin/models#pricing", "saved")
 
     @app.post("/admin/price-mix")

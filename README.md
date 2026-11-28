@@ -472,8 +472,28 @@ its own highest level. The Requests page says when a level was lowered.
 opencode shows a session cost next to the context size, worked out from each model's price. Through the plugin
 QueueRouter gives it that price: yours (**Models → Reference prices**), else nothing extra on a pool with a monthly
 price (e.g. ArliAI), the upstream's own price (OpenRouter), or the models.dev match, the highest when several
-upstreams serve a model. Councils and summaries make calls opencode can't see, and it isn't told about Claude's cache
-writes, which it prices as plain input; the **Usage** page counts everything.
+upstreams serve a model. An opencode that reads a cost from the answer itself (2.x) takes that instead, see below:
+it is the price on the upstream that answered, with Claude's cache writes counted. Councils and summaries make calls
+opencode can't see; the **Usage** page counts everything.
+
+### Cost in other apps
+
+Apps find out what a request cost in different ways, so QueueRouter says it three ways, all with the same price as
+above:
+
+- **In each answer**: `usage.cost` (USD) on chat completions, also in the last streamed chunk when the app asks for
+  usage, and on `/v1/responses`. opencode, Cline and Goose show it with no setup; Open WebUI shows it in the
+  message's details.
+- **In the model list**: `pricing` on each `/v1/models` entry, in OpenRouter's form (USD per token). LibreChat reads
+  it for an endpoint named `openrouter`.
+- **As a LiteLLM proxy lists models**: `GET /model/info` (and `/v1/model/info`), with each model's sizes and
+  per-token prices. For apps that read prices nowhere else, set QueueRouter up as a LiteLLM provider: oh-my-pi
+  (`discovery: {type: litellm}` on the provider in `models.yml`), Roo Code (its LiteLLM provider), Crush
+  (`type: litellm`).
+
+A model on a monthly plan reports 0 unless you set a price for it yourself; a model with no known price reports
+nothing. A council's answer carries no cost (several calls made it). Apps with a price table of their own and
+nothing else (Claude Code, Codex, aider, Continue) can't be told.
 
 ### Model names
 
@@ -647,6 +667,7 @@ Traefik address doesn't.
 | `POST /v1/responses` | **OpenAI Responses API** (Agents SDK, newer clients); streaming, function tools, structured output, `previous_response_id` (kept encrypted 7 days; `store: false` keeps nothing) |
 | `GET /v1/models` | all upstreams' models under their IDs for apps (see [Model names](#model-names)) + aliases, filtered to the models of the client's group, strongest first (see [Models in strength order](#models-in-strength-order)) |
 | `GET /v1/models/{id}` | one model (aliases and `model@upstream` too); other `/v1/` GETs are refused unless listed in Settings → "GET paths passed to the provider" |
+| `GET /model/info`, `GET /v1/model/info` | the same models as a LiteLLM proxy lists them, with sizes and per-token prices (see [Cost in other apps](#cost-in-other-apps)) |
 | `GET /v1/queue` | queue depth, your client's queued/active, estimated wait |
 | `GET /v1/opencode-config` | generated opencode provider config for your key |
 | `GET /opencode/queuerouter.js` | opencode plugin (session/task tags, priorities, model list) |
