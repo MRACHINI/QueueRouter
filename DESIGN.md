@@ -2455,6 +2455,11 @@ unknown), and the cost an app works out from the list is the one the answer repo
 figure (list price also on a plan). Not done: a cost header (LiteLLM's `x-litellm-response-cost`: no app read it) and
 a lookup by generation id (none used it).
 
+v0.90.1: 0.90.0 with an image. CI's scan failed 0.90.0 (tests passed), so no image was published: the layer that
+applies Debian's security fixes (`apt-get upgrade`) came from the build cache, made before a fix was published,
+while a fresh build of the same commit scanned clean. CI now passes the day as the build argument `APT_REFRESH`,
+which is part of that layer, so it is built again each day and cached within one.
+
 ### Later (agreed, not scheduled)
 
 - **Separate embedding slots per limit pool** (done: v0.25.0). ArliAI (and others) count `/v1/embeddings` against its

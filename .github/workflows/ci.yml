@@ -43,6 +43,10 @@ jobs:
       - name: Lowercase image name
         run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
 
+      # the layer that applies Debian's security fixes is built again each day (see the Dockerfile)
+      - name: Day of the security fixes
+        run: echo "APT_REFRESH=$(date -u +%F)" >> "$GITHUB_ENV"
+
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -53,6 +57,7 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: queuerouter:scan
+          build-args: APT_REFRESH=${{ env.APT_REFRESH }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -94,5 +99,6 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: APT_REFRESH=${{ env.APT_REFRESH }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

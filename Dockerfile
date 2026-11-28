@@ -8,7 +8,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Debian's security fixes published since the base image was built (2026-11: zlib's CVE-2026-85091), so the
 # scan in CI (fixable HIGH and CRITICAL findings fail it) passes before the base image is rebuilt with them.
-RUN apt-get update \
+# CI passes the day as APT_REFRESH: it is part of this layer, so the build cache can't keep an upgrade made before
+# a fix was published (that failed the scan of 0.90.0, whose fresh build was clean).
+ARG APT_REFRESH=unset
+RUN echo "Debian security fixes as of ${APT_REFRESH}" \
+    && apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
